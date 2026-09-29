@@ -32,6 +32,8 @@ constexpr int kMinimumWindowWidth = 700;
 constexpr int kMinimumWindowHeight = 480;
 constexpr WPARAM kStatusTextLimit = 16u * 1024u * 1024u;
 constexpr size_t kInitialHistoryCapacity = 4096;
+constexpr size_t kInitialTextBufferCapacity = 8 * 1024;
+constexpr UINT kPollIntervalMs = 50;
 
 enum ControlId : int {
     IDC_GAME_PATH = 1001,
@@ -77,6 +79,12 @@ struct HistoryRecord {
     };
 };
 
+struct TextBuffer {
+    wchar_t* data = nullptr;
+    size_t length = 0;
+    size_t capacity = 0;
+};
+
 struct AppState {
     HINSTANCE instance = nullptr;
     HWND window = nullptr;
@@ -111,6 +119,7 @@ struct AppState {
     size_t historyCapacity = 0;
     bool historyCaptureDisabled = false;
     bool historyCaptureWarningShown = false;
+    bool rawUiBatchWarningShown = false;
 
     bool haveStateEvent = false;
     CapturedReflexEvent stateEvent{};
@@ -214,6 +223,104 @@ void FormatTimestamp(LONGLONG eventQpc, wchar_t* out, size_t outCount)
         static_cast<unsigned int>(localTime.wHour),
         static_cast<unsigned int>(localTime.wMinute),
         static_cast<unsigned int>(localTime.wSecond));
+}
+
+bool EnsureTextBufferCapacity(TextBuffer& buffer, size_t requiredChars)
+{
+    if (requiredChars <= buffer.capacity)
+        return true;
+
+    size_t newCapacity = buffer.capacity ? buffer.capacity : kInitialTextBufferCapacity;
+    while (newCapacity < requiredChars) {
+        if (newCapacity > static_cast<size_t>(-1) / 2)
+            return false;
+        newCapacity *= 2;
+    }
+
+    if (newCapacity > static_cast<size_t>(-1) / sizeof(wchar_t))
+        return false;
+
+    const SIZE_T bytes = static_cast<SIZE_T>(newCapacity * sizeof(wchar_t));
+    void* memory = buffer.data
+        ? HeapReAlloc(GetProcessHeap(), 0, buffer.data, bytes)
+        : HeapAlloc(GetProcessHeap(), 0, bytes);
+    if (!memory)
+        return false;
+
+    buffer.data = static_cast<wchar_t*>(memory);
+    buffer.capacity = newCapacity;
+    if (!buffer.length)
+        buffer.data[0] = 0;
+    return true;
+}
+
+void FreeTextBuffer(TextBuffer& buffer)
+{
+    if (buffer.data)
+        HeapFree(GetProcessHeap(), 0, buffer.data);
+    buffer = {};
+}
+
+bool AppendTextBufferCount(TextBuffer& buffer, const wchar_t* text, size_t count)
+{
+    if (!text || !count)
+        return true;
+    if (buffer.length > static_cast<size_t>(-1) - count - 1)
+        return false;
+
+    const size_t requiredChars = buffer.length + count + 1;
+    if (!EnsureTextBufferCapacity(buffer, requiredChars))
+        return false;
+
+    wmemcpy(buffer.data + buffer.length, text, count);
+    buffer.length += count;
+    buffer.data[buffer.length] = 0;
+    return true;
+}
+
+bool AppendTextBuffer(TextBuffer& buffer, const wchar_t* text)
+{
+    return !text || AppendTextBufferCount(buffer, text, wcslen(text));
+}
+
+bool AppendTextBufferLineAtQpc(TextBuffer& buffer, const wchar_t* text, LONGLONG eventQpc)
+{
+    if (!text)
+        return true;
+
+    const wchar_t* cursor = text;
+    for (;;) {
+        const wchar_t* newline = wcsstr(cursor, L"\r\n");
+        const size_t lineLength = newline ? static_cast<size_t>(newline - cursor) : wcslen(cursor);
+
+        wchar_t timestamp[32]{};
+        FormatTimestamp(eventQpc, timestamp, _countof(timestamp));
+        if (!AppendTextBuffer(buffer, timestamp) ||
+            !AppendTextBufferCount(buffer, cursor, lineLength) ||
+            !AppendTextBuffer(buffer, L"\r\n")) {
+            return false;
+        }
+
+        if (!newline)
+            break;
+        cursor = newline + 2;
+    }
+
+    return true;
+}
+
+void ReplaceStatusText(const wchar_t* text)
+{
+    if (!g_app.status)
+        return;
+
+    SendMessageW(g_app.status, WM_SETREDRAW, FALSE, 0);
+    SetWindowTextW(g_app.status, text ? text : L"");
+    SendMessageW(g_app.status, EM_SETSEL, static_cast<WPARAM>(-1), static_cast<LPARAM>(-1));
+    SendMessageW(g_app.status, WM_SETREDRAW, TRUE, 0);
+    SendMessageW(g_app.status, EM_SCROLLCARET, 0, 0);
+    InvalidateRect(g_app.status, nullptr, TRUE);
+    UpdateWindow(g_app.status);
 }
 
 void AppendDisplayLineAtQpc(const wchar_t* text, LONGLONG eventQpc)
@@ -327,8 +434,15 @@ void AppendStatusLineAtQpc(const wchar_t* text, LONGLONG eventQpc)
     if (!text)
         return;
 
-    RecordStatusHistory(text, eventQpc);
-    AppendDisplayLineAtQpc(text, eventQpc);
+    LONGLONG resolvedQpc = eventQpc;
+    if (resolvedQpc <= 0) {
+        LARGE_INTEGER qpc{};
+        if (QueryPerformanceCounter(&qpc))
+            resolvedQpc = qpc.QuadPart;
+    }
+
+    RecordStatusHistory(text, resolvedQpc);
+    AppendDisplayLineAtQpc(text, resolvedQpc);
 }
 
 void AppendStatusLine(const wchar_t* text)
@@ -799,6 +913,7 @@ void CleanupTarget()
     g_app.lastHookState = -1;
     g_app.lastEventSerial = 0;
     g_app.loggedInjectedBuild = false;
+    g_app.rawUiBatchWarningShown = false;
     ResetLiveStateTracking();
     if (g_app.launch)
         EnableWindow(g_app.launch, TRUE);
@@ -945,6 +1060,7 @@ bool LaunchAndInject()
     g_app.lastHookState = -1;
     g_app.lastEventSerial = 0;
     g_app.loggedInjectedBuild = false;
+    g_app.rawUiBatchWarningShown = false;
     ResetLiveStateTracking();
     EnableWindow(g_app.launch, FALSE);
 
@@ -1018,11 +1134,29 @@ void FormatReflexEvent(const CapturedReflexEvent& event, wchar_t* line, size_t l
     }
 }
 
-void AppendReflexEvent(const CapturedReflexEvent& event)
+void FormatReflexDisplayLine(const CapturedReflexEvent& event, bool newState,
+                            wchar_t* line, size_t lineCount)
 {
-    wchar_t line[384]{};
-    FormatReflexEvent(event, line, _countof(line));
+    wchar_t raw[384]{};
+    FormatReflexEvent(event, raw, _countof(raw));
+    if (newState)
+        swprintf_s(line, lineCount, L"NEW Reflex State: %s", raw);
+    else
+        wcscpy_s(line, lineCount, raw);
+}
+
+void AppendReflexEvent(const CapturedReflexEvent& event, bool newState)
+{
+    wchar_t line[512]{};
+    FormatReflexDisplayLine(event, newState, line, _countof(line));
     AppendDisplayLineAtQpc(line, event.qpc);
+}
+
+bool AppendReflexEventToBuffer(TextBuffer& buffer, const CapturedReflexEvent& event, bool newState)
+{
+    wchar_t line[512]{};
+    FormatReflexDisplayLine(event, newState, line, _countof(line));
+    return AppendTextBufferLineAtQpc(buffer, line, event.qpc);
 }
 
 bool SameReflexState(const CapturedReflexEvent& a, const CapturedReflexEvent& b)
@@ -1034,15 +1168,24 @@ bool SameReflexState(const CapturedReflexEvent& a, const CapturedReflexEvent& b)
            a.result == b.result;
 }
 
+void FormatRepeatCount(uint64_t repeatCount, wchar_t* line, size_t lineCount)
+{
+    swprintf_s(line, lineCount, L"PREVIOUS Reflex State repeated %llu more times.",
+        static_cast<unsigned long long>(repeatCount));
+}
+
 void AppendRepeatCount(uint64_t repeatCount, LONGLONG eventQpc)
 {
-    if (!repeatCount)
-        return;
-
     wchar_t line[128]{};
-    swprintf_s(line, L"Previous Reflex state repeated %llu more times.",
-        static_cast<unsigned long long>(repeatCount));
+    FormatRepeatCount(repeatCount, line, _countof(line));
     AppendDisplayLineAtQpc(line, eventQpc);
+}
+
+bool AppendRepeatCountToBuffer(TextBuffer& buffer, uint64_t repeatCount, LONGLONG eventQpc)
+{
+    wchar_t line[128]{};
+    FormatRepeatCount(repeatCount, line, _countof(line));
+    return AppendTextBufferLineAtQpc(buffer, line, eventQpc);
 }
 
 void HandleCapturedReflexEvent(const CapturedReflexEvent& event)
@@ -1059,20 +1202,17 @@ void HandleCapturedReflexEvent(const CapturedReflexEvent& event)
         g_app.stateEvent = event;
         g_app.stateRepeatCount = 0;
         if (stateChangesOnly)
-            AppendReflexEvent(event);
+            AppendReflexEvent(event, true);
     } else if (SameReflexState(g_app.stateEvent, event)) {
         ++g_app.stateRepeatCount;
     } else {
         if (stateChangesOnly) {
             AppendRepeatCount(g_app.stateRepeatCount, event.qpc);
-            AppendReflexEvent(event);
+            AppendReflexEvent(event, true);
         }
         g_app.stateEvent = event;
         g_app.stateRepeatCount = 0;
     }
-
-    if (!stateChangesOnly)
-        AppendReflexEvent(event);
 }
 
 void RecordRunBoundary(LONGLONG eventQpc)
@@ -1092,25 +1232,25 @@ void RebuildStatusView()
     if (!g_app.status)
         return;
 
-    SetWindowTextW(g_app.status, L"");
-
+    TextBuffer buffer{};
     const bool stateChangesOnly = StateChangesOnlyEnabled();
     bool haveState = false;
     CapturedReflexEvent state{};
     uint64_t repeatCount = 0;
+    bool success = true;
 
-    for (size_t i = 0; i < g_app.historyCount; ++i) {
+    for (size_t i = 0; i < g_app.historyCount && success; ++i) {
         const HistoryRecord& record = g_app.history[i];
 
         if (record.type == HistoryRecordStatusLine) {
             if (record.status.text)
-                AppendDisplayLineAtQpc(record.status.text, record.status.qpc);
+                success = AppendTextBufferLineAtQpc(buffer, record.status.text, record.status.qpc);
             continue;
         }
 
         if (record.type == HistoryRecordRunBoundary) {
             if (stateChangesOnly && haveState)
-                AppendRepeatCount(repeatCount, record.boundary.qpc);
+                success = AppendRepeatCountToBuffer(buffer, repeatCount, record.boundary.qpc);
             haveState = false;
             repeatCount = 0;
             continue;
@@ -1121,27 +1261,34 @@ void RebuildStatusView()
 
         const CapturedReflexEvent& event = record.reflex;
         if (!stateChangesOnly) {
-            AppendReflexEvent(event);
+            success = AppendReflexEventToBuffer(buffer, event, false);
             continue;
         }
 
         if (!haveState) {
-            AppendReflexEvent(event);
+            success = AppendReflexEventToBuffer(buffer, event, true);
             state = event;
             haveState = true;
             repeatCount = 0;
         } else if (SameReflexState(state, event)) {
             ++repeatCount;
         } else {
-            AppendRepeatCount(repeatCount, event.qpc);
-            AppendReflexEvent(event);
+            success = AppendRepeatCountToBuffer(buffer, repeatCount, event.qpc) &&
+                      AppendReflexEventToBuffer(buffer, event, true);
             state = event;
             repeatCount = 0;
         }
     }
 
-    SendMessageW(g_app.status, EM_SETSEL, static_cast<WPARAM>(-1), static_cast<LPARAM>(-1));
-    SendMessageW(g_app.status, EM_SCROLLCARET, 0, 0);
+    if (success) {
+        ReplaceStatusText(buffer.data ? buffer.data : L"");
+    } else {
+        MessageBoxW(g_app.window,
+            L"Could not allocate enough temporary RAM to rebuild the selected log view. The captured event history is still intact.",
+            L"ReflexProbe", MB_ICONWARNING);
+    }
+
+    FreeTextBuffer(buffer);
 }
 
 void PollSharedState()
@@ -1150,6 +1297,9 @@ void PollSharedState()
         return;
 
     const bool targetExited = WaitForSingleObject(g_app.process, 0) == WAIT_OBJECT_0;
+    const bool stateChangesOnly = StateChangesOnlyEnabled();
+    TextBuffer rawBatch{};
+    bool rawBatchSuccess = true;
 
     if (!g_app.loggedInjectedBuild && g_app.shared->injectedBuild[0]) {
         wchar_t line[256]{};
@@ -1234,11 +1384,23 @@ void PollSharedState()
         captured.requestedUs = event.requestedUs;
         captured.effectiveUs = event.effectiveUs;
         HandleCapturedReflexEvent(captured);
+        if (!stateChangesOnly && rawBatchSuccess)
+            rawBatchSuccess = AppendReflexEventToBuffer(rawBatch, captured, false);
         processedSerial = serial;
     }
 
     if (processedSerial > g_app.lastEventSerial)
         g_app.lastEventSerial = processedSerial;
+
+    if (!stateChangesOnly) {
+        if (rawBatchSuccess && rawBatch.length) {
+            AppendStatus(rawBatch.data);
+        } else if (!rawBatchSuccess && !g_app.rawUiBatchWarningShown) {
+            g_app.rawUiBatchWarningShown = true;
+            AppendStatusLine(L"WARNING: Live raw-view UI batching ran out of temporary RAM. Captured event history remains intact.");
+        }
+    }
+    FreeTextBuffer(rawBatch);
 
     if (targetExited) {
         LARGE_INTEGER qpc{};
@@ -1403,7 +1565,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         AppendStatusLine(L"Override is OFF by default. Anti-cheat/protected games are intentionally out of scope.");
         AppendStatusLine(L"Reflex calls are retained in controller RAM. State changes only is ON by default; no capture is written to disk.");
         LogBinaryIdentity();
-        SetTimer(window, kPollTimer, 100, nullptr);
+        SetTimer(window, kPollTimer, kPollIntervalMs, nullptr);
         return 0;
     }
 

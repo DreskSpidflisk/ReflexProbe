@@ -85,14 +85,17 @@ ReflexProbe now separates capture from display. Every Reflex call successfully d
 
 The GUI defaults to **State changes only**:
 
-- the first Reflex state is displayed immediately;
+- every newly observed state is prefixed with `NEW Reflex State:`;
 - identical subsequent calls are retained and counted but produce no EDIT-control writes;
-- when backend, mode, requested interval, effective interval, or result changes, the controller prints one `Previous Reflex state repeated N more times.` line and then the new state;
+- when backend, mode, requested interval, effective interval, or result changes, the controller closes the previous run with `PREVIOUS Reflex State repeated N more times.` and then prints the new state;
+- an immediate transition still prints `PREVIOUS Reflex State repeated 0 more times.`, so the state change remains explicit instead of visually collapsing two adjacent states together;
 - when the target process exits, the final unchanged run is closed the same way, so a one-hour unchanged session produces one final repeat count rather than losing that information.
 
-Unchecking **State changes only** rebuilds the visible log from the same RAM-resident history and shows every captured Reflex call. Rechecking it rebuilds the compressed state-change view. Ordinary controller/status messages remain interleaved with the Reflex history in either view.
+Unchecking **State changes only** rebuilds the visible log from the same RAM-resident history and shows every captured Reflex call. Rechecking it rebuilds the compressed state-change view. Rebuilds are formatted into one temporary RAM buffer and replace the Win32 EDIT contents in one operation rather than replaying tens of thousands of per-line mutations. Ordinary controller/status messages remain interleaved with the Reflex history in either view.
 
-The shared transport ring was enlarged from 128 to **4096 events**. This is still small (roughly a few hundred KiB of shared memory) but gives the 100 ms controller poll substantial headroom even for very high frame rates. If the transport is ever lapped anyway, ReflexProbe reports the exact number of lost calls and restarts the state-change run instead of silently pretending the capture was complete.
+Live raw display is also batched without changing the capture. The controller polls every **50 ms** and appends all newly drained raw Reflex lines in one EDIT mutation, capping raw UI updates at **20 per second** while preserving every individual call and its original QPC-derived timestamp in RAM. State-change lines remain immediate at the polling cadence because they are rare.
+
+The shared transport ring was enlarged from 128 to **4096 events**. This is still small (roughly a few hundred KiB of shared memory) and the 50 ms controller poll gives it substantial headroom even for very high frame rates. If the transport is ever lapped anyway, ReflexProbe reports the exact number of lost calls and restarts the state-change run instead of silently pretending the capture was complete.
 
 ## Solution layout
 
@@ -168,7 +171,7 @@ This path is now confirmed working in **A Plague Tale: Requiem**, whose local `s
 5. Choose **Launch + Inject**.
 6. ReflexProbe creates the game suspended, injects `ReflexProbe64.dll`, and resumes it.
 7. The injected DLL waits for a modern Streamline resolver or arms the SL1 plugin-gateway interception.
-8. Every observed Reflex options/constants call is retained in controller RAM; the visible log either shows only state transitions plus repeat counts or the complete call stream.
+8. Every observed Reflex options/constants call is retained in controller RAM; the visible log either shows explicit `NEW`/`PREVIOUS` state transitions or the complete call stream, with raw UI appends batched to at most 20 updates per second.
 
 The first MinHook implementation reached the genuine `slReflexSetOptions` implementation in Cyberpunk 2077, but Windows rejected MinHook's executable-page protection change (`MH_ERROR_MEMORY_PROTECT`). The current design stays at import-table/function-resolution boundaries instead.
 
