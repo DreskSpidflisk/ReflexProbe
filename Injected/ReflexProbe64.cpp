@@ -291,13 +291,24 @@ bool PatchLoadedResolverImports(bool& foundAny)
     bool success = true;
     if (Module32FirstW(snapshot, &entry)) {
         do {
+            HMODULE heldModule = nullptr;
+            if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                    reinterpret_cast<LPCWSTR>(entry.modBaseAddr), &heldModule)) {
+                continue;
+            }
+
             bool sawTarget = false;
-            PatchResolverImportInModule(entry.hModule, sawTarget);
-            foundAny = foundAny || sawTarget;
+            PatchResolverImportInModule(heldModule, sawTarget);
+            FreeLibrary(heldModule);
 
             if (g_shared && InterlockedCompareExchange(&g_shared->hookState, 0, 0) ==
                     ReflexProbeProtocol::HookStateError) {
                 success = false;
+                break;
+            }
+
+            if (sawTarget) {
+                foundAny = true;
                 break;
             }
         } while (Module32NextW(snapshot, &entry));
@@ -314,26 +325,21 @@ DWORD WINAPI WorkerThread(void*)
 
     InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateWaitingForDll);
 
-    bool announcedResolver = false;
-
-    // Direct-launch bootstrap: patch imports before the application asks Streamline for
-    // feature function pointers. This avoids modifying NVIDIA executable code entirely.
+    // Find the first loaded module that imports Streamline's feature resolver, patch that one
+    // IAT slot, then get out of the game. The previous bootstrap kept rescanning every loaded
+    // module until Reflex itself was requested; with Reflex disabled that left a needless PE
+    // walker running inside the process and could race DLL unloads during startup.
     for (uint32_t attempt = 0;; ++attempt) {
         bool foundResolverImport = false;
         if (!PatchLoadedResolverImports(foundResolverImport))
             return 1;
 
-        if (foundResolverImport && !announcedResolver) {
-            OutputDebugStringW(L"ReflexProbe64: intercepted imported slGetFeatureFunction resolver.\n");
-            announcedResolver = true;
+        if (foundResolverImport) {
+            OutputDebugStringW(L"ReflexProbe64: intercepted imported slGetFeatureFunction resolver; worker exiting.\n");
+            return 0;
         }
 
-        if (InterlockedCompareExchange(&g_shared->hookState, 0, 0) ==
-                ReflexProbeProtocol::HookStateHooked)
-            return 0;
-
-        // Loaded engine DLLs can add another Streamline import later in startup.
-        Sleep(attempt < 10000 ? 1 : 50);
+        Sleep(attempt < 100 ? 10 : 100);
     }
 }
 
