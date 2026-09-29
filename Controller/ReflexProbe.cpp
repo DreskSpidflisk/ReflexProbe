@@ -422,8 +422,10 @@ Cleanup:
 void LogBinaryIdentity()
 {
     wchar_t line[1200]{};
-    swprintf_s(line, L"Source tag: %s | protocol %u | controller build %s",
-        ReflexProbeProtocol::kBuildTag, ReflexProbeProtocol::kVersion, kControllerBuildStamp);
+    swprintf_s(line, L"Source tag: %s | protocol %u",
+        ReflexProbeProtocol::kBuildTag, ReflexProbeProtocol::kVersion);
+    AppendStatusLine(line);
+    swprintf_s(line, L"Controller build: %s", kControllerBuildStamp);
     AppendStatusLine(line);
 
     wchar_t exePath[ReflexProbeProtocol::kPathChars]{};
@@ -1174,7 +1176,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
 
     HWND window = CreateWindowExW(0, kWindowClass, L"ReflexProbe",
         WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 900, 650,
+        CW_USEDEFAULT, CW_USEDEFAULT, 1100, 650,
         nullptr, nullptr, instance, nullptr);
     if (!window)
         return 1;
