@@ -20,6 +20,11 @@ namespace {
 
 constexpr wchar_t kWindowClass[] = L"ReflexProbeControlWindow";
 constexpr UINT_PTR kPollTimer = 1;
+constexpr int kMargin = 12;
+constexpr int kStatusTop = 186;
+constexpr int kMinimumWindowWidth = 700;
+constexpr int kMinimumWindowHeight = 480;
+constexpr WPARAM kStatusTextLimit = 16u * 1024u * 1024u;
 
 enum ControlId : int {
     IDC_GAME_PATH = 1001,
@@ -29,19 +34,28 @@ enum ControlId : int {
     IDC_OVERRIDE_FPS,
     IDC_APPLY_OVERRIDE,
     IDC_LAUNCH,
-    IDC_STATUS
+    IDC_STATUS,
+    IDC_WORD_WRAP
 };
 
 struct AppState {
     HINSTANCE instance = nullptr;
     HWND window = nullptr;
+
+    HWND gameLabel = nullptr;
     HWND gamePath = nullptr;
+    HWND browse = nullptr;
+    HWND argumentsLabel = nullptr;
     HWND arguments = nullptr;
     HWND overrideEnable = nullptr;
     HWND overrideFps = nullptr;
+    HWND fpsLabel = nullptr;
     HWND applyOverride = nullptr;
     HWND launch = nullptr;
+    HWND statusLabel = nullptr;
+    HWND wordWrap = nullptr;
     HWND status = nullptr;
+    WNDPROC statusOriginalProc = nullptr;
 
     HANDLE process = nullptr;
     DWORD processId = 0;
@@ -54,6 +68,8 @@ struct AppState {
 
 AppState g_app;
 
+void LayoutControls(int clientWidth, int clientHeight);
+
 void SetChildFont(HWND child, HFONT font)
 {
     if (child)
@@ -65,15 +81,194 @@ void AppendStatus(const wchar_t* text)
     if (!g_app.status || !text)
         return;
 
+    DWORD selectionStart = 0;
+    DWORD selectionEnd = 0;
+    const bool preserveSelection = GetFocus() == g_app.status;
+    if (preserveSelection) {
+        SendMessageW(g_app.status, EM_GETSEL,
+            reinterpret_cast<WPARAM>(&selectionStart), reinterpret_cast<LPARAM>(&selectionEnd));
+    }
+
     SendMessageW(g_app.status, EM_SETSEL, static_cast<WPARAM>(-1), static_cast<LPARAM>(-1));
     SendMessageW(g_app.status, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(text));
-    SendMessageW(g_app.status, EM_SCROLLCARET, 0, 0);
+
+    if (preserveSelection) {
+        SendMessageW(g_app.status, EM_SETSEL,
+            static_cast<WPARAM>(selectionStart), static_cast<LPARAM>(selectionEnd));
+    } else {
+        SendMessageW(g_app.status, EM_SCROLLCARET, 0, 0);
+    }
+}
+
+void AppendStatusCount(const wchar_t* text, size_t count)
+{
+    if (!text || !count)
+        return;
+
+    wchar_t chunk[1024]{};
+    while (count) {
+        const size_t copyCount = count < (_countof(chunk) - 1) ? count : (_countof(chunk) - 1);
+        wmemcpy(chunk, text, copyCount);
+        chunk[copyCount] = 0;
+        AppendStatus(chunk);
+        text += copyCount;
+        count -= copyCount;
+    }
+}
+
+void FormatTimestamp(LONGLONG eventQpc, wchar_t* out, size_t outCount)
+{
+    if (!out || !outCount)
+        return;
+
+    SYSTEMTIME localTime{};
+    bool converted = false;
+
+    if (eventQpc > 0) {
+        LARGE_INTEGER nowQpc{};
+        LARGE_INTEGER frequency{};
+        FILETIME nowUtc{};
+        if (QueryPerformanceCounter(&nowQpc) && QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0) {
+            GetSystemTimeAsFileTime(&nowUtc);
+
+            ULARGE_INTEGER eventUtc{};
+            eventUtc.LowPart = nowUtc.dwLowDateTime;
+            eventUtc.HighPart = nowUtc.dwHighDateTime;
+
+            if (eventQpc < nowQpc.QuadPart) {
+                const LONGLONG deltaQpc = nowQpc.QuadPart - eventQpc;
+                const double delta100nsDouble =
+                    (static_cast<double>(deltaQpc) * 10000000.0) /
+                    static_cast<double>(frequency.QuadPart);
+                const ULONGLONG delta100ns = static_cast<ULONGLONG>(delta100nsDouble);
+                if (delta100ns < eventUtc.QuadPart)
+                    eventUtc.QuadPart -= delta100ns;
+            }
+
+            FILETIME eventUtcFile{};
+            eventUtcFile.dwLowDateTime = eventUtc.LowPart;
+            eventUtcFile.dwHighDateTime = eventUtc.HighPart;
+            FILETIME eventLocalFile{};
+            if (FileTimeToLocalFileTime(&eventUtcFile, &eventLocalFile) &&
+                FileTimeToSystemTime(&eventLocalFile, &localTime)) {
+                converted = true;
+            }
+        }
+    }
+
+    if (!converted)
+        GetLocalTime(&localTime);
+
+    swprintf_s(out, outCount, L"[%02u:%02u:%02u] ",
+        static_cast<unsigned int>(localTime.wHour),
+        static_cast<unsigned int>(localTime.wMinute),
+        static_cast<unsigned int>(localTime.wSecond));
+}
+
+void AppendStatusLineAtQpc(const wchar_t* text, LONGLONG eventQpc)
+{
+    if (!text)
+        return;
+
+    const wchar_t* cursor = text;
+    for (;;) {
+        const wchar_t* newline = wcsstr(cursor, L"\r\n");
+        const size_t lineLength = newline ? static_cast<size_t>(newline - cursor) : wcslen(cursor);
+
+        wchar_t timestamp[32]{};
+        FormatTimestamp(eventQpc, timestamp, _countof(timestamp));
+        AppendStatus(timestamp);
+        AppendStatusCount(cursor, lineLength);
+        AppendStatus(L"\r\n");
+
+        if (!newline)
+            break;
+        cursor = newline + 2;
+    }
 }
 
 void AppendStatusLine(const wchar_t* text)
 {
-    AppendStatus(text);
-    AppendStatus(L"\r\n");
+    AppendStatusLineAtQpc(text, 0);
+}
+
+LRESULT CALLBACK StatusEditProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    if (message == WM_KEYDOWN && wParam == static_cast<WPARAM>('A') &&
+        (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+        SendMessageW(window, EM_SETSEL, 0, static_cast<LPARAM>(-1));
+        return 0;
+    }
+
+    if (g_app.statusOriginalProc)
+        return CallWindowProcW(g_app.statusOriginalProc, window, message, wParam, lParam);
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
+void RecreateStatusControl(bool wordWrap)
+{
+    if (!g_app.window)
+        return;
+
+    wchar_t* savedText = nullptr;
+    int savedLength = 0;
+    DWORD selectionStart = 0;
+    DWORD selectionEnd = 0;
+    int firstVisibleLine = 0;
+
+    if (g_app.status) {
+        savedLength = GetWindowTextLengthW(g_app.status);
+        if (savedLength > 0) {
+            const SIZE_T bytes = (static_cast<SIZE_T>(savedLength) + 1) * sizeof(wchar_t);
+            savedText = static_cast<wchar_t*>(HeapAlloc(GetProcessHeap(), 0, bytes));
+            if (savedText)
+                GetWindowTextW(g_app.status, savedText, savedLength + 1);
+        }
+
+        SendMessageW(g_app.status, EM_GETSEL,
+            reinterpret_cast<WPARAM>(&selectionStart), reinterpret_cast<LPARAM>(&selectionEnd));
+        firstVisibleLine = static_cast<int>(SendMessageW(g_app.status, EM_GETFIRSTVISIBLELINE, 0, 0));
+
+        if (g_app.statusOriginalProc) {
+            SetWindowLongPtrW(g_app.status, GWLP_WNDPROC,
+                reinterpret_cast<LONG_PTR>(g_app.statusOriginalProc));
+            g_app.statusOriginalProc = nullptr;
+        }
+        DestroyWindow(g_app.status);
+        g_app.status = nullptr;
+    }
+
+    DWORD style = WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL |
+        ES_READONLY | ES_NOHIDESEL | WS_VSCROLL;
+    if (!wordWrap)
+        style |= WS_HSCROLL | ES_AUTOHSCROLL;
+
+    g_app.status = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+        style, 0, 0, 0, 0, g_app.window, reinterpret_cast<HMENU>(IDC_STATUS), g_app.instance, nullptr);
+    if (!g_app.status) {
+        if (savedText)
+            HeapFree(GetProcessHeap(), 0, savedText);
+        return;
+    }
+
+    SetChildFont(g_app.status, static_cast<HFONT>(GetStockObject(ANSI_FIXED_FONT)));
+    SendMessageW(g_app.status, EM_SETLIMITTEXT, kStatusTextLimit, 0);
+    g_app.statusOriginalProc = reinterpret_cast<WNDPROC>(
+        SetWindowLongPtrW(g_app.status, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&StatusEditProc)));
+
+    if (savedText) {
+        SetWindowTextW(g_app.status, savedText);
+        SendMessageW(g_app.status, EM_SETSEL,
+            static_cast<WPARAM>(selectionStart), static_cast<LPARAM>(selectionEnd));
+        const int currentFirstLine = static_cast<int>(SendMessageW(g_app.status, EM_GETFIRSTVISIBLELINE, 0, 0));
+        SendMessageW(g_app.status, EM_LINESCROLL, 0,
+            static_cast<LPARAM>(firstVisibleLine - currentFirstLine));
+        HeapFree(GetProcessHeap(), 0, savedText);
+    }
+
+    RECT client{};
+    GetClientRect(g_app.window, &client);
+    LayoutControls(client.right - client.left, client.bottom - client.top);
 }
 
 void BuildMappingName(DWORD processId, wchar_t* out, size_t outCount)
@@ -232,8 +427,6 @@ bool InjectDll(HANDLE process, DWORD processId, const wchar_t* dllPath, wchar_t*
     CloseHandle(thread);
 
     if (wait != WAIT_OBJECT_0) {
-        // The remote thread may still be using its path buffer. Leaking one tiny allocation
-        // is safer than freeing memory underneath a stalled LoadLibraryW.
         swprintf_s(error, errorCount, L"Remote LoadLibraryW did not finish in 10 seconds.");
         return false;
     }
@@ -320,7 +513,8 @@ void CleanupTarget()
     g_app.processId = 0;
     g_app.lastHookState = -1;
     g_app.lastEventSerial = 0;
-    EnableWindow(g_app.launch, TRUE);
+    if (g_app.launch)
+        EnableWindow(g_app.launch, TRUE);
 }
 
 bool CreateSharedState(DWORD processId, const wchar_t* targetPath,
@@ -435,8 +629,6 @@ bool LaunchAndInject()
         return false;
     }
 
-    // Most processes already expose the module containing LoadLibraryW while created suspended.
-    // If this one does not, let loader initialization run, then inject as soon as that module appears.
     HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
     FARPROC loadLibrary = kernel32 ? GetProcAddress(kernel32, "LoadLibraryW") : nullptr;
     HMODULE owner = nullptr;
@@ -501,7 +693,7 @@ void PollSharedState()
         wchar_t line[2300]{};
         switch (hookState) {
         case ReflexProbeProtocol::HookStateWaitingForDll:
-            wcscpy_s(line, L"Waiting for sl.reflex.dll...");
+            wcscpy_s(line, L"Waiting for Streamline Reflex resolver...");
             break;
         case ReflexProbeProtocol::HookStateReflexFound:
             swprintf_s(line, L"Found Streamline Reflex: %s\r\nFile version: %s",
@@ -563,7 +755,7 @@ void PollSharedState()
                 L"slReflexSetOptions #%ld: mode=%s, requested=0 us (automatic), effective=0 us (pass-through), result=%ld",
                 serial, mode, event.result);
 
-        AppendStatusLine(line);
+        AppendStatusLineAtQpc(line, event.qpc);
         processedSerial = serial;
     }
 
@@ -588,6 +780,54 @@ void BrowseForGame()
         SetWindowTextW(g_app.gamePath, path);
 }
 
+void LayoutControls(int clientWidth, int clientHeight)
+{
+    if (clientWidth <= 0 || clientHeight <= 0)
+        return;
+
+    const int usableWidth = clientWidth - (kMargin * 2);
+    const int browseWidth = 96;
+    const int launchWidth = 144;
+    const int wrapWidth = 104;
+
+    if (g_app.gameLabel)
+        MoveWindow(g_app.gameLabel, kMargin, 12, 150, 20, TRUE);
+    if (g_app.browse)
+        MoveWindow(g_app.browse, clientWidth - kMargin - browseWidth, 33, browseWidth, 26, TRUE);
+    if (g_app.gamePath) {
+        const int gameWidth = usableWidth - browseWidth - 10;
+        MoveWindow(g_app.gamePath, kMargin, 34, gameWidth > 50 ? gameWidth : 50, 24, TRUE);
+    }
+
+    if (g_app.argumentsLabel)
+        MoveWindow(g_app.argumentsLabel, kMargin, 68, 150, 20, TRUE);
+    if (g_app.arguments)
+        MoveWindow(g_app.arguments, kMargin, 90, usableWidth > 50 ? usableWidth : 50, 24, TRUE);
+
+    if (g_app.overrideEnable)
+        MoveWindow(g_app.overrideEnable, kMargin, 128, 190, 22, TRUE);
+    if (g_app.overrideFps)
+        MoveWindow(g_app.overrideFps, 210, 126, 80, 24, TRUE);
+    if (g_app.fpsLabel)
+        MoveWindow(g_app.fpsLabel, 298, 130, 40, 20, TRUE);
+    if (g_app.applyOverride)
+        MoveWindow(g_app.applyOverride, 350, 124, 120, 28, TRUE);
+    if (g_app.launch)
+        MoveWindow(g_app.launch, clientWidth - kMargin - launchWidth, 124, launchWidth, 30, TRUE);
+
+    if (g_app.statusLabel)
+        MoveWindow(g_app.statusLabel, kMargin, 164, 180, 20, TRUE);
+    if (g_app.wordWrap)
+        MoveWindow(g_app.wordWrap, clientWidth - kMargin - wrapWidth, 162, wrapWidth, 22, TRUE);
+
+    if (g_app.status) {
+        int statusHeight = clientHeight - kStatusTop - kMargin;
+        if (statusHeight < 80)
+            statusHeight = 80;
+        MoveWindow(g_app.status, kMargin, kStatusTop, usableWidth > 50 ? usableWidth : 50, statusHeight, TRUE);
+    }
+}
+
 LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message) {
@@ -595,66 +835,83 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
         g_app.window = window;
 
-        HWND label = CreateWindowExW(0, L"STATIC", L"Game executable",
-            WS_CHILD | WS_VISIBLE, 12, 12, 150, 20, window, nullptr, g_app.instance, nullptr);
-        SetChildFont(label, font);
+        g_app.gameLabel = CreateWindowExW(0, L"STATIC", L"Game executable",
+            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
+        SetChildFont(g_app.gameLabel, font);
 
         g_app.gamePath = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            12, 34, 610, 24, window, reinterpret_cast<HMENU>(IDC_GAME_PATH), g_app.instance, nullptr);
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_GAME_PATH), g_app.instance, nullptr);
         SetChildFont(g_app.gamePath, font);
 
-        g_app.launch = nullptr;
-        HWND browse = CreateWindowExW(0, L"BUTTON", L"Browse...",
+        g_app.browse = CreateWindowExW(0, L"BUTTON", L"Browse...",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            632, 33, 96, 26, window, reinterpret_cast<HMENU>(IDC_BROWSE), g_app.instance, nullptr);
-        SetChildFont(browse, font);
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_BROWSE), g_app.instance, nullptr);
+        SetChildFont(g_app.browse, font);
 
-        label = CreateWindowExW(0, L"STATIC", L"Arguments (optional)",
-            WS_CHILD | WS_VISIBLE, 12, 68, 150, 20, window, nullptr, g_app.instance, nullptr);
-        SetChildFont(label, font);
+        g_app.argumentsLabel = CreateWindowExW(0, L"STATIC", L"Arguments (optional)",
+            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
+        SetChildFont(g_app.argumentsLabel, font);
 
         g_app.arguments = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            12, 90, 716, 24, window, reinterpret_cast<HMENU>(IDC_ARGUMENTS), g_app.instance, nullptr);
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_ARGUMENTS), g_app.instance, nullptr);
         SetChildFont(g_app.arguments, font);
 
         g_app.overrideEnable = CreateWindowExW(0, L"BUTTON", L"Override Reflex frame limit",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            12, 128, 190, 22, window, reinterpret_cast<HMENU>(IDC_OVERRIDE_ENABLE), g_app.instance, nullptr);
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_OVERRIDE_ENABLE), g_app.instance, nullptr);
         SetChildFont(g_app.overrideEnable, font);
 
         g_app.overrideFps = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"165",
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            210, 126, 80, 24, window, reinterpret_cast<HMENU>(IDC_OVERRIDE_FPS), g_app.instance, nullptr);
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_OVERRIDE_FPS), g_app.instance, nullptr);
         SetChildFont(g_app.overrideFps, font);
 
-        label = CreateWindowExW(0, L"STATIC", L"FPS",
-            WS_CHILD | WS_VISIBLE, 298, 130, 40, 20, window, nullptr, g_app.instance, nullptr);
-        SetChildFont(label, font);
+        g_app.fpsLabel = CreateWindowExW(0, L"STATIC", L"FPS",
+            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
+        SetChildFont(g_app.fpsLabel, font);
 
         g_app.applyOverride = CreateWindowExW(0, L"BUTTON", L"Apply Override",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            350, 124, 120, 28, window, reinterpret_cast<HMENU>(IDC_APPLY_OVERRIDE), g_app.instance, nullptr);
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_APPLY_OVERRIDE), g_app.instance, nullptr);
         SetChildFont(g_app.applyOverride, font);
 
         g_app.launch = CreateWindowExW(0, L"BUTTON", L"Launch + Inject",
             WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-            584, 124, 144, 30, window, reinterpret_cast<HMENU>(IDC_LAUNCH), g_app.instance, nullptr);
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_LAUNCH), g_app.instance, nullptr);
         SetChildFont(g_app.launch, font);
 
-        label = CreateWindowExW(0, L"STATIC", L"Status / Reflex requests",
-            WS_CHILD | WS_VISIBLE, 12, 164, 180, 20, window, nullptr, g_app.instance, nullptr);
-        SetChildFont(label, font);
+        g_app.statusLabel = CreateWindowExW(0, L"STATIC", L"Status / Reflex requests",
+            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
+        SetChildFont(g_app.statusLabel, font);
 
-        g_app.status = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL,
-            12, 186, 716, 350, window, reinterpret_cast<HMENU>(IDC_STATUS), g_app.instance, nullptr);
-        SetChildFont(g_app.status, static_cast<HFONT>(GetStockObject(ANSI_FIXED_FONT)));
+        g_app.wordWrap = CreateWindowExW(0, L"BUTTON", L"Word wrap",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_WORD_WRAP), g_app.instance, nullptr);
+        SetChildFont(g_app.wordWrap, font);
+        Button_SetCheck(g_app.wordWrap, BST_CHECKED);
+
+        RecreateStatusControl(true);
+
+        RECT client{};
+        GetClientRect(window, &client);
+        LayoutControls(client.right - client.left, client.bottom - client.top);
 
         AppendStatusLine(L"ReflexProbe bootstrap: direct-launch Streamline observer/override.");
         AppendStatusLine(L"Override is OFF by default. Anti-cheat/protected games are intentionally out of scope.");
         SetTimer(window, kPollTimer, 100, nullptr);
+        return 0;
+    }
+
+    case WM_SIZE:
+        LayoutControls(static_cast<int>(LOWORD(lParam)), static_cast<int>(HIWORD(lParam)));
+        return 0;
+
+    case WM_GETMINMAXINFO: {
+        auto* info = reinterpret_cast<MINMAXINFO*>(lParam);
+        info->ptMinTrackSize.x = kMinimumWindowWidth;
+        info->ptMinTrackSize.y = kMinimumWindowHeight;
         return 0;
     }
 
@@ -668,6 +925,12 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             return 0;
         case IDC_LAUNCH:
             LaunchAndInject();
+            return 0;
+        case IDC_WORD_WRAP:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                const bool wordWrap = Button_GetCheck(g_app.wordWrap) == BST_CHECKED;
+                RecreateStatusControl(wordWrap);
+            }
             return 0;
         }
         break;
@@ -711,8 +974,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
         return 1;
 
     HWND window = CreateWindowExW(0, kWindowClass, L"ReflexProbe",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 760, 590,
+        WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT, 900, 650,
         nullptr, nullptr, instance, nullptr);
     if (!window)
         return 1;
