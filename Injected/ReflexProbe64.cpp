@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <tlhelp32.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <wchar.h>
 #include <string.h>
@@ -19,10 +20,33 @@
 
 namespace {
 
+// Streamline 1.x configured Reflex through the generic slSetFeatureConstants API.
+// Keep the old ABI local instead of dragging an obsolete Streamline SDK into the build.
+constexpr uint32_t kLegacyFeatureReflex = 3;
+
+struct LegacyReflexConstants {
+    int32_t mode;
+    uint32_t frameLimitUs;
+    bool useMarkersToOptimize;
+    uint16_t virtualKey;
+    void* ext;
+};
+
+static_assert(offsetof(LegacyReflexConstants, mode) == 0);
+static_assert(offsetof(LegacyReflexConstants, frameLimitUs) == 4);
+static_assert(offsetof(LegacyReflexConstants, useMarkersToOptimize) == 8);
+static_assert(offsetof(LegacyReflexConstants, virtualKey) == 10);
+static_assert(offsetof(LegacyReflexConstants, ext) == 16);
+static_assert(sizeof(LegacyReflexConstants) == 24);
+
+using PFunLegacySetFeatureConstants = bool(uint32_t feature, const void* constants,
+                                           uint32_t frameIndex, uint32_t id);
+
 HANDLE g_mapping = nullptr;
 ReflexProbeProtocol::SharedState* g_shared = nullptr;
 PFun_slGetFeatureFunction* g_realGetFeatureFunction = nullptr;
 PFun_slReflexSetOptions* g_realReflexSetOptions = nullptr;
+PFunLegacySetFeatureConstants* g_realLegacySetFeatureConstants = nullptr;
 
 void BuildMappingName(DWORD processId, wchar_t* out, size_t outCount)
 {
@@ -113,6 +137,15 @@ void GetFileVersionString(const wchar_t* path, wchar_t* out, size_t outCount)
     HeapFree(GetProcessHeap(), 0, data);
 }
 
+uint32_t ApplyConfiguredOverride(uint32_t requestedUs)
+{
+    if (!g_shared || InterlockedCompareExchange(&g_shared->overrideEnabled, 0, 0) == 0)
+        return requestedUs;
+
+    const LONG configured = InterlockedCompareExchange(&g_shared->overrideUs, 0, 0);
+    return configured > 0 ? static_cast<uint32_t>(configured) : requestedUs;
+}
+
 void PublishEvent(LONG mode, uint32_t requestedUs, uint32_t effectiveUs, LONG result)
 {
     if (!g_shared)
@@ -136,28 +169,6 @@ void PublishEvent(LONG mode, uint32_t requestedUs, uint32_t effectiveUs, LONG re
     InterlockedExchange(&event.sequence, serial);
 }
 
-sl::Result HookReflexSetOptions(const sl::ReflexOptions& options)
-{
-    PFun_slReflexSetOptions* real = g_realReflexSetOptions;
-    if (!real)
-        return sl::Result::eErrorNotInitialized;
-
-    sl::ReflexOptions forwarded = options;
-    uint32_t effectiveUs = options.frameLimitUs;
-
-    if (g_shared && InterlockedCompareExchange(&g_shared->overrideEnabled, 0, 0) != 0) {
-        const LONG configured = InterlockedCompareExchange(&g_shared->overrideUs, 0, 0);
-        if (configured > 0) {
-            effectiveUs = static_cast<uint32_t>(configured);
-            forwarded.frameLimitUs = effectiveUs;
-        }
-    }
-
-    const sl::Result result = real(forwarded);
-    PublishEvent(static_cast<LONG>(options.mode), options.frameLimitUs, effectiveUs, static_cast<LONG>(result));
-    return result;
-}
-
 void PublishReflexFunction(void* function)
 {
     if (!g_shared || !function)
@@ -169,9 +180,9 @@ void PublishReflexFunction(void* function)
         DWORD count = GetModuleFileNameW(module, g_shared->reflexPath,
             static_cast<DWORD>(_countof(g_shared->reflexPath)));
         if (!count || count >= _countof(g_shared->reflexPath))
-            wcscpy_s(g_shared->reflexPath, L"sl.reflex.dll");
+            wcscpy_s(g_shared->reflexPath, L"Streamline module");
     } else {
-        wcscpy_s(g_shared->reflexPath, L"sl.reflex.dll");
+        wcscpy_s(g_shared->reflexPath, L"Streamline module");
     }
 
     GetFileVersionString(g_shared->reflexPath, g_shared->reflexVersion,
@@ -179,6 +190,44 @@ void PublishReflexFunction(void* function)
 
     MemoryBarrier();
     InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateHooked);
+}
+
+sl::Result HookReflexSetOptions(const sl::ReflexOptions& options)
+{
+    PFun_slReflexSetOptions* real = g_realReflexSetOptions;
+    if (!real)
+        return sl::Result::eErrorNotInitialized;
+
+    sl::ReflexOptions forwarded = options;
+    const uint32_t effectiveUs = ApplyConfiguredOverride(options.frameLimitUs);
+    forwarded.frameLimitUs = effectiveUs;
+
+    const sl::Result result = real(forwarded);
+    PublishEvent(static_cast<LONG>(options.mode), options.frameLimitUs, effectiveUs, static_cast<LONG>(result));
+    return result;
+}
+
+bool HookLegacySetFeatureConstants(uint32_t feature, const void* constants,
+                                   uint32_t frameIndex, uint32_t id)
+{
+    PFunLegacySetFeatureConstants* real = g_realLegacySetFeatureConstants;
+    if (!real)
+        return false;
+
+    if (feature != kLegacyFeatureReflex || !constants)
+        return real(feature, constants, frameIndex, id);
+
+    const auto* requested = static_cast<const LegacyReflexConstants*>(constants);
+    LegacyReflexConstants forwarded = *requested;
+    const uint32_t effectiveUs = ApplyConfiguredOverride(requested->frameLimitUs);
+    forwarded.frameLimitUs = effectiveUs;
+
+    const bool result = real(feature, &forwarded, frameIndex, id);
+    // Modern Streamline uses result 0 for success. Normalize the old bool API so the
+    // controller can keep one event format across both generations.
+    PublishEvent(static_cast<LONG>(requested->mode), requested->frameLimitUs,
+        effectiveUs, result ? 0 : 1);
+    return result;
 }
 
 sl::Result HookGetFeatureFunction(sl::Feature feature, const char* functionName, void*& function)
@@ -200,83 +249,122 @@ sl::Result HookGetFeatureFunction(sl::Feature feature, const char* functionName,
     return result;
 }
 
-bool PatchResolverImportInModule(HMODULE module, bool& sawTarget)
+bool PatchImportSlot(IMAGE_THUNK_DATA64* thunk, void* replacement, const wchar_t* functionName)
 {
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(&thunk->u1.Function, sizeof(thunk->u1.Function), PAGE_READWRITE, &oldProtect)) {
+        wchar_t error[224]{};
+        swprintf_s(error, L"VirtualProtect failed while patching the %s IAT slot (%lu).",
+            functionName, GetLastError());
+        SetSharedError(error);
+        return false;
+    }
+
+    InterlockedExchangePointer(
+        reinterpret_cast<PVOID volatile*>(&thunk->u1.Function), replacement);
+
+    DWORD ignored = 0;
+    if (!VirtualProtect(&thunk->u1.Function, sizeof(thunk->u1.Function), oldProtect, &ignored)) {
+        wchar_t error[224]{};
+        swprintf_s(error, L"VirtualProtect failed restoring the %s IAT slot (%lu).",
+            functionName, GetLastError());
+        SetSharedError(error);
+        return false;
+    }
+
+    return true;
+}
+
+bool PatchStreamlineImportsInModule(HMODULE module, bool& sawTarget)
+{
+    sawTarget = false;
     if (!module)
         return false;
 
     auto* base = reinterpret_cast<unsigned char*>(module);
     auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
     if (dos->e_magic != IMAGE_DOS_SIGNATURE)
-        return false;
+        return true;
 
     auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
     if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
-        return false;
+        return true;
 
     const IMAGE_DATA_DIRECTORY& imports =
         nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
     if (!imports.VirtualAddress || !imports.Size)
-        return false;
+        return true;
+
+    HMODULE interposer = GetModuleHandleW(L"sl.interposer.dll");
+    if (!interposer)
+        return true;
+
+    void* modernResolver = reinterpret_cast<void*>(GetProcAddress(interposer, "slGetFeatureFunction"));
+    void* legacySetConstants = reinterpret_cast<void*>(GetProcAddress(interposer, "slSetFeatureConstants"));
+
+    // Streamline 2.x+ has the feature-function resolver. Streamline 1.x does not;
+    // in that generation ReflexOptions were ReflexConstants sent through the generic setter.
+    const bool useLegacyPath = modernResolver == nullptr && legacySetConstants != nullptr;
 
     auto* descriptor = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + imports.VirtualAddress);
     for (; descriptor->Name; ++descriptor) {
+        if (!descriptor->FirstThunk)
+            continue;
+
         const char* dllName = reinterpret_cast<const char*>(base + descriptor->Name);
-        if (_stricmp(dllName, "sl.interposer.dll") != 0 || !descriptor->FirstThunk)
-            continue;
-
-        HMODULE interposer = GetModuleHandleA(dllName);
-        if (!interposer)
-            continue;
-
-        void* real = reinterpret_cast<void*>(GetProcAddress(interposer, "slGetFeatureFunction"));
-        if (!real)
+        if (_stricmp(dllName, "sl.interposer.dll") != 0)
             continue;
 
         auto* thunk = reinterpret_cast<IMAGE_THUNK_DATA64*>(base + descriptor->FirstThunk);
         for (; thunk->u1.Function; ++thunk) {
             void* current = reinterpret_cast<void*>(static_cast<uintptr_t>(thunk->u1.Function));
-            if (current == reinterpret_cast<void*>(&HookGetFeatureFunction)) {
+
+            if (modernResolver &&
+                (current == modernResolver || current == reinterpret_cast<void*>(&HookGetFeatureFunction))) {
                 sawTarget = true;
-                return true;
-            }
-            if (current != real)
+                if (current == reinterpret_cast<void*>(&HookGetFeatureFunction))
+                    continue;
+
+                if (!g_realGetFeatureFunction)
+                    g_realGetFeatureFunction = reinterpret_cast<PFun_slGetFeatureFunction*>(modernResolver);
+
+                if (!PatchImportSlot(thunk, reinterpret_cast<void*>(&HookGetFeatureFunction),
+                        L"slGetFeatureFunction")) {
+                    return false;
+                }
+
+                if (g_shared && InterlockedCompareExchange(&g_shared->hookState, 0, 0) ==
+                        ReflexProbeProtocol::HookStateWaitingForDll) {
+                    InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateReflexFound);
+                }
                 continue;
-
-            sawTarget = true;
-            if (!g_realGetFeatureFunction)
-                g_realGetFeatureFunction = reinterpret_cast<PFun_slGetFeatureFunction*>(real);
-
-            DWORD oldProtect = 0;
-            if (!VirtualProtect(&thunk->u1.Function, sizeof(thunk->u1.Function), PAGE_READWRITE, &oldProtect)) {
-                wchar_t error[192]{};
-                swprintf_s(error, L"VirtualProtect failed while patching the slGetFeatureFunction IAT slot (%lu).",
-                    GetLastError());
-                SetSharedError(error);
-                return false;
             }
 
-            InterlockedExchangePointer(
-                reinterpret_cast<PVOID volatile*>(&thunk->u1.Function),
-                reinterpret_cast<void*>(&HookGetFeatureFunction));
+            if (useLegacyPath &&
+                (current == legacySetConstants || current == reinterpret_cast<void*>(&HookLegacySetFeatureConstants))) {
+                sawTarget = true;
+                if (current == reinterpret_cast<void*>(&HookLegacySetFeatureConstants))
+                    continue;
 
-            DWORD ignored = 0;
-            if (!VirtualProtect(&thunk->u1.Function, sizeof(thunk->u1.Function), oldProtect, &ignored)) {
-                wchar_t error[192]{};
-                swprintf_s(error, L"VirtualProtect failed restoring the slGetFeatureFunction IAT slot (%lu).",
-                    GetLastError());
-                SetSharedError(error);
-                return false;
+                if (!g_realLegacySetFeatureConstants) {
+                    g_realLegacySetFeatureConstants =
+                        reinterpret_cast<PFunLegacySetFeatureConstants*>(legacySetConstants);
+                }
+
+                if (!PatchImportSlot(thunk, reinterpret_cast<void*>(&HookLegacySetFeatureConstants),
+                        L"slSetFeatureConstants")) {
+                    return false;
+                }
+
+                PublishReflexFunction(legacySetConstants);
             }
-
-            return true;
         }
     }
 
-    return false;
+    return true;
 }
 
-bool PatchLoadedResolverImports(bool& foundAny)
+bool PatchLoadedStreamlineImports(bool& foundAny)
 {
     foundAny = false;
 
@@ -298,11 +386,11 @@ bool PatchLoadedResolverImports(bool& foundAny)
             }
 
             bool sawTarget = false;
-            PatchResolverImportInModule(heldModule, sawTarget);
+            const bool patched = PatchStreamlineImportsInModule(heldModule, sawTarget);
             FreeLibrary(heldModule);
 
-            if (g_shared && InterlockedCompareExchange(&g_shared->hookState, 0, 0) ==
-                    ReflexProbeProtocol::HookStateError) {
+            if (!patched || (g_shared && InterlockedCompareExchange(&g_shared->hookState, 0, 0) ==
+                    ReflexProbeProtocol::HookStateError)) {
                 success = false;
                 break;
             }
@@ -325,17 +413,22 @@ DWORD WINAPI WorkerThread(void*)
 
     InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateWaitingForDll);
 
-    // Find the first loaded module that imports Streamline's feature resolver, patch that one
-    // IAT slot, then get out of the game. The previous bootstrap kept rescanning every loaded
-    // module until Reflex itself was requested; with Reflex disabled that left a needless PE
-    // walker running inside the process and could race DLL unloads during startup.
+    // Patch one stable Streamline API boundary, then leave the game alone. Modern
+    // Streamline uses slGetFeatureFunction -> slReflexSetOptions; 1.x uses the generic
+    // slSetFeatureConstants(eFeatureReflex, ReflexConstants) API.
     for (uint32_t attempt = 0;; ++attempt) {
-        bool foundResolverImport = false;
-        if (!PatchLoadedResolverImports(foundResolverImport))
+        bool foundStreamlineImport = false;
+        if (!PatchLoadedStreamlineImports(foundStreamlineImport))
             return 1;
 
-        if (foundResolverImport) {
-            OutputDebugStringW(L"ReflexProbe64: intercepted imported slGetFeatureFunction resolver; worker exiting.\n");
+        if (foundStreamlineImport) {
+            if (g_realLegacySetFeatureConstants) {
+                OutputDebugStringW(
+                    L"ReflexProbe64: intercepted legacy slSetFeatureConstants Reflex path; worker exiting.\n");
+            } else {
+                OutputDebugStringW(
+                    L"ReflexProbe64: intercepted modern slGetFeatureFunction resolver; worker exiting.\n");
+            }
             return 0;
         }
 
