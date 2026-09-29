@@ -10,15 +10,15 @@
 namespace ReflexProbeProtocol {
 
 constexpr uint32_t kMagic = 0x31505246; // "FRP1" little-endian.
-constexpr uint32_t kVersion = 2;
-constexpr uint32_t kEventCapacity = 128;
+constexpr uint32_t kVersion = 3;
+constexpr uint32_t kEventCapacity = 4096;
 constexpr uint32_t kPathChars = 1024;
 constexpr uint32_t kVersionChars = 64;
 constexpr uint32_t kErrorChars = 512;
 
 // Human-readable source tag for rapid local rebuild/testing. The controller also hashes the
 // actual EXE and DLL on disk, so a stale or mismatched binary is obvious in copied logs.
-constexpr wchar_t kBuildTag[] = L"2026-09-29.2-sl1-plugin-gateway";
+constexpr wchar_t kBuildTag[] = L"2026-09-29.3-state-change-log";
 
 constexpr wchar_t kMappingPrefix[] = L"Local\\ReflexProbe.";
 

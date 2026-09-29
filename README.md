@@ -79,7 +79,20 @@ An unexpected secondary finding is that multiple production engines do not merel
 
 The call rate also strongly suggests per-frame submission rather than merely frequent polling. During stable portions of that Requiem run, Off produced approximately 240 calls per second and On + Boost approximately 224-225 calls per second, closely tracking the observed frame-rate regimes.
 
-This behavior makes raw GUI logging noisy enough that **state-change display should become the default**. ReflexProbe should still count every call and preserve raw data in some optional form, but the visible log should normally show changes rather than thousands of identical lines.
+### RAM-resident capture and state-change display
+
+ReflexProbe now separates capture from display. Every Reflex call successfully drained from the injected shared-memory transport is retained as a compact structured record in the controller's RAM. ReflexProbe does **not** write the capture to disk.
+
+The GUI defaults to **State changes only**:
+
+- the first Reflex state is displayed immediately;
+- identical subsequent calls are retained and counted but produce no EDIT-control writes;
+- when backend, mode, requested interval, effective interval, or result changes, the controller prints one `Previous Reflex state repeated N more times.` line and then the new state;
+- when the target process exits, the final unchanged run is closed the same way, so a one-hour unchanged session produces one final repeat count rather than losing that information.
+
+Unchecking **State changes only** rebuilds the visible log from the same RAM-resident history and shows every captured Reflex call. Rechecking it rebuilds the compressed state-change view. Ordinary controller/status messages remain interleaved with the Reflex history in either view.
+
+The shared transport ring was enlarged from 128 to **4096 events**. This is still small (roughly a few hundred KiB of shared memory) but gives the 100 ms controller poll substantial headroom even for very high frame rates. If the transport is ever lapped anyway, ReflexProbe reports the exact number of lost calls and restarts the state-change run instead of silently pretending the capture was complete.
 
 ## Solution layout
 
@@ -151,10 +164,11 @@ This path is now confirmed working in **A Plague Tale: Requiem**, whose local `s
 1. Start `ReflexProbe.exe`.
 2. Browse to a DRM-free x64 game executable.
 3. Leave **Override Reflex frame limit** unchecked for the first observation run.
-4. Choose **Launch + Inject**.
-5. ReflexProbe creates the game suspended, injects `ReflexProbe64.dll`, and resumes it.
-6. The injected DLL waits for a modern Streamline resolver or arms the SL1 plugin-gateway interception.
-7. Every observed Reflex options/constants call currently reports the backend, mode, requested `frameLimitUs`, effective value, and normalized result.
+4. Leave **State changes only** checked for the normal readable log, or uncheck it whenever the full RAM-captured call stream is needed.
+5. Choose **Launch + Inject**.
+6. ReflexProbe creates the game suspended, injects `ReflexProbe64.dll`, and resumes it.
+7. The injected DLL waits for a modern Streamline resolver or arms the SL1 plugin-gateway interception.
+8. Every observed Reflex options/constants call is retained in controller RAM; the visible log either shows only state transitions plus repeat counts or the complete call stream.
 
 The first MinHook implementation reached the genuine `slReflexSetOptions` implementation in Cyberpunk 2077, but Windows rejected MinHook's executable-page protection change (`MH_ERROR_MEMORY_PROTECT`). The current design stays at import-table/function-resolution boundaries instead.
 
@@ -183,6 +197,7 @@ Changing the override while the game is running updates shared configuration imm
 - **Cyberpunk 2077 (GOG):** D3D12, modern Streamline. Observation works. Runtime-loaded Reflex came from NVIDIA's NGX model cache rather than necessarily the game-directory DLL. The game repeatedly submits all Reflex states with `frameLimitUs=0`.
 - **The Witcher 3 Remastered:** D3D12, modern Streamline 2.14.1-era path. Observation works. REDengine again repeatedly submits Off, On and On + Boost with `frameLimitUs=0`.
 - **A Plague Tale: Requiem (GOG):** D3D12, Streamline 1.0. Observation now works through `sl.reflex!slSetConstants`. Off, On and On + Boost all submit `frameLimitUs=0`; settings are submitted at roughly frame cadence.
+- **Blood of the Dawnwalker (GOG):** UE5.5.3 according to the local build; next fresh shipping-UE runtime target. Reflex integration layer is intentionally treated as unknown until observed.
 - **No Man's Sky:** Vulkan + Streamline. Planned comparison target for the D3D/Vulkan split.
 - **Pragmata and other launcher titles:** later, after runtime attach/watch is added.
 
@@ -196,7 +211,8 @@ The bootstrap build is not a general-purpose injector yet.
 - x64 only
 - modern Streamline resolver interception
 - Streamline 1.x plugin-gateway interception plus public-setter fallback
-- raw visible event logging still spams on engines that submit settings every frame
+- capture history is RAM-only; there is intentionally no disk logger/export path
+- the visible log is still a standard Win32 EDIT control with a 16 MiB text limit; the structured RAM history is separate from that display limit
 - no runtime attach/watch yet
 - no native NVAPI hook yet
 - no native Vulkan hook yet
@@ -206,11 +222,11 @@ Do not use ReflexProbe with anti-cheat/protected multiplayer titles. The intende
 
 ## Planned next steps
 
-1. Change the visible log to **state-change-first** output by default while preserving a total-call counter and designing an optional raw-call capture/export path.
+1. Observe **Blood of the Dawnwalker / UE5.5.3** and determine whether the shipping game reaches Reflex through modern Streamline or a native UE/NVAPI path.
 2. Prove the actual override path in both modern and legacy D3D12 Streamline games, especially forcing `6061 us` from a game that requested zero and checking for ~165 FPS.
 3. Repeat the zero-request experiment on No Man's Sky / Vulkan Streamline and compare directly against D3D behavior.
 4. Add runtime **Attach** and **Watch for process** modes so normal Steam-launched games are usable without ReflexProbe knowing anything about Steam.
 5. Add native NVAPI Reflex interception (`NvAPI_D3D_SetSleepMode`).
 6. Add native Vulkan Reflex interception (`vkSetLatencySleepModeNV`) when a game requires it.
 
-The architecture is intentionally boring: Win32 GUI outside the game, one injected DLL inside it, and one integer under the microscope.
+The architecture is intentionally boring: Win32 GUI outside the game, one injected DLL inside it, one RAM-resident event history, and one integer under the microscope.

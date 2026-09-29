@@ -31,6 +31,7 @@ constexpr int kStatusTop = 186;
 constexpr int kMinimumWindowWidth = 700;
 constexpr int kMinimumWindowHeight = 480;
 constexpr WPARAM kStatusTextLimit = 16u * 1024u * 1024u;
+constexpr size_t kInitialHistoryCapacity = 4096;
 
 enum ControlId : int {
     IDC_GAME_PATH = 1001,
@@ -41,7 +42,39 @@ enum ControlId : int {
     IDC_APPLY_OVERRIDE,
     IDC_LAUNCH,
     IDC_STATUS,
-    IDC_WORD_WRAP
+    IDC_WORD_WRAP,
+    IDC_STATE_CHANGES
+};
+
+enum HistoryRecordType : uint32_t {
+    HistoryRecordStatusLine = 1,
+    HistoryRecordReflexEvent = 2,
+    HistoryRecordRunBoundary = 3
+};
+
+struct CapturedReflexEvent {
+    LONGLONG qpc;
+    LONG sequence;
+    LONG mode;
+    LONG result;
+    LONG backend;
+    uint32_t requestedUs;
+    uint32_t effectiveUs;
+};
+
+struct HistoryRecord {
+    uint32_t type;
+    uint32_t reserved;
+    union {
+        CapturedReflexEvent reflex;
+        struct {
+            LONGLONG qpc;
+            wchar_t* text;
+        } status;
+        struct {
+            LONGLONG qpc;
+        } boundary;
+    };
 };
 
 struct AppState {
@@ -59,6 +92,7 @@ struct AppState {
     HWND applyOverride = nullptr;
     HWND launch = nullptr;
     HWND statusLabel = nullptr;
+    HWND stateChanges = nullptr;
     HWND wordWrap = nullptr;
     HWND status = nullptr;
     WNDPROC statusOriginalProc = nullptr;
@@ -71,6 +105,16 @@ struct AppState {
     LONG lastHookState = -1;
     LONG lastEventSerial = 0;
     bool loggedInjectedBuild = false;
+
+    HistoryRecord* history = nullptr;
+    size_t historyCount = 0;
+    size_t historyCapacity = 0;
+    bool historyCaptureDisabled = false;
+    bool historyCaptureWarningShown = false;
+
+    bool haveStateEvent = false;
+    CapturedReflexEvent stateEvent{};
+    uint64_t stateRepeatCount = 0;
 };
 
 AppState g_app;
@@ -172,7 +216,7 @@ void FormatTimestamp(LONGLONG eventQpc, wchar_t* out, size_t outCount)
         static_cast<unsigned int>(localTime.wSecond));
 }
 
-void AppendStatusLineAtQpc(const wchar_t* text, LONGLONG eventQpc)
+void AppendDisplayLineAtQpc(const wchar_t* text, LONGLONG eventQpc)
 {
     if (!text)
         return;
@@ -194,9 +238,118 @@ void AppendStatusLineAtQpc(const wchar_t* text, LONGLONG eventQpc)
     }
 }
 
+void AppendDisplayLine(const wchar_t* text)
+{
+    AppendDisplayLineAtQpc(text, 0);
+}
+
+bool EnsureHistoryCapacity(size_t requiredCount)
+{
+    if (requiredCount <= g_app.historyCapacity)
+        return true;
+    if (g_app.historyCaptureDisabled)
+        return false;
+
+    size_t newCapacity = g_app.historyCapacity ? g_app.historyCapacity : kInitialHistoryCapacity;
+    while (newCapacity < requiredCount) {
+        if (newCapacity > static_cast<size_t>(-1) / 2)
+            return false;
+        newCapacity *= 2;
+    }
+
+    if (newCapacity > static_cast<size_t>(-1) / sizeof(HistoryRecord))
+        return false;
+
+    const SIZE_T bytes = static_cast<SIZE_T>(newCapacity * sizeof(HistoryRecord));
+    void* memory = g_app.history
+        ? HeapReAlloc(GetProcessHeap(), 0, g_app.history, bytes)
+        : HeapAlloc(GetProcessHeap(), 0, bytes);
+    if (!memory)
+        return false;
+
+    g_app.history = static_cast<HistoryRecord*>(memory);
+    g_app.historyCapacity = newCapacity;
+    return true;
+}
+
+void ReportHistoryCaptureFailure()
+{
+    g_app.historyCaptureDisabled = true;
+    if (g_app.historyCaptureWarningShown)
+        return;
+
+    g_app.historyCaptureWarningShown = true;
+    AppendDisplayLine(L"WARNING: Controller RAM history allocation failed. Live display continues, but the captured-history view is incomplete.");
+}
+
+bool PushHistoryRecord(const HistoryRecord& record)
+{
+    if (g_app.historyCaptureDisabled)
+        return false;
+    if (!EnsureHistoryCapacity(g_app.historyCount + 1)) {
+        ReportHistoryCaptureFailure();
+        return false;
+    }
+
+    g_app.history[g_app.historyCount++] = record;
+    return true;
+}
+
+void RecordStatusHistory(const wchar_t* text, LONGLONG eventQpc)
+{
+    if (!text || g_app.historyCaptureDisabled)
+        return;
+
+    const size_t chars = wcslen(text) + 1;
+    if (chars > static_cast<size_t>(-1) / sizeof(wchar_t)) {
+        ReportHistoryCaptureFailure();
+        return;
+    }
+
+    wchar_t* copy = static_cast<wchar_t*>(
+        HeapAlloc(GetProcessHeap(), 0, chars * sizeof(wchar_t)));
+    if (!copy) {
+        ReportHistoryCaptureFailure();
+        return;
+    }
+    wcscpy_s(copy, chars, text);
+
+    HistoryRecord record{};
+    record.type = HistoryRecordStatusLine;
+    record.status.qpc = eventQpc;
+    record.status.text = copy;
+    if (!PushHistoryRecord(record))
+        HeapFree(GetProcessHeap(), 0, copy);
+}
+
+void AppendStatusLineAtQpc(const wchar_t* text, LONGLONG eventQpc)
+{
+    if (!text)
+        return;
+
+    RecordStatusHistory(text, eventQpc);
+    AppendDisplayLineAtQpc(text, eventQpc);
+}
+
 void AppendStatusLine(const wchar_t* text)
 {
     AppendStatusLineAtQpc(text, 0);
+}
+
+void FreeHistory()
+{
+    if (g_app.history) {
+        for (size_t i = 0; i < g_app.historyCount; ++i) {
+            HistoryRecord& record = g_app.history[i];
+            if (record.type == HistoryRecordStatusLine && record.status.text)
+                HeapFree(GetProcessHeap(), 0, record.status.text);
+        }
+        HeapFree(GetProcessHeap(), 0, g_app.history);
+    }
+
+    g_app.history = nullptr;
+    g_app.historyCount = 0;
+    g_app.historyCapacity = 0;
 }
 
 LRESULT CALLBACK StatusEditProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
@@ -620,6 +773,13 @@ void ApplyOverrideToShared()
     AppendStatusLine(line);
 }
 
+void ResetLiveStateTracking()
+{
+    g_app.haveStateEvent = false;
+    g_app.stateEvent = {};
+    g_app.stateRepeatCount = 0;
+}
+
 void CleanupTarget()
 {
     if (g_app.shared) {
@@ -639,6 +799,7 @@ void CleanupTarget()
     g_app.lastHookState = -1;
     g_app.lastEventSerial = 0;
     g_app.loggedInjectedBuild = false;
+    ResetLiveStateTracking();
     if (g_app.launch)
         EnableWindow(g_app.launch, TRUE);
 }
@@ -784,6 +945,7 @@ bool LaunchAndInject()
     g_app.lastHookState = -1;
     g_app.lastEventSerial = 0;
     g_app.loggedInjectedBuild = false;
+    ResetLiveStateTracking();
     EnableWindow(g_app.launch, FALSE);
 
     wchar_t line[512]{};
@@ -826,20 +988,168 @@ const wchar_t* BackendCallName(LONG backend)
     }
 }
 
+bool StateChangesOnlyEnabled()
+{
+    return !g_app.stateChanges || Button_GetCheck(g_app.stateChanges) == BST_CHECKED;
+}
+
+void FormatReflexEvent(const CapturedReflexEvent& event, wchar_t* line, size_t lineCount)
+{
+    const wchar_t* mode = event.mode == 2 ? L"On + Boost" :
+                          (event.mode == 1 ? L"On" : L"Off");
+    const wchar_t* callName = BackendCallName(event.backend);
+
+    if (event.requestedUs) {
+        swprintf_s(line, lineCount,
+            L"%s #%ld: mode=%s, requested=%u us (%.3f FPS), effective=%u us (%.3f FPS), result=%ld",
+            callName, event.sequence, mode,
+            event.requestedUs, 1000000.0 / static_cast<double>(event.requestedUs),
+            event.effectiveUs, event.effectiveUs ? 1000000.0 / static_cast<double>(event.effectiveUs) : 0.0,
+            event.result);
+    } else if (event.effectiveUs) {
+        swprintf_s(line, lineCount,
+            L"%s #%ld: mode=%s, requested=0 us (automatic), effective=%u us (%.3f FPS), result=%ld",
+            callName, event.sequence, mode,
+            event.effectiveUs, 1000000.0 / static_cast<double>(event.effectiveUs), event.result);
+    } else {
+        swprintf_s(line, lineCount,
+            L"%s #%ld: mode=%s, requested=0 us (automatic), effective=0 us (pass-through), result=%ld",
+            callName, event.sequence, mode, event.result);
+    }
+}
+
+void AppendReflexEvent(const CapturedReflexEvent& event)
+{
+    wchar_t line[384]{};
+    FormatReflexEvent(event, line, _countof(line));
+    AppendDisplayLineAtQpc(line, event.qpc);
+}
+
+bool SameReflexState(const CapturedReflexEvent& a, const CapturedReflexEvent& b)
+{
+    return a.backend == b.backend &&
+           a.mode == b.mode &&
+           a.requestedUs == b.requestedUs &&
+           a.effectiveUs == b.effectiveUs &&
+           a.result == b.result;
+}
+
+void AppendRepeatCount(uint64_t repeatCount, LONGLONG eventQpc)
+{
+    if (!repeatCount)
+        return;
+
+    wchar_t line[128]{};
+    swprintf_s(line, L"Previous Reflex state repeated %llu more times.",
+        static_cast<unsigned long long>(repeatCount));
+    AppendDisplayLineAtQpc(line, eventQpc);
+}
+
+void HandleCapturedReflexEvent(const CapturedReflexEvent& event)
+{
+    HistoryRecord record{};
+    record.type = HistoryRecordReflexEvent;
+    record.reflex = event;
+    PushHistoryRecord(record);
+
+    const bool stateChangesOnly = StateChangesOnlyEnabled();
+
+    if (!g_app.haveStateEvent) {
+        g_app.haveStateEvent = true;
+        g_app.stateEvent = event;
+        g_app.stateRepeatCount = 0;
+        if (stateChangesOnly)
+            AppendReflexEvent(event);
+    } else if (SameReflexState(g_app.stateEvent, event)) {
+        ++g_app.stateRepeatCount;
+    } else {
+        if (stateChangesOnly) {
+            AppendRepeatCount(g_app.stateRepeatCount, event.qpc);
+            AppendReflexEvent(event);
+        }
+        g_app.stateEvent = event;
+        g_app.stateRepeatCount = 0;
+    }
+
+    if (!stateChangesOnly)
+        AppendReflexEvent(event);
+}
+
+void RecordRunBoundary(LONGLONG eventQpc)
+{
+    HistoryRecord record{};
+    record.type = HistoryRecordRunBoundary;
+    record.boundary.qpc = eventQpc;
+    PushHistoryRecord(record);
+
+    if (StateChangesOnlyEnabled() && g_app.haveStateEvent)
+        AppendRepeatCount(g_app.stateRepeatCount, eventQpc);
+    ResetLiveStateTracking();
+}
+
+void RebuildStatusView()
+{
+    if (!g_app.status)
+        return;
+
+    SetWindowTextW(g_app.status, L"");
+
+    const bool stateChangesOnly = StateChangesOnlyEnabled();
+    bool haveState = false;
+    CapturedReflexEvent state{};
+    uint64_t repeatCount = 0;
+
+    for (size_t i = 0; i < g_app.historyCount; ++i) {
+        const HistoryRecord& record = g_app.history[i];
+
+        if (record.type == HistoryRecordStatusLine) {
+            if (record.status.text)
+                AppendDisplayLineAtQpc(record.status.text, record.status.qpc);
+            continue;
+        }
+
+        if (record.type == HistoryRecordRunBoundary) {
+            if (stateChangesOnly && haveState)
+                AppendRepeatCount(repeatCount, record.boundary.qpc);
+            haveState = false;
+            repeatCount = 0;
+            continue;
+        }
+
+        if (record.type != HistoryRecordReflexEvent)
+            continue;
+
+        const CapturedReflexEvent& event = record.reflex;
+        if (!stateChangesOnly) {
+            AppendReflexEvent(event);
+            continue;
+        }
+
+        if (!haveState) {
+            AppendReflexEvent(event);
+            state = event;
+            haveState = true;
+            repeatCount = 0;
+        } else if (SameReflexState(state, event)) {
+            ++repeatCount;
+        } else {
+            AppendRepeatCount(repeatCount, event.qpc);
+            AppendReflexEvent(event);
+            state = event;
+            repeatCount = 0;
+        }
+    }
+
+    SendMessageW(g_app.status, EM_SETSEL, static_cast<WPARAM>(-1), static_cast<LPARAM>(-1));
+    SendMessageW(g_app.status, EM_SCROLLCARET, 0, 0);
+}
+
 void PollSharedState()
 {
     if (!g_app.process || !g_app.shared)
         return;
 
-    if (WaitForSingleObject(g_app.process, 0) == WAIT_OBJECT_0) {
-        DWORD exitCode = 0;
-        GetExitCodeProcess(g_app.process, &exitCode);
-        wchar_t line[160]{};
-        swprintf_s(line, L"Target exited with code %lu.", exitCode);
-        AppendStatusLine(line);
-        CleanupTarget();
-        return;
-    }
+    const bool targetExited = WaitForSingleObject(g_app.process, 0) == WAIT_OBJECT_0;
 
     if (!g_app.loggedInjectedBuild && g_app.shared->injectedBuild[0]) {
         wchar_t line[256]{};
@@ -886,7 +1196,19 @@ void PollSharedState()
 
     const LONG currentSerial = InterlockedCompareExchange(&g_app.shared->eventSerial, 0, 0);
     LONG first = g_app.lastEventSerial + 1;
-    if (currentSerial - first + 1 > static_cast<LONG>(ReflexProbeProtocol::kEventCapacity)) {
+    const LONG available = currentSerial - first + 1;
+    if (available > static_cast<LONG>(ReflexProbeProtocol::kEventCapacity)) {
+        const LONG lost = available - static_cast<LONG>(ReflexProbeProtocol::kEventCapacity);
+        LARGE_INTEGER qpc{};
+        QueryPerformanceCounter(&qpc);
+        RecordRunBoundary(qpc.QuadPart);
+
+        wchar_t line[256]{};
+        swprintf_s(line,
+            L"WARNING: Reflex transport ring overrun; %ld call(s) were lost before the controller drained them. State-change run restarted.",
+            lost);
+        AppendStatusLineAtQpc(line, qpc.QuadPart);
+
         first = currentSerial - static_cast<LONG>(ReflexProbeProtocol::kEventCapacity) + 1;
         g_app.lastEventSerial = first - 1;
     }
@@ -903,33 +1225,33 @@ void PollSharedState()
         if (storedSerial != serial)
             break;
 
-        const wchar_t* mode = event.mode == 2 ? L"On + Boost" :
-                              (event.mode == 1 ? L"On" : L"Off");
-        const wchar_t* callName = BackendCallName(backend);
-        wchar_t line[384]{};
-        if (event.requestedUs)
-            swprintf_s(line,
-                L"%s #%ld: mode=%s, requested=%u us (%.3f FPS), effective=%u us (%.3f FPS), result=%ld",
-                callName, serial, mode,
-                event.requestedUs, 1000000.0 / static_cast<double>(event.requestedUs),
-                event.effectiveUs, event.effectiveUs ? 1000000.0 / static_cast<double>(event.effectiveUs) : 0.0,
-                event.result);
-        else if (event.effectiveUs)
-            swprintf_s(line,
-                L"%s #%ld: mode=%s, requested=0 us (automatic), effective=%u us (%.3f FPS), result=%ld",
-                callName, serial, mode,
-                event.effectiveUs, 1000000.0 / static_cast<double>(event.effectiveUs), event.result);
-        else
-            swprintf_s(line,
-                L"%s #%ld: mode=%s, requested=0 us (automatic), effective=0 us (pass-through), result=%ld",
-                callName, serial, mode, event.result);
-
-        AppendStatusLineAtQpc(line, event.qpc);
+        CapturedReflexEvent captured{};
+        captured.qpc = event.qpc;
+        captured.sequence = serial;
+        captured.mode = event.mode;
+        captured.result = event.result;
+        captured.backend = backend;
+        captured.requestedUs = event.requestedUs;
+        captured.effectiveUs = event.effectiveUs;
+        HandleCapturedReflexEvent(captured);
         processedSerial = serial;
     }
 
     if (processedSerial > g_app.lastEventSerial)
         g_app.lastEventSerial = processedSerial;
+
+    if (targetExited) {
+        LARGE_INTEGER qpc{};
+        QueryPerformanceCounter(&qpc);
+        RecordRunBoundary(qpc.QuadPart);
+
+        DWORD exitCode = 0;
+        GetExitCodeProcess(g_app.process, &exitCode);
+        wchar_t line[160]{};
+        swprintf_s(line, L"Target exited with code %lu.", exitCode);
+        AppendStatusLineAtQpc(line, qpc.QuadPart);
+        CleanupTarget();
+    }
 }
 
 void BrowseForGame()
@@ -957,6 +1279,7 @@ void LayoutControls(int clientWidth, int clientHeight)
     const int usableWidth = clientWidth - (kMargin * 2);
     const int browseWidth = 96;
     const int launchWidth = 144;
+    const int stateWidth = 150;
     const int wrapWidth = 104;
 
     if (g_app.gameLabel)
@@ -986,6 +1309,9 @@ void LayoutControls(int clientWidth, int clientHeight)
 
     if (g_app.statusLabel)
         MoveWindow(g_app.statusLabel, kMargin, 164, 180, 20, TRUE);
+    if (g_app.stateChanges)
+        MoveWindow(g_app.stateChanges,
+            clientWidth - kMargin - wrapWidth - 10 - stateWidth, 162, stateWidth, 22, TRUE);
     if (g_app.wordWrap)
         MoveWindow(g_app.wordWrap, clientWidth - kMargin - wrapWidth, 162, wrapWidth, 22, TRUE);
 
@@ -1055,6 +1381,12 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
         SetChildFont(g_app.statusLabel, font);
 
+        g_app.stateChanges = CreateWindowExW(0, L"BUTTON", L"State changes only",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_STATE_CHANGES), g_app.instance, nullptr);
+        SetChildFont(g_app.stateChanges, font);
+        Button_SetCheck(g_app.stateChanges, BST_CHECKED);
+
         g_app.wordWrap = CreateWindowExW(0, L"BUTTON", L"Word wrap",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
             0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_WORD_WRAP), g_app.instance, nullptr);
@@ -1069,6 +1401,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 
         AppendStatusLine(L"ReflexProbe bootstrap: direct-launch Streamline observer/override.");
         AppendStatusLine(L"Override is OFF by default. Anti-cheat/protected games are intentionally out of scope.");
+        AppendStatusLine(L"Reflex calls are retained in controller RAM. State changes only is ON by default; no capture is written to disk.");
         LogBinaryIdentity();
         SetTimer(window, kPollTimer, 100, nullptr);
         return 0;
@@ -1096,6 +1429,10 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         case IDC_LAUNCH:
             LaunchAndInject();
             return 0;
+        case IDC_STATE_CHANGES:
+            if (HIWORD(wParam) == BN_CLICKED)
+                RebuildStatusView();
+            return 0;
         case IDC_WORD_WRAP:
             if (HIWORD(wParam) == BN_CLICKED) {
                 const bool wordWrap = Button_GetCheck(g_app.wordWrap) == BST_CHECKED;
@@ -1119,6 +1456,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     case WM_DESTROY:
         KillTimer(window, kPollTimer);
         CleanupTarget();
+        FreeHistory();
         PostQuitMessage(0);
         return 0;
     }
