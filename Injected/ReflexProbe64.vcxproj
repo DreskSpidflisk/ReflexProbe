@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{D8623F64-7694-4CB2-AC1E-09C9B715A2B3}</ProjectGuid>
+    <RootNamespace>ReflexProbe64</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType><UseDebugLibraries>true</UseDebugLibraries><PlatformToolset>v143</PlatformToolset><CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType><UseDebugLibraries>false</UseDebugLibraries><PlatformToolset>v143</PlatformToolset><WholeProgramOptimization>true</WholeProgramOptimization><CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <OutDir>$(SolutionDir)bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(SolutionDir)obj\ReflexProbe64\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>ReflexProbe64</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile><WarningLevel>Level4</WarningLevel><SDLCheck>true</SDLCheck><PreprocessorDefinitions>_DEBUG;UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions><ConformanceMode>true</ConformanceMode><LanguageStandard>stdcpp17</LanguageStandard><AdditionalIncludeDirectories>$(STREAMLINE_SDK)\include;$(SolutionDir)ThirdParty\MinHook\include;$(SolutionDir)ThirdParty\MinHook\src;$(SolutionDir)ThirdParty\MinHook\src\hde;..\Common;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
+    <Link><SubSystem>Windows</SubSystem><GenerateDebugInformation>true</GenerateDebugInformation><AdditionalDependencies>version.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile><WarningLevel>Level4</WarningLevel><FunctionLevelLinking>true</FunctionLevelLinking><IntrinsicFunctions>true</IntrinsicFunctions><SDLCheck>true</SDLCheck><PreprocessorDefinitions>NDEBUG;UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions><ConformanceMode>true</ConformanceMode><LanguageStandard>stdcpp17</LanguageStandard><Optimization>MaxSpeed</Optimization><AdditionalIncludeDirectories>$(STREAMLINE_SDK)\include;$(SolutionDir)ThirdParty\MinHook\include;$(SolutionDir)ThirdParty\MinHook\src;$(SolutionDir)ThirdParty\MinHook\src\hde;..\Common;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
+    <Link><SubSystem>Windows</SubSystem><EnableCOMDATFolding>true</EnableCOMDATFolding><OptimizeReferences>true</OptimizeReferences><GenerateDebugInformation>true</GenerateDebugInformation><AdditionalDependencies>version.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="ReflexProbe64.cpp" />
+    <ClCompile Include="$(SolutionDir)ThirdParty\MinHook\src\buffer.c" />
+    <ClCompile Include="$(SolutionDir)ThirdParty\MinHook\src\hook.c" />
+    <ClCompile Include="$(SolutionDir)ThirdParty\MinHook\src\trampoline.c" />
+    <ClCompile Include="$(SolutionDir)ThirdParty\MinHook\src\hde\hde64.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\Common\Protocol.h" />
+    <ClInclude Include="$(SolutionDir)ThirdParty\MinHook\include\MinHook.h" />
+  </ItemGroup>
+  <Target Name="CheckReflexProbeDependencies" BeforeTargets="PrepareForBuild">
+    <Error Condition="!Exists('$(SolutionDir)ThirdParty\MinHook\include\MinHook.h')" Text="MinHook submodule is missing. Run: git submodule update --init --recursive ThirdParty/MinHook" />
+    <Error Condition="!Exists('$(STREAMLINE_SDK)\include\sl_reflex.h')" Text="STREAMLINE_SDK must point at an NVIDIA Streamline SDK containing include\sl_reflex.h (same convention as GSyncProbe.NV)." />
+  </Target>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

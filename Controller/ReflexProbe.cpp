@@ -1,0 +1,730 @@
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#define NOMINMAX
+#include <windows.h>
+#include <windowsx.h>
+#include <commdlg.h>
+#include <tlhelp32.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <wchar.h>
+#include <math.h>
+#include <float.h>
+
+#include "../Common/Protocol.h"
+
+#pragma comment(lib, "comdlg32.lib")
+
+namespace {
+
+constexpr wchar_t kWindowClass[] = L"ReflexProbeControlWindow";
+constexpr UINT_PTR kPollTimer = 1;
+
+enum ControlId : int {
+    IDC_GAME_PATH = 1001,
+    IDC_BROWSE,
+    IDC_ARGUMENTS,
+    IDC_OVERRIDE_ENABLE,
+    IDC_OVERRIDE_FPS,
+    IDC_APPLY_OVERRIDE,
+    IDC_LAUNCH,
+    IDC_STATUS
+};
+
+struct AppState {
+    HINSTANCE instance = nullptr;
+    HWND window = nullptr;
+    HWND gamePath = nullptr;
+    HWND arguments = nullptr;
+    HWND overrideEnable = nullptr;
+    HWND overrideFps = nullptr;
+    HWND applyOverride = nullptr;
+    HWND launch = nullptr;
+    HWND status = nullptr;
+
+    HANDLE process = nullptr;
+    DWORD processId = 0;
+    HANDLE mapping = nullptr;
+    ReflexProbeProtocol::SharedState* shared = nullptr;
+
+    LONG lastHookState = -1;
+    LONG lastEventSerial = 0;
+};
+
+AppState g_app;
+
+void SetChildFont(HWND child, HFONT font)
+{
+    if (child)
+        SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+}
+
+void AppendStatus(const wchar_t* text)
+{
+    if (!g_app.status || !text)
+        return;
+
+    SendMessageW(g_app.status, EM_SETSEL, static_cast<WPARAM>(-1), static_cast<LPARAM>(-1));
+    SendMessageW(g_app.status, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(text));
+    SendMessageW(g_app.status, EM_SCROLLCARET, 0, 0);
+}
+
+void AppendStatusLine(const wchar_t* text)
+{
+    AppendStatus(text);
+    AppendStatus(L"\r\n");
+}
+
+void BuildMappingName(DWORD processId, wchar_t* out, size_t outCount)
+{
+    swprintf_s(out, outCount, L"%s%lu", ReflexProbeProtocol::kMappingPrefix, processId);
+}
+
+const wchar_t* PathFileName(const wchar_t* path)
+{
+    if (!path)
+        return L"";
+
+    const wchar_t* slash = wcsrchr(path, L'\\');
+    const wchar_t* slash2 = wcsrchr(path, L'/');
+    if (!slash || (slash2 && slash2 > slash))
+        slash = slash2;
+    return slash ? slash + 1 : path;
+}
+
+void PathDirectory(const wchar_t* path, wchar_t* out, size_t outCount)
+{
+    if (!out || !outCount)
+        return;
+
+    out[0] = 0;
+    if (!path || !*path)
+        return;
+
+    wcscpy_s(out, outCount, path);
+    wchar_t* slash = wcsrchr(out, L'\\');
+    wchar_t* slash2 = wcsrchr(out, L'/');
+    if (!slash || (slash2 && slash2 > slash))
+        slash = slash2;
+    if (slash)
+        *slash = 0;
+}
+
+bool GetSiblingDllPath(wchar_t* out, size_t outCount)
+{
+    if (!out || !outCount)
+        return false;
+
+    DWORD count = GetModuleFileNameW(nullptr, out, static_cast<DWORD>(outCount));
+    if (!count || count >= outCount)
+        return false;
+
+    wchar_t* slash = wcsrchr(out, L'\\');
+    if (!slash)
+        return false;
+
+    slash[1] = 0;
+    return wcscat_s(out, outCount, L"ReflexProbe64.dll") == 0;
+}
+
+uintptr_t FindRemoteModuleBase(DWORD processId, const wchar_t* moduleName)
+{
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, processId);
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return 0;
+
+    MODULEENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    uintptr_t result = 0;
+
+    if (Module32FirstW(snapshot, &entry)) {
+        do {
+            if (_wcsicmp(entry.szModule, moduleName) == 0) {
+                result = reinterpret_cast<uintptr_t>(entry.modBaseAddr);
+                break;
+            }
+        } while (Module32NextW(snapshot, &entry));
+    }
+
+    CloseHandle(snapshot);
+    return result;
+}
+
+bool GetLocalFunctionOwner(void* function, HMODULE& owner, wchar_t* moduleName, size_t moduleNameCount)
+{
+    MEMORY_BASIC_INFORMATION memory{};
+    if (!VirtualQuery(function, &memory, sizeof(memory)))
+        return false;
+
+    owner = reinterpret_cast<HMODULE>(memory.AllocationBase);
+
+    wchar_t fullPath[MAX_PATH]{};
+    DWORD count = GetModuleFileNameW(owner, fullPath, static_cast<DWORD>(_countof(fullPath)));
+    if (!count || count >= _countof(fullPath))
+        return false;
+
+    return wcscpy_s(moduleName, moduleNameCount, PathFileName(fullPath)) == 0;
+}
+
+bool WaitForRemoteFunctionOwner(DWORD processId, const wchar_t* moduleName, uintptr_t& baseOut, DWORD timeoutMs)
+{
+    const ULONGLONG end = GetTickCount64() + timeoutMs;
+    do {
+        baseOut = FindRemoteModuleBase(processId, moduleName);
+        if (baseOut)
+            return true;
+        Sleep(1);
+    } while (GetTickCount64() < end);
+
+    return false;
+}
+
+bool InjectDll(HANDLE process, DWORD processId, const wchar_t* dllPath, wchar_t* error, size_t errorCount)
+{
+    HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+    FARPROC loadLibrary = kernel32 ? GetProcAddress(kernel32, "LoadLibraryW") : nullptr;
+    if (!loadLibrary) {
+        swprintf_s(error, errorCount, L"Could not resolve local LoadLibraryW.");
+        return false;
+    }
+
+    HMODULE functionOwner = nullptr;
+    wchar_t ownerName[MAX_PATH]{};
+    if (!GetLocalFunctionOwner(reinterpret_cast<void*>(loadLibrary), functionOwner, ownerName, _countof(ownerName))) {
+        swprintf_s(error, errorCount, L"Could not identify the module that owns LoadLibraryW.");
+        return false;
+    }
+
+    uintptr_t remoteOwner = 0;
+    if (!WaitForRemoteFunctionOwner(processId, ownerName, remoteOwner, 5000)) {
+        swprintf_s(error, errorCount, L"Target never loaded %s, which owns LoadLibraryW on this system.", ownerName);
+        return false;
+    }
+
+    const uintptr_t localOwner = reinterpret_cast<uintptr_t>(functionOwner);
+    const uintptr_t localFunction = reinterpret_cast<uintptr_t>(loadLibrary);
+    const uintptr_t remoteFunction = remoteOwner + (localFunction - localOwner);
+
+    const SIZE_T bytes = (wcslen(dllPath) + 1) * sizeof(wchar_t);
+    void* remotePath = VirtualAllocEx(process, nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!remotePath) {
+        swprintf_s(error, errorCount, L"VirtualAllocEx failed (%lu).", GetLastError());
+        return false;
+    }
+
+    SIZE_T written = 0;
+    if (!WriteProcessMemory(process, remotePath, dllPath, bytes, &written) || written != bytes) {
+        swprintf_s(error, errorCount, L"WriteProcessMemory failed (%lu).", GetLastError());
+        VirtualFreeEx(process, remotePath, 0, MEM_RELEASE);
+        return false;
+    }
+
+    HANDLE thread = CreateRemoteThread(process, nullptr, 0,
+        reinterpret_cast<LPTHREAD_START_ROUTINE>(remoteFunction), remotePath, 0, nullptr);
+    if (!thread) {
+        swprintf_s(error, errorCount, L"CreateRemoteThread failed (%lu).", GetLastError());
+        VirtualFreeEx(process, remotePath, 0, MEM_RELEASE);
+        return false;
+    }
+
+    const DWORD wait = WaitForSingleObject(thread, 10000);
+    CloseHandle(thread);
+
+    if (wait != WAIT_OBJECT_0) {
+        // The remote thread may still be using its path buffer. Leaking one tiny allocation
+        // is safer than freeing memory underneath a stalled LoadLibraryW.
+        swprintf_s(error, errorCount, L"Remote LoadLibraryW did not finish in 10 seconds.");
+        return false;
+    }
+
+    VirtualFreeEx(process, remotePath, 0, MEM_RELEASE);
+
+    if (!FindRemoteModuleBase(processId, L"ReflexProbe64.dll")) {
+        swprintf_s(error, errorCount, L"ReflexProbe64.dll was not present after LoadLibraryW returned.");
+        return false;
+    }
+
+    return true;
+}
+
+bool ParseOverrideFromUi(bool& enabled, uint32_t& frameLimitUs, wchar_t* error, size_t errorCount)
+{
+    enabled = Button_GetCheck(g_app.overrideEnable) == BST_CHECKED;
+    frameLimitUs = 0;
+
+    if (!enabled)
+        return true;
+
+    wchar_t fpsText[64]{};
+    GetWindowTextW(g_app.overrideFps, fpsText, static_cast<int>(_countof(fpsText)));
+
+    wchar_t* end = nullptr;
+    const double fps = wcstod(fpsText, &end);
+    if (end == fpsText || !_finite(fps) || fps <= 0.0) {
+        swprintf_s(error, errorCount, L"Override FPS must be a positive number.");
+        return false;
+    }
+
+    double interval = 1000000.0 / fps;
+    if (interval < 1.0)
+        interval = 1.0;
+    if (interval > 4294967295.0)
+        interval = 4294967295.0;
+
+    frameLimitUs = static_cast<uint32_t>(interval + 0.5);
+    return true;
+}
+
+void ApplyOverrideToShared()
+{
+    if (!g_app.shared)
+        return;
+
+    bool enabled = false;
+    uint32_t frameLimitUs = 0;
+    wchar_t error[256]{};
+    if (!ParseOverrideFromUi(enabled, frameLimitUs, error, _countof(error))) {
+        MessageBoxW(g_app.window, error, L"ReflexProbe", MB_ICONWARNING);
+        return;
+    }
+
+    InterlockedExchange(&g_app.shared->overrideUs, static_cast<LONG>(frameLimitUs));
+    InterlockedExchange(&g_app.shared->overrideEnabled, enabled ? 1 : 0);
+    InterlockedIncrement(&g_app.shared->configSequence);
+
+    wchar_t line[256]{};
+    if (enabled)
+        swprintf_s(line, L"Override armed: %u us (%.3f FPS). Takes effect on the next slReflexSetOptions call.",
+            frameLimitUs, 1000000.0 / static_cast<double>(frameLimitUs));
+    else
+        wcscpy_s(line, L"Override disabled. Game Reflex options will pass through unchanged.");
+    AppendStatusLine(line);
+}
+
+void CleanupTarget()
+{
+    if (g_app.shared) {
+        UnmapViewOfFile(g_app.shared);
+        g_app.shared = nullptr;
+    }
+    if (g_app.mapping) {
+        CloseHandle(g_app.mapping);
+        g_app.mapping = nullptr;
+    }
+    if (g_app.process) {
+        CloseHandle(g_app.process);
+        g_app.process = nullptr;
+    }
+
+    g_app.processId = 0;
+    g_app.lastHookState = -1;
+    g_app.lastEventSerial = 0;
+    EnableWindow(g_app.launch, TRUE);
+}
+
+bool CreateSharedState(DWORD processId, const wchar_t* targetPath,
+                       bool overrideEnabled, uint32_t overrideUs,
+                       wchar_t* error, size_t errorCount)
+{
+    wchar_t mappingName[128]{};
+    BuildMappingName(processId, mappingName, _countof(mappingName));
+
+    g_app.mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
+        0, sizeof(ReflexProbeProtocol::SharedState), mappingName);
+    if (!g_app.mapping) {
+        swprintf_s(error, errorCount, L"CreateFileMapping failed (%lu).", GetLastError());
+        return false;
+    }
+
+    g_app.shared = reinterpret_cast<ReflexProbeProtocol::SharedState*>(
+        MapViewOfFile(g_app.mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(ReflexProbeProtocol::SharedState)));
+    if (!g_app.shared) {
+        swprintf_s(error, errorCount, L"MapViewOfFile failed (%lu).", GetLastError());
+        CloseHandle(g_app.mapping);
+        g_app.mapping = nullptr;
+        return false;
+    }
+
+    ZeroMemory(g_app.shared, sizeof(*g_app.shared));
+    g_app.shared->magic = ReflexProbeProtocol::kMagic;
+    g_app.shared->version = ReflexProbeProtocol::kVersion;
+    g_app.shared->structSize = sizeof(*g_app.shared);
+    g_app.shared->targetProcessId = processId;
+    g_app.shared->hookState = ReflexProbeProtocol::HookStateWaitingForDll;
+    g_app.shared->overrideEnabled = overrideEnabled ? 1 : 0;
+    g_app.shared->overrideUs = static_cast<LONG>(overrideUs);
+    wcsncpy_s(g_app.shared->targetPath, _countof(g_app.shared->targetPath), targetPath, _TRUNCATE);
+    return true;
+}
+
+bool LaunchAndInject()
+{
+    if (g_app.process)
+        return false;
+
+    wchar_t gamePath[ReflexProbeProtocol::kPathChars]{};
+    wchar_t arguments[4096]{};
+    GetWindowTextW(g_app.gamePath, gamePath, static_cast<int>(_countof(gamePath)));
+    GetWindowTextW(g_app.arguments, arguments, static_cast<int>(_countof(arguments)));
+
+    if (!gamePath[0]) {
+        MessageBoxW(g_app.window, L"Choose a game executable first.", L"ReflexProbe", MB_ICONWARNING);
+        return false;
+    }
+
+    DWORD attributes = GetFileAttributesW(gamePath);
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        MessageBoxW(g_app.window, L"The selected game executable does not exist.", L"ReflexProbe", MB_ICONWARNING);
+        return false;
+    }
+
+    bool overrideEnabled = false;
+    uint32_t overrideUs = 0;
+    wchar_t error[512]{};
+    if (!ParseOverrideFromUi(overrideEnabled, overrideUs, error, _countof(error))) {
+        MessageBoxW(g_app.window, error, L"ReflexProbe", MB_ICONWARNING);
+        return false;
+    }
+
+    wchar_t dllPath[MAX_PATH]{};
+    if (!GetSiblingDllPath(dllPath, _countof(dllPath)) || GetFileAttributesW(dllPath) == INVALID_FILE_ATTRIBUTES) {
+        MessageBoxW(g_app.window,
+            L"ReflexProbe64.dll was not found beside ReflexProbe.exe. Build both projects in the solution.",
+            L"ReflexProbe", MB_ICONERROR);
+        return false;
+    }
+
+    wchar_t workingDirectory[ReflexProbeProtocol::kPathChars]{};
+    PathDirectory(gamePath, workingDirectory, _countof(workingDirectory));
+
+    wchar_t commandLine[32768]{};
+    if (arguments[0])
+        swprintf_s(commandLine, L"\"%s\" %s", gamePath, arguments);
+    else
+        swprintf_s(commandLine, L"\"%s\"", gamePath);
+
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+
+    if (!CreateProcessW(gamePath, commandLine, nullptr, nullptr, FALSE, CREATE_SUSPENDED,
+            nullptr, workingDirectory[0] ? workingDirectory : nullptr, &startup, &process)) {
+        swprintf_s(error, L"CreateProcess failed (%lu).", GetLastError());
+        MessageBoxW(g_app.window, error, L"ReflexProbe", MB_ICONERROR);
+        return false;
+    }
+
+    g_app.process = process.hProcess;
+    g_app.processId = process.dwProcessId;
+
+    BOOL targetIsWow64 = FALSE;
+    if (IsWow64Process(process.hProcess, &targetIsWow64) && targetIsWow64) {
+        TerminateProcess(process.hProcess, 1);
+        CloseHandle(process.hThread);
+        MessageBoxW(g_app.window, L"ReflexProbe bootstrap supports x64 targets only.", L"ReflexProbe", MB_ICONERROR);
+        CleanupTarget();
+        return false;
+    }
+
+    if (!CreateSharedState(process.dwProcessId, gamePath, overrideEnabled, overrideUs, error, _countof(error))) {
+        TerminateProcess(process.hProcess, 1);
+        CloseHandle(process.hThread);
+        MessageBoxW(g_app.window, error, L"ReflexProbe", MB_ICONERROR);
+        CleanupTarget();
+        return false;
+    }
+
+    // Most processes already expose the module containing LoadLibraryW while created suspended.
+    // If this one does not, let loader initialization run, then inject as soon as that module appears.
+    HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+    FARPROC loadLibrary = kernel32 ? GetProcAddress(kernel32, "LoadLibraryW") : nullptr;
+    HMODULE owner = nullptr;
+    wchar_t ownerName[MAX_PATH]{};
+    uintptr_t remoteOwner = 0;
+    bool resumed = false;
+
+    if (!loadLibrary || !GetLocalFunctionOwner(reinterpret_cast<void*>(loadLibrary), owner, ownerName, _countof(ownerName)) ||
+        !WaitForRemoteFunctionOwner(process.dwProcessId, ownerName, remoteOwner, 50)) {
+        ResumeThread(process.hThread);
+        resumed = true;
+    }
+
+    if (!InjectDll(process.hProcess, process.dwProcessId, dllPath, error, _countof(error))) {
+        TerminateProcess(process.hProcess, 1);
+        CloseHandle(process.hThread);
+        MessageBoxW(g_app.window, error, L"ReflexProbe injection failed", MB_ICONERROR);
+        CleanupTarget();
+        return false;
+    }
+
+    if (!resumed)
+        ResumeThread(process.hThread);
+    CloseHandle(process.hThread);
+
+    g_app.lastHookState = -1;
+    g_app.lastEventSerial = 0;
+    EnableWindow(g_app.launch, FALSE);
+
+    wchar_t line[512]{};
+    swprintf_s(line, L"Launched %s (PID %lu) and injected ReflexProbe64.dll.", PathFileName(gamePath), process.dwProcessId);
+    AppendStatusLine(line);
+    if (overrideEnabled) {
+        swprintf_s(line, L"Initial override: %u us (%.3f FPS).", overrideUs,
+            1000000.0 / static_cast<double>(overrideUs));
+        AppendStatusLine(line);
+    } else {
+        AppendStatusLine(L"Initial mode: observe only; game Reflex options pass through unchanged.");
+    }
+
+    return true;
+}
+
+void PollSharedState()
+{
+    if (!g_app.process || !g_app.shared)
+        return;
+
+    if (WaitForSingleObject(g_app.process, 0) == WAIT_OBJECT_0) {
+        DWORD exitCode = 0;
+        GetExitCodeProcess(g_app.process, &exitCode);
+        wchar_t line[160]{};
+        swprintf_s(line, L"Target exited with code %lu.", exitCode);
+        AppendStatusLine(line);
+        CleanupTarget();
+        return;
+    }
+
+    const LONG hookState = InterlockedCompareExchange(&g_app.shared->hookState, 0, 0);
+    if (hookState != g_app.lastHookState) {
+        g_app.lastHookState = hookState;
+        wchar_t line[2300]{};
+        switch (hookState) {
+        case ReflexProbeProtocol::HookStateWaitingForDll:
+            wcscpy_s(line, L"Waiting for sl.reflex.dll...");
+            break;
+        case ReflexProbeProtocol::HookStateReflexFound:
+            swprintf_s(line, L"Found Streamline Reflex: %s\r\nFile version: %s",
+                g_app.shared->reflexPath[0] ? g_app.shared->reflexPath : L"(path unavailable)",
+                g_app.shared->reflexVersion[0] ? g_app.shared->reflexVersion : L"unknown");
+            break;
+        case ReflexProbeProtocol::HookStateHooked:
+            swprintf_s(line, L"Hook active: slReflexSetOptions in %s\r\nFile version: %s",
+                g_app.shared->reflexPath[0] ? g_app.shared->reflexPath : L"sl.reflex.dll",
+                g_app.shared->reflexVersion[0] ? g_app.shared->reflexVersion : L"unknown");
+            break;
+        case ReflexProbeProtocol::HookStateError:
+            swprintf_s(line, L"Injected DLL error: %s",
+                g_app.shared->lastError[0] ? g_app.shared->lastError : L"unknown error");
+            break;
+        default:
+            swprintf_s(line, L"Unknown hook state: %ld", hookState);
+            break;
+        }
+        AppendStatusLine(line);
+    }
+
+    const LONG currentSerial = InterlockedCompareExchange(&g_app.shared->eventSerial, 0, 0);
+    LONG first = g_app.lastEventSerial + 1;
+    if (currentSerial - first + 1 > static_cast<LONG>(ReflexProbeProtocol::kEventCapacity)) {
+        first = currentSerial - static_cast<LONG>(ReflexProbeProtocol::kEventCapacity) + 1;
+        g_app.lastEventSerial = first - 1;
+    }
+
+    LONG processedSerial = g_app.lastEventSerial;
+    for (LONG serial = first; serial <= currentSerial; ++serial) {
+        if (serial <= 0)
+            continue;
+
+        const uint32_t index = static_cast<uint32_t>(serial - 1) % ReflexProbeProtocol::kEventCapacity;
+        const ReflexProbeProtocol::ReflexEvent& event = g_app.shared->events[index];
+        const LONG storedSerial = InterlockedCompareExchange(
+            const_cast<volatile LONG*>(&event.sequence), 0, 0);
+        if (storedSerial != serial)
+            break;
+
+        const wchar_t* mode = event.mode == 2 ? L"On + Boost" :
+                              (event.mode == 1 ? L"On" : L"Off");
+        wchar_t line[320]{};
+        if (event.requestedUs)
+            swprintf_s(line,
+                L"slReflexSetOptions #%ld: mode=%s, requested=%u us (%.3f FPS), effective=%u us (%.3f FPS), result=%ld",
+                serial, mode,
+                event.requestedUs, 1000000.0 / static_cast<double>(event.requestedUs),
+                event.effectiveUs, event.effectiveUs ? 1000000.0 / static_cast<double>(event.effectiveUs) : 0.0,
+                event.result);
+        else if (event.effectiveUs)
+            swprintf_s(line,
+                L"slReflexSetOptions #%ld: mode=%s, requested=0 us (automatic), effective=%u us (%.3f FPS), result=%ld",
+                serial, mode,
+                event.effectiveUs, 1000000.0 / static_cast<double>(event.effectiveUs), event.result);
+        else
+            swprintf_s(line,
+                L"slReflexSetOptions #%ld: mode=%s, requested=0 us (automatic), effective=0 us (pass-through), result=%ld",
+                serial, mode, event.result);
+
+        AppendStatusLine(line);
+        processedSerial = serial;
+    }
+
+    if (processedSerial > g_app.lastEventSerial)
+        g_app.lastEventSerial = processedSerial;
+}
+
+void BrowseForGame()
+{
+    wchar_t path[ReflexProbeProtocol::kPathChars]{};
+    GetWindowTextW(g_app.gamePath, path, static_cast<int>(_countof(path)));
+
+    OPENFILENAMEW dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = g_app.window;
+    dialog.lpstrFilter = L"Windows executables (*.exe)\0*.exe\0All files (*.*)\0*.*\0\0";
+    dialog.lpstrFile = path;
+    dialog.nMaxFile = static_cast<DWORD>(_countof(path));
+    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
+
+    if (GetOpenFileNameW(&dialog))
+        SetWindowTextW(g_app.gamePath, path);
+}
+
+LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    switch (message) {
+    case WM_CREATE: {
+        HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+        g_app.window = window;
+
+        HWND label = CreateWindowExW(0, L"STATIC", L"Game executable",
+            WS_CHILD | WS_VISIBLE, 12, 12, 150, 20, window, nullptr, g_app.instance, nullptr);
+        SetChildFont(label, font);
+
+        g_app.gamePath = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+            12, 34, 610, 24, window, reinterpret_cast<HMENU>(IDC_GAME_PATH), g_app.instance, nullptr);
+        SetChildFont(g_app.gamePath, font);
+
+        g_app.launch = nullptr;
+        HWND browse = CreateWindowExW(0, L"BUTTON", L"Browse...",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            632, 33, 96, 26, window, reinterpret_cast<HMENU>(IDC_BROWSE), g_app.instance, nullptr);
+        SetChildFont(browse, font);
+
+        label = CreateWindowExW(0, L"STATIC", L"Arguments (optional)",
+            WS_CHILD | WS_VISIBLE, 12, 68, 150, 20, window, nullptr, g_app.instance, nullptr);
+        SetChildFont(label, font);
+
+        g_app.arguments = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+            12, 90, 716, 24, window, reinterpret_cast<HMENU>(IDC_ARGUMENTS), g_app.instance, nullptr);
+        SetChildFont(g_app.arguments, font);
+
+        g_app.overrideEnable = CreateWindowExW(0, L"BUTTON", L"Override Reflex frame limit",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            12, 128, 190, 22, window, reinterpret_cast<HMENU>(IDC_OVERRIDE_ENABLE), g_app.instance, nullptr);
+        SetChildFont(g_app.overrideEnable, font);
+
+        g_app.overrideFps = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"165",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+            210, 126, 80, 24, window, reinterpret_cast<HMENU>(IDC_OVERRIDE_FPS), g_app.instance, nullptr);
+        SetChildFont(g_app.overrideFps, font);
+
+        label = CreateWindowExW(0, L"STATIC", L"FPS",
+            WS_CHILD | WS_VISIBLE, 298, 130, 40, 20, window, nullptr, g_app.instance, nullptr);
+        SetChildFont(label, font);
+
+        g_app.applyOverride = CreateWindowExW(0, L"BUTTON", L"Apply Override",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            350, 124, 120, 28, window, reinterpret_cast<HMENU>(IDC_APPLY_OVERRIDE), g_app.instance, nullptr);
+        SetChildFont(g_app.applyOverride, font);
+
+        g_app.launch = CreateWindowExW(0, L"BUTTON", L"Launch + Inject",
+            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+            584, 124, 144, 30, window, reinterpret_cast<HMENU>(IDC_LAUNCH), g_app.instance, nullptr);
+        SetChildFont(g_app.launch, font);
+
+        label = CreateWindowExW(0, L"STATIC", L"Status / Reflex requests",
+            WS_CHILD | WS_VISIBLE, 12, 164, 180, 20, window, nullptr, g_app.instance, nullptr);
+        SetChildFont(label, font);
+
+        g_app.status = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL,
+            12, 186, 716, 350, window, reinterpret_cast<HMENU>(IDC_STATUS), g_app.instance, nullptr);
+        SetChildFont(g_app.status, static_cast<HFONT>(GetStockObject(ANSI_FIXED_FONT)));
+
+        AppendStatusLine(L"ReflexProbe bootstrap: direct-launch Streamline observer/override.");
+        AppendStatusLine(L"Override is OFF by default. Anti-cheat/protected games are intentionally out of scope.");
+        SetTimer(window, kPollTimer, 100, nullptr);
+        return 0;
+    }
+
+    case WM_COMMAND:
+        switch (LOWORD(wParam)) {
+        case IDC_BROWSE:
+            BrowseForGame();
+            return 0;
+        case IDC_APPLY_OVERRIDE:
+            ApplyOverrideToShared();
+            return 0;
+        case IDC_LAUNCH:
+            LaunchAndInject();
+            return 0;
+        }
+        break;
+
+    case WM_TIMER:
+        if (wParam == kPollTimer) {
+            PollSharedState();
+            return 0;
+        }
+        break;
+
+    case WM_CLOSE:
+        DestroyWindow(window);
+        return 0;
+
+    case WM_DESTROY:
+        KillTimer(window, kPollTimer);
+        CleanupTarget();
+        PostQuitMessage(0);
+        return 0;
+    }
+
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
+} // namespace
+
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
+{
+    g_app.instance = instance;
+
+    WNDCLASSW windowClass{};
+    windowClass.lpfnWndProc = WindowProc;
+    windowClass.hInstance = instance;
+    windowClass.lpszClassName = kWindowClass;
+    windowClass.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+    windowClass.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+
+    if (!RegisterClassW(&windowClass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+        return 1;
+
+    HWND window = CreateWindowExW(0, kWindowClass, L"ReflexProbe",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+        CW_USEDEFAULT, CW_USEDEFAULT, 760, 590,
+        nullptr, nullptr, instance, nullptr);
+    if (!window)
+        return 1;
+
+    ShowWindow(window, showCommand);
+    UpdateWindow(window);
+
+    MSG message{};
+    while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+        TranslateMessage(&message);
+        DispatchMessageW(&message);
+    }
+
+    return static_cast<int>(message.wParam);
+}
