@@ -18,10 +18,16 @@
 
 #pragma comment(lib, "version.lib")
 
+#define RP_WIDEN_INNER(x) L##x
+#define RP_WIDEN(x) RP_WIDEN_INNER(x)
+
 namespace {
 
-// Streamline 1.x configured Reflex through the generic slSetFeatureConstants API.
-// Keep the old ABI local instead of dragging an obsolete Streamline SDK into the build.
+constexpr wchar_t kInjectedBuildStamp[] = RP_WIDEN(__DATE__) L" " RP_WIDEN(__TIME__);
+
+// Streamline 1.x configured Reflex through ReflexConstants. The public app-facing API
+// changed over the lifetime of SL1, but the sl.reflex plugin itself consumes this stable
+// payload through its private slSetConstants function.
 constexpr uint32_t kLegacyFeatureReflex = 3;
 
 struct LegacyReflexConstants {
@@ -41,16 +47,34 @@ static_assert(sizeof(LegacyReflexConstants) == 24);
 
 using PFunLegacySetFeatureConstants = bool(uint32_t feature, const void* constants,
                                            uint32_t frameIndex, uint32_t id);
+using PFunLegacyPluginGetFunction = void* (const char* functionName);
+using PFunLegacyPluginSetConstants = bool(const void* constants, uint32_t frameIndex, uint32_t id);
+using PFunGetProcAddress = FARPROC (WINAPI)(HMODULE module, LPCSTR procName);
 
 HANDLE g_mapping = nullptr;
 ReflexProbeProtocol::SharedState* g_shared = nullptr;
 PFun_slGetFeatureFunction* g_realGetFeatureFunction = nullptr;
 PFun_slReflexSetOptions* g_realReflexSetOptions = nullptr;
 PFunLegacySetFeatureConstants* g_realLegacySetFeatureConstants = nullptr;
+PFunLegacyPluginGetFunction* g_realLegacyPluginGetFunction = nullptr;
+PFunLegacyPluginSetConstants* g_realLegacyPluginSetConstants = nullptr;
+PFunGetProcAddress* g_realGetProcAddress = nullptr;
 
 void BuildMappingName(DWORD processId, wchar_t* out, size_t outCount)
 {
     swprintf_s(out, outCount, L"%s%lu", ReflexProbeProtocol::kMappingPrefix, processId);
+}
+
+const wchar_t* PathFileName(const wchar_t* path)
+{
+    if (!path)
+        return L"";
+
+    const wchar_t* slash = wcsrchr(path, L'\\');
+    const wchar_t* slash2 = wcsrchr(path, L'/');
+    if (!slash || (slash2 && slash2 > slash))
+        slash = slash2;
+    return slash ? slash + 1 : path;
 }
 
 void SetSharedError(const wchar_t* text)
@@ -105,6 +129,9 @@ bool ConnectSharedState()
         return false;
     }
 
+    wcsncpy_s(g_shared->injectedBuild, _countof(g_shared->injectedBuild),
+        kInjectedBuildStamp, _TRUNCATE);
+    MemoryBarrier();
     return true;
 }
 
@@ -135,6 +162,49 @@ void GetFileVersionString(const wchar_t* path, wchar_t* out, size_t outCount)
     }
 
     HeapFree(GetProcessHeap(), 0, data);
+}
+
+bool GetModulePath(HMODULE module, wchar_t* out, size_t outCount)
+{
+    if (!module || !out || !outCount)
+        return false;
+
+    const DWORD count = GetModuleFileNameW(module, out, static_cast<DWORD>(outCount));
+    if (!count || count >= outCount) {
+        out[0] = 0;
+        return false;
+    }
+    return true;
+}
+
+bool IsLegacyStreamlineInterposer(HMODULE interposer)
+{
+    if (!interposer)
+        return false;
+
+    wchar_t path[ReflexProbeProtocol::kPathChars]{};
+    wchar_t version[ReflexProbeProtocol::kVersionChars]{};
+    if (GetModulePath(interposer, path, _countof(path))) {
+        GetFileVersionString(path, version, _countof(version));
+        if (version[0]) {
+            wchar_t* end = nullptr;
+            const unsigned long major = wcstoul(version, &end, 10);
+            if (end != version && major == 1)
+                return true;
+            if (end != version && major >= 2)
+                return false;
+        }
+    }
+
+    // Some shipped Streamline DLLs carry unhelpful product file versions. The modern
+    // public feature resolver is a stronger discriminator when version metadata is absent.
+    return GetProcAddress(interposer, "slGetFeatureFunction") == nullptr;
+}
+
+void SetBackend(ReflexProbeProtocol::ReflexBackend backend)
+{
+    if (g_shared)
+        InterlockedExchange(&g_shared->backend, static_cast<LONG>(backend));
 }
 
 uint32_t ApplyConfiguredOverride(uint32_t requestedUs)
@@ -169,6 +239,21 @@ void PublishEvent(LONG mode, uint32_t requestedUs, uint32_t effectiveUs, LONG re
     InterlockedExchange(&event.sequence, serial);
 }
 
+void PublishReflexModule(HMODULE module, ReflexProbeProtocol::HookState state)
+{
+    if (!g_shared || !module)
+        return;
+
+    if (!GetModulePath(module, g_shared->reflexPath, _countof(g_shared->reflexPath)))
+        wcscpy_s(g_shared->reflexPath, L"Streamline module");
+
+    GetFileVersionString(g_shared->reflexPath, g_shared->reflexVersion,
+        _countof(g_shared->reflexVersion));
+
+    MemoryBarrier();
+    InterlockedExchange(&g_shared->hookState, static_cast<LONG>(state));
+}
+
 void PublishReflexFunction(void* function)
 {
     if (!g_shared || !function)
@@ -176,20 +261,14 @@ void PublishReflexFunction(void* function)
 
     MEMORY_BASIC_INFORMATION memory{};
     if (VirtualQuery(function, &memory, sizeof(memory))) {
-        HMODULE module = reinterpret_cast<HMODULE>(memory.AllocationBase);
-        DWORD count = GetModuleFileNameW(module, g_shared->reflexPath,
-            static_cast<DWORD>(_countof(g_shared->reflexPath)));
-        if (!count || count >= _countof(g_shared->reflexPath))
-            wcscpy_s(g_shared->reflexPath, L"Streamline module");
+        PublishReflexModule(reinterpret_cast<HMODULE>(memory.AllocationBase),
+            ReflexProbeProtocol::HookStateHooked);
     } else {
         wcscpy_s(g_shared->reflexPath, L"Streamline module");
+        g_shared->reflexVersion[0] = 0;
+        MemoryBarrier();
+        InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateHooked);
     }
-
-    GetFileVersionString(g_shared->reflexPath, g_shared->reflexVersion,
-        _countof(g_shared->reflexVersion));
-
-    MemoryBarrier();
-    InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateHooked);
 }
 
 sl::Result HookReflexSetOptions(const sl::ReflexOptions& options)
@@ -223,11 +302,79 @@ bool HookLegacySetFeatureConstants(uint32_t feature, const void* constants,
     forwarded.frameLimitUs = effectiveUs;
 
     const bool result = real(feature, &forwarded, frameIndex, id);
-    // Modern Streamline uses result 0 for success. Normalize the old bool API so the
-    // controller can keep one event format across both generations.
     PublishEvent(static_cast<LONG>(requested->mode), requested->frameLimitUs,
         effectiveUs, result ? 0 : 1);
     return result;
+}
+
+bool HookLegacyPluginSetConstants(const void* constants, uint32_t frameIndex, uint32_t id)
+{
+    PFunLegacyPluginSetConstants* real = g_realLegacyPluginSetConstants;
+    if (!real)
+        return false;
+
+    if (!constants)
+        return real(constants, frameIndex, id);
+
+    const auto* requested = static_cast<const LegacyReflexConstants*>(constants);
+    LegacyReflexConstants forwarded = *requested;
+    const uint32_t effectiveUs = ApplyConfiguredOverride(requested->frameLimitUs);
+    forwarded.frameLimitUs = effectiveUs;
+
+    const bool result = real(&forwarded, frameIndex, id);
+    PublishEvent(static_cast<LONG>(requested->mode), requested->frameLimitUs,
+        effectiveUs, result ? 0 : 1);
+    return result;
+}
+
+void* HookLegacyPluginGetFunction(const char* functionName)
+{
+    PFunLegacyPluginGetFunction* real = g_realLegacyPluginGetFunction;
+    if (!real)
+        return nullptr;
+
+    void* function = real(functionName);
+    if (!functionName || !function)
+        return function;
+
+    if (strcmp(functionName, "slSetConstants") == 0) {
+        g_realLegacyPluginSetConstants =
+            reinterpret_cast<PFunLegacyPluginSetConstants*>(function);
+        SetBackend(ReflexProbeProtocol::ReflexBackendLegacyPluginConstants);
+        PublishReflexFunction(function);
+        return reinterpret_cast<void*>(&HookLegacyPluginSetConstants);
+    }
+
+    return function;
+}
+
+FARPROC WINAPI HookInterposerGetProcAddress(HMODULE module, LPCSTR procName)
+{
+    PFunGetProcAddress* real = g_realGetProcAddress;
+    if (!real)
+        return nullptr;
+
+    FARPROC result = real(module, procName);
+    if (!result || !module || !procName)
+        return result;
+
+    // GetProcAddress also accepts ordinals encoded as small pointer values.
+    if (reinterpret_cast<uintptr_t>(procName) <= 0xFFFFu)
+        return result;
+
+    if (strcmp(procName, "slGetPluginFunction") != 0)
+        return result;
+
+    wchar_t modulePath[ReflexProbeProtocol::kPathChars]{};
+    if (!GetModulePath(module, modulePath, _countof(modulePath)) ||
+        _wcsicmp(PathFileName(modulePath), L"sl.reflex.dll") != 0) {
+        return result;
+    }
+
+    g_realLegacyPluginGetFunction = reinterpret_cast<PFunLegacyPluginGetFunction*>(result);
+    SetBackend(ReflexProbeProtocol::ReflexBackendLegacyPluginConstants);
+    PublishReflexModule(module, ReflexProbeProtocol::HookStateReflexFound);
+    return reinterpret_cast<FARPROC>(&HookLegacyPluginGetFunction);
 }
 
 sl::Result HookGetFeatureFunction(sl::Feature feature, const char* functionName, void*& function)
@@ -242,6 +389,7 @@ sl::Result HookGetFeatureFunction(sl::Feature feature, const char* functionName,
 
     if (strcmp(functionName, "slReflexSetOptions") == 0) {
         g_realReflexSetOptions = reinterpret_cast<PFun_slReflexSetOptions*>(function);
+        SetBackend(ReflexProbeProtocol::ReflexBackendModernSetOptions);
         PublishReflexFunction(function);
         function = reinterpret_cast<void*>(&HookReflexSetOptions);
     }
@@ -275,11 +423,92 @@ bool PatchImportSlot(IMAGE_THUNK_DATA64* thunk, void* replacement, const wchar_t
     return true;
 }
 
+bool PatchLegacyPluginGatewayResolver(HMODULE module, bool& sawTarget)
+{
+    sawTarget = false;
+
+    HMODULE interposer = GetModuleHandleW(L"sl.interposer.dll");
+    if (!interposer || module != interposer || !IsLegacyStreamlineInterposer(interposer))
+        return true;
+
+    auto* base = reinterpret_cast<unsigned char*>(module);
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE)
+        return true;
+
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+        return true;
+
+    const IMAGE_DATA_DIRECTORY& imports =
+        nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!imports.VirtualAddress || !imports.Size)
+        return true;
+
+    HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+    void* expectedGetProcAddress = kernel32
+        ? reinterpret_cast<void*>(GetProcAddress(kernel32, "GetProcAddress"))
+        : nullptr;
+
+    auto* descriptor = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + imports.VirtualAddress);
+    for (; descriptor->Name; ++descriptor) {
+        if (!descriptor->FirstThunk)
+            continue;
+
+        auto* thunk = reinterpret_cast<IMAGE_THUNK_DATA64*>(base + descriptor->FirstThunk);
+        auto* names = descriptor->OriginalFirstThunk
+            ? reinterpret_cast<IMAGE_THUNK_DATA64*>(base + descriptor->OriginalFirstThunk)
+            : nullptr;
+
+        for (size_t index = 0; thunk[index].u1.Function; ++index) {
+            void* current = reinterpret_cast<void*>(static_cast<uintptr_t>(thunk[index].u1.Function));
+            bool nameMatches = false;
+
+            if (names && names[index].u1.AddressOfData &&
+                !IMAGE_SNAP_BY_ORDINAL64(names[index].u1.Ordinal)) {
+                auto* imported = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(
+                    base + names[index].u1.AddressOfData);
+                nameMatches = strcmp(reinterpret_cast<const char*>(imported->Name), "GetProcAddress") == 0;
+            } else if (expectedGetProcAddress) {
+                nameMatches = current == expectedGetProcAddress;
+            }
+
+            if (!nameMatches)
+                continue;
+
+            sawTarget = true;
+            if (current == reinterpret_cast<void*>(&HookInterposerGetProcAddress))
+                return true;
+
+            g_realGetProcAddress = reinterpret_cast<PFunGetProcAddress*>(current);
+            if (!PatchImportSlot(&thunk[index], reinterpret_cast<void*>(&HookInterposerGetProcAddress),
+                    L"GetProcAddress (SL1 plugin gateway)")) {
+                return false;
+            }
+
+            SetBackend(ReflexProbeProtocol::ReflexBackendLegacyPluginConstants);
+            if (g_shared)
+                InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateInterceptArmed);
+            return true;
+        }
+    }
+
+    return true;
+}
+
 bool PatchStreamlineImportsInModule(HMODULE module, bool& sawTarget)
 {
     sawTarget = false;
     if (!module)
         return false;
+
+    bool sawLegacyGateway = false;
+    if (!PatchLegacyPluginGatewayResolver(module, sawLegacyGateway))
+        return false;
+    if (sawLegacyGateway) {
+        sawTarget = true;
+        return true;
+    }
 
     auto* base = reinterpret_cast<unsigned char*>(module);
     auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
@@ -301,10 +530,7 @@ bool PatchStreamlineImportsInModule(HMODULE module, bool& sawTarget)
 
     void* modernResolver = reinterpret_cast<void*>(GetProcAddress(interposer, "slGetFeatureFunction"));
     void* legacySetConstants = reinterpret_cast<void*>(GetProcAddress(interposer, "slSetFeatureConstants"));
-
-    // Streamline 2.x+ has the feature-function resolver. Streamline 1.x does not;
-    // in that generation ReflexOptions were ReflexConstants sent through the generic setter.
-    const bool useLegacyPath = modernResolver == nullptr && legacySetConstants != nullptr;
+    const bool useLegacyPublicPath = IsLegacyStreamlineInterposer(interposer) && legacySetConstants != nullptr;
 
     auto* descriptor = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + imports.VirtualAddress);
     for (; descriptor->Name; ++descriptor) {
@@ -333,6 +559,7 @@ bool PatchStreamlineImportsInModule(HMODULE module, bool& sawTarget)
                     return false;
                 }
 
+                SetBackend(ReflexProbeProtocol::ReflexBackendModernSetOptions);
                 if (g_shared && InterlockedCompareExchange(&g_shared->hookState, 0, 0) ==
                         ReflexProbeProtocol::HookStateWaitingForDll) {
                     InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateReflexFound);
@@ -340,7 +567,7 @@ bool PatchStreamlineImportsInModule(HMODULE module, bool& sawTarget)
                 continue;
             }
 
-            if (useLegacyPath &&
+            if (useLegacyPublicPath &&
                 (current == legacySetConstants || current == reinterpret_cast<void*>(&HookLegacySetFeatureConstants))) {
                 sawTarget = true;
                 if (current == reinterpret_cast<void*>(&HookLegacySetFeatureConstants))
@@ -356,6 +583,7 @@ bool PatchStreamlineImportsInModule(HMODULE module, bool& sawTarget)
                     return false;
                 }
 
+                SetBackend(ReflexProbeProtocol::ReflexBackendLegacyFeatureConstants);
                 PublishReflexFunction(legacySetConstants);
             }
         }
@@ -413,16 +641,19 @@ DWORD WINAPI WorkerThread(void*)
 
     InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateWaitingForDll);
 
-    // Patch one stable Streamline API boundary, then leave the game alone. Modern
-    // Streamline uses slGetFeatureFunction -> slReflexSetOptions; 1.x uses the generic
-    // slSetFeatureConstants(eFeatureReflex, ReflexConstants) API.
+    // Modern Streamline resolves slReflexSetOptions through slGetFeatureFunction. Streamline
+    // 1.x routes through the sl.reflex plugin's slGetPluginFunction("slSetConstants") gateway.
+    // Keep the older public slSetFeatureConstants interception as a bonus fallback.
     for (uint32_t attempt = 0;; ++attempt) {
         bool foundStreamlineImport = false;
         if (!PatchLoadedStreamlineImports(foundStreamlineImport))
             return 1;
 
         if (foundStreamlineImport) {
-            if (g_realLegacySetFeatureConstants) {
+            if (g_realGetProcAddress) {
+                OutputDebugStringW(
+                    L"ReflexProbe64: armed Streamline 1.x sl.reflex plugin-gateway interception; worker exiting.\n");
+            } else if (g_realLegacySetFeatureConstants) {
                 OutputDebugStringW(
                     L"ReflexProbe64: intercepted legacy slSetFeatureConstants Reflex path; worker exiting.\n");
             } else {
@@ -450,3 +681,6 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
 
     return TRUE;
 }
+
+#undef RP_WIDEN
+#undef RP_WIDEN_INNER
