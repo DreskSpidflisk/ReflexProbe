@@ -6,6 +6,7 @@
 #include <windowsx.h>
 #include <commdlg.h>
 #include <tlhelp32.h>
+#include <bcrypt.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <wchar.h>
@@ -15,10 +16,15 @@
 #include "../Common/Protocol.h"
 
 #pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "bcrypt.lib")
+
+#define RP_WIDEN_INNER(x) L##x
+#define RP_WIDEN(x) RP_WIDEN_INNER(x)
 
 namespace {
 
 constexpr wchar_t kWindowClass[] = L"ReflexProbeControlWindow";
+constexpr wchar_t kControllerBuildStamp[] = RP_WIDEN(__DATE__) L" " RP_WIDEN(__TIME__);
 constexpr UINT_PTR kPollTimer = 1;
 constexpr int kMargin = 12;
 constexpr int kStatusTop = 186;
@@ -64,6 +70,7 @@ struct AppState {
 
     LONG lastHookState = -1;
     LONG lastEventSerial = 0;
+    bool loggedInjectedBuild = false;
 };
 
 AppState g_app;
@@ -323,6 +330,122 @@ bool GetSiblingDllPath(wchar_t* out, size_t outCount)
     return wcscat_s(out, outCount, L"ReflexProbe64.dll") == 0;
 }
 
+bool BCryptSucceeded(NTSTATUS status)
+{
+    return status >= 0;
+}
+
+bool HashFileSha256(const wchar_t* path, wchar_t* out, size_t outCount)
+{
+    if (!path || !out || outCount < 65)
+        return false;
+    out[0] = 0;
+
+    HANDLE file = CreateFileW(path, GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+        return false;
+
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    BCRYPT_HASH_HANDLE hash = nullptr;
+    PUCHAR hashObject = nullptr;
+    DWORD objectBytes = 0;
+    DWORD hashBytes = 0;
+    DWORD propertyBytes = 0;
+    bool success = false;
+
+    if (!BCryptSucceeded(BCryptOpenAlgorithmProvider(
+            &algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0))) {
+        goto Cleanup;
+    }
+
+    if (!BCryptSucceeded(BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH,
+            reinterpret_cast<PUCHAR>(&objectBytes), static_cast<ULONG>(sizeof(objectBytes)),
+            &propertyBytes, 0))) {
+        goto Cleanup;
+    }
+
+    if (!BCryptSucceeded(BCryptGetProperty(algorithm, BCRYPT_HASH_LENGTH,
+            reinterpret_cast<PUCHAR>(&hashBytes), static_cast<ULONG>(sizeof(hashBytes)),
+            &propertyBytes, 0)) || hashBytes != 32) {
+        goto Cleanup;
+    }
+
+    hashObject = static_cast<PUCHAR>(HeapAlloc(GetProcessHeap(), 0, objectBytes));
+    if (!hashObject)
+        goto Cleanup;
+
+    if (!BCryptSucceeded(BCryptCreateHash(
+            algorithm, &hash, hashObject, objectBytes, nullptr, 0, 0))) {
+        goto Cleanup;
+    }
+
+    {
+        BYTE buffer[64 * 1024]{};
+        for (;;) {
+            DWORD bytesRead = 0;
+            if (!ReadFile(file, buffer, static_cast<DWORD>(sizeof(buffer)), &bytesRead, nullptr))
+                goto Cleanup;
+            if (!bytesRead)
+                break;
+            if (!BCryptSucceeded(BCryptHashData(hash, buffer, bytesRead, 0)))
+                goto Cleanup;
+        }
+    }
+
+    {
+        BYTE digest[32]{};
+        if (!BCryptSucceeded(BCryptFinishHash(hash, digest, static_cast<ULONG>(sizeof(digest)), 0)))
+            goto Cleanup;
+
+        for (size_t i = 0; i < _countof(digest); ++i) {
+            swprintf_s(out + (i * 2), outCount - (i * 2), L"%02x",
+                static_cast<unsigned int>(digest[i]));
+        }
+        success = true;
+    }
+
+Cleanup:
+    if (hash)
+        BCryptDestroyHash(hash);
+    if (hashObject)
+        HeapFree(GetProcessHeap(), 0, hashObject);
+    if (algorithm)
+        BCryptCloseAlgorithmProvider(algorithm, 0);
+    CloseHandle(file);
+    if (!success)
+        out[0] = 0;
+    return success;
+}
+
+void LogBinaryIdentity()
+{
+    wchar_t line[1200]{};
+    swprintf_s(line, L"Source tag: %s | protocol %u | controller build %s",
+        ReflexProbeProtocol::kBuildTag, ReflexProbeProtocol::kVersion, kControllerBuildStamp);
+    AppendStatusLine(line);
+
+    wchar_t exePath[ReflexProbeProtocol::kPathChars]{};
+    wchar_t dllPath[ReflexProbeProtocol::kPathChars]{};
+    wchar_t hash[65]{};
+
+    const DWORD exeChars = GetModuleFileNameW(nullptr, exePath, static_cast<DWORD>(_countof(exePath)));
+    if (exeChars && exeChars < _countof(exePath) && HashFileSha256(exePath, hash, _countof(hash))) {
+        swprintf_s(line, L"ReflexProbe.exe SHA-256: %s", hash);
+        AppendStatusLine(line);
+    } else {
+        AppendStatusLine(L"ReflexProbe.exe SHA-256: unavailable");
+    }
+
+    if (GetSiblingDllPath(dllPath, _countof(dllPath)) && HashFileSha256(dllPath, hash, _countof(hash))) {
+        swprintf_s(line, L"ReflexProbe64.dll SHA-256: %s", hash);
+        AppendStatusLine(line);
+    } else {
+        AppendStatusLine(L"ReflexProbe64.dll SHA-256: unavailable (build/copy the injected project beside the controller)");
+    }
+}
+
 uintptr_t FindRemoteModuleBase(DWORD processId, const wchar_t* moduleName)
 {
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, processId);
@@ -488,7 +611,7 @@ void ApplyOverrideToShared()
 
     wchar_t line[256]{};
     if (enabled)
-        swprintf_s(line, L"Override armed: %u us (%.3f FPS). Takes effect on the next slReflexSetOptions call.",
+        swprintf_s(line, L"Override armed: %u us (%.3f FPS). Takes effect on the next Reflex settings call.",
             frameLimitUs, 1000000.0 / static_cast<double>(frameLimitUs));
     else
         wcscpy_s(line, L"Override disabled. Game Reflex options will pass through unchanged.");
@@ -513,6 +636,7 @@ void CleanupTarget()
     g_app.processId = 0;
     g_app.lastHookState = -1;
     g_app.lastEventSerial = 0;
+    g_app.loggedInjectedBuild = false;
     if (g_app.launch)
         EnableWindow(g_app.launch, TRUE);
 }
@@ -546,6 +670,7 @@ bool CreateSharedState(DWORD processId, const wchar_t* targetPath,
     g_app.shared->structSize = sizeof(*g_app.shared);
     g_app.shared->targetProcessId = processId;
     g_app.shared->hookState = ReflexProbeProtocol::HookStateWaitingForDll;
+    g_app.shared->backend = ReflexProbeProtocol::ReflexBackendUnknown;
     g_app.shared->overrideEnabled = overrideEnabled ? 1 : 0;
     g_app.shared->overrideUs = static_cast<LONG>(overrideUs);
     wcsncpy_s(g_app.shared->targetPath, _countof(g_app.shared->targetPath), targetPath, _TRUNCATE);
@@ -656,6 +781,7 @@ bool LaunchAndInject()
 
     g_app.lastHookState = -1;
     g_app.lastEventSerial = 0;
+    g_app.loggedInjectedBuild = false;
     EnableWindow(g_app.launch, FALSE);
 
     wchar_t line[512]{};
@@ -670,6 +796,32 @@ bool LaunchAndInject()
     }
 
     return true;
+}
+
+const wchar_t* BackendName(LONG backend)
+{
+    switch (backend) {
+    case ReflexProbeProtocol::ReflexBackendModernSetOptions:
+        return L"Streamline 2.x+ slReflexSetOptions";
+    case ReflexProbeProtocol::ReflexBackendLegacyFeatureConstants:
+        return L"Streamline 1.x slSetFeatureConstants";
+    case ReflexProbeProtocol::ReflexBackendLegacyPluginConstants:
+        return L"Streamline 1.x sl.reflex plugin gateway";
+    default:
+        return L"unknown";
+    }
+}
+
+const wchar_t* BackendCallName(LONG backend)
+{
+    switch (backend) {
+    case ReflexProbeProtocol::ReflexBackendLegacyFeatureConstants:
+        return L"slSetFeatureConstants";
+    case ReflexProbeProtocol::ReflexBackendLegacyPluginConstants:
+        return L"sl.reflex!slSetConstants";
+    default:
+        return L"slReflexSetOptions";
+    }
 }
 
 void PollSharedState()
@@ -687,21 +839,35 @@ void PollSharedState()
         return;
     }
 
+    if (!g_app.loggedInjectedBuild && g_app.shared->injectedBuild[0]) {
+        wchar_t line[256]{};
+        swprintf_s(line, L"Injected DLL reports build: %s", g_app.shared->injectedBuild);
+        AppendStatusLine(line);
+        g_app.loggedInjectedBuild = true;
+    }
+
+    const LONG backend = InterlockedCompareExchange(&g_app.shared->backend, 0, 0);
     const LONG hookState = InterlockedCompareExchange(&g_app.shared->hookState, 0, 0);
     if (hookState != g_app.lastHookState) {
         g_app.lastHookState = hookState;
         wchar_t line[2300]{};
         switch (hookState) {
         case ReflexProbeProtocol::HookStateWaitingForDll:
-            wcscpy_s(line, L"Waiting for Streamline Reflex resolver...");
+            wcscpy_s(line, L"Waiting for a Streamline Reflex interception path...");
+            break;
+        case ReflexProbeProtocol::HookStateInterceptArmed:
+            swprintf_s(line, L"Interception armed: %s. Waiting for sl.reflex.dll to resolve its plugin gateway.",
+                BackendName(backend));
             break;
         case ReflexProbeProtocol::HookStateReflexFound:
-            swprintf_s(line, L"Found Streamline Reflex: %s\r\nFile version: %s",
+            swprintf_s(line, L"Found Reflex backend: %s\r\nModule: %s\r\nFile version: %s",
+                BackendName(backend),
                 g_app.shared->reflexPath[0] ? g_app.shared->reflexPath : L"(path unavailable)",
                 g_app.shared->reflexVersion[0] ? g_app.shared->reflexVersion : L"unknown");
             break;
         case ReflexProbeProtocol::HookStateHooked:
-            swprintf_s(line, L"Hook active: slReflexSetOptions in %s\r\nFile version: %s",
+            swprintf_s(line, L"Hook active: %s via %s\r\nModule: %s\r\nFile version: %s",
+                BackendCallName(backend), BackendName(backend),
                 g_app.shared->reflexPath[0] ? g_app.shared->reflexPath : L"sl.reflex.dll",
                 g_app.shared->reflexVersion[0] ? g_app.shared->reflexVersion : L"unknown");
             break;
@@ -737,23 +903,24 @@ void PollSharedState()
 
         const wchar_t* mode = event.mode == 2 ? L"On + Boost" :
                               (event.mode == 1 ? L"On" : L"Off");
-        wchar_t line[320]{};
+        const wchar_t* callName = BackendCallName(backend);
+        wchar_t line[384]{};
         if (event.requestedUs)
             swprintf_s(line,
-                L"slReflexSetOptions #%ld: mode=%s, requested=%u us (%.3f FPS), effective=%u us (%.3f FPS), result=%ld",
-                serial, mode,
+                L"%s #%ld: mode=%s, requested=%u us (%.3f FPS), effective=%u us (%.3f FPS), result=%ld",
+                callName, serial, mode,
                 event.requestedUs, 1000000.0 / static_cast<double>(event.requestedUs),
                 event.effectiveUs, event.effectiveUs ? 1000000.0 / static_cast<double>(event.effectiveUs) : 0.0,
                 event.result);
         else if (event.effectiveUs)
             swprintf_s(line,
-                L"slReflexSetOptions #%ld: mode=%s, requested=0 us (automatic), effective=%u us (%.3f FPS), result=%ld",
-                serial, mode,
+                L"%s #%ld: mode=%s, requested=0 us (automatic), effective=%u us (%.3f FPS), result=%ld",
+                callName, serial, mode,
                 event.effectiveUs, 1000000.0 / static_cast<double>(event.effectiveUs), event.result);
         else
             swprintf_s(line,
-                L"slReflexSetOptions #%ld: mode=%s, requested=0 us (automatic), effective=0 us (pass-through), result=%ld",
-                serial, mode, event.result);
+                L"%s #%ld: mode=%s, requested=0 us (automatic), effective=0 us (pass-through), result=%ld",
+                callName, serial, mode, event.result);
 
         AppendStatusLineAtQpc(line, event.qpc);
         processedSerial = serial;
@@ -900,6 +1067,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 
         AppendStatusLine(L"ReflexProbe bootstrap: direct-launch Streamline observer/override.");
         AppendStatusLine(L"Override is OFF by default. Anti-cheat/protected games are intentionally out of scope.");
+        LogBinaryIdentity();
         SetTimer(window, kPollTimer, 100, nullptr);
         return 0;
     }
@@ -1023,3 +1191,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
 
     return static_cast<int>(message.wParam);
 }
+
+#undef RP_WIDEN
+#undef RP_WIDEN_INNER
