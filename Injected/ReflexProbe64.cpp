@@ -222,7 +222,7 @@ bool PatchResolverImportInModule(HMODULE module, bool& sawTarget)
     auto* descriptor = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + imports.VirtualAddress);
     for (; descriptor->Name; ++descriptor) {
         const char* dllName = reinterpret_cast<const char*>(base + descriptor->Name);
-        if (_stricmp(dllName, "sl.interposer.dll") != 0)
+        if (_stricmp(dllName, "sl.interposer.dll") != 0 || !descriptor->FirstThunk)
             continue;
 
         HMODULE interposer = GetModuleHandleA(dllName);
@@ -314,12 +314,19 @@ DWORD WINAPI WorkerThread(void*)
 
     InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateWaitingForDll);
 
+    bool announcedResolver = false;
+
     // Direct-launch bootstrap: patch imports before the application asks Streamline for
     // feature function pointers. This avoids modifying NVIDIA executable code entirely.
     for (uint32_t attempt = 0;; ++attempt) {
         bool foundResolverImport = false;
         if (!PatchLoadedResolverImports(foundResolverImport))
             return 1;
+
+        if (foundResolverImport && !announcedResolver) {
+            OutputDebugStringW(L"ReflexProbe64: intercepted imported slGetFeatureFunction resolver.\n");
+            announcedResolver = true;
+        }
 
         if (InterlockedCompareExchange(&g_shared->hookState, 0, 0) ==
                 ReflexProbeProtocol::HookStateHooked)
