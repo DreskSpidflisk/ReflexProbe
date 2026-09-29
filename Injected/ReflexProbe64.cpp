@@ -3,12 +3,14 @@
 #endif
 #define NOMINMAX
 #include <windows.h>
+#include <tlhelp32.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <wchar.h>
+#include <string.h>
 #include <winver.h>
 
-#include <MinHook.h>
+#include <sl.h>
 #include <sl_reflex.h>
 
 #include "../Common/Protocol.h"
@@ -17,12 +19,10 @@
 
 namespace {
 
-using PFunSlGetPluginFunction = void* (*)(const char* functionName);
-
 HANDLE g_mapping = nullptr;
 ReflexProbeProtocol::SharedState* g_shared = nullptr;
+PFun_slGetFeatureFunction* g_realGetFeatureFunction = nullptr;
 PFun_slReflexSetOptions* g_realReflexSetOptions = nullptr;
-void* g_hookTarget = nullptr;
 
 void BuildMappingName(DWORD processId, wchar_t* out, size_t outCount)
 {
@@ -138,7 +138,8 @@ void PublishEvent(LONG mode, uint32_t requestedUs, uint32_t effectiveUs, LONG re
 
 sl::Result HookReflexSetOptions(const sl::ReflexOptions& options)
 {
-    if (!g_realReflexSetOptions)
+    PFun_slReflexSetOptions* real = g_realReflexSetOptions;
+    if (!real)
         return sl::Result::eErrorNotInitialized;
 
     sl::ReflexOptions forwarded = options;
@@ -152,68 +153,158 @@ sl::Result HookReflexSetOptions(const sl::ReflexOptions& options)
         }
     }
 
-    const sl::Result result = g_realReflexSetOptions(forwarded);
+    const sl::Result result = real(forwarded);
     PublishEvent(static_cast<LONG>(options.mode), options.frameLimitUs, effectiveUs, static_cast<LONG>(result));
     return result;
 }
 
-bool InstallReflexHook(HMODULE reflexModule)
+void PublishReflexFunction(void* function)
 {
-    if (!g_shared || !reflexModule)
-        return false;
+    if (!g_shared || !function)
+        return;
 
-    DWORD count = GetModuleFileNameW(reflexModule, g_shared->reflexPath,
-        static_cast<DWORD>(_countof(g_shared->reflexPath)));
-    if (!count || count >= _countof(g_shared->reflexPath))
+    MEMORY_BASIC_INFORMATION memory{};
+    if (VirtualQuery(function, &memory, sizeof(memory))) {
+        HMODULE module = reinterpret_cast<HMODULE>(memory.AllocationBase);
+        DWORD count = GetModuleFileNameW(module, g_shared->reflexPath,
+            static_cast<DWORD>(_countof(g_shared->reflexPath)));
+        if (!count || count >= _countof(g_shared->reflexPath))
+            wcscpy_s(g_shared->reflexPath, L"sl.reflex.dll");
+    } else {
         wcscpy_s(g_shared->reflexPath, L"sl.reflex.dll");
+    }
 
     GetFileVersionString(g_shared->reflexPath, g_shared->reflexVersion,
         _countof(g_shared->reflexVersion));
-    MemoryBarrier();
-    InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateReflexFound);
-
-    auto getPluginFunction = reinterpret_cast<PFunSlGetPluginFunction>(
-        GetProcAddress(reflexModule, "slGetPluginFunction"));
-    if (!getPluginFunction) {
-        SetSharedError(L"sl.reflex.dll does not export slGetPluginFunction.");
-        return false;
-    }
-
-    g_hookTarget = getPluginFunction("slReflexSetOptions");
-    if (!g_hookTarget) {
-        SetSharedError(L"slGetPluginFunction did not return slReflexSetOptions.");
-        return false;
-    }
-
-    MH_STATUS status = MH_Initialize();
-    if (status != MH_OK && status != MH_ERROR_ALREADY_INITIALIZED) {
-        wchar_t error[160]{};
-        swprintf_s(error, L"MH_Initialize failed (%d).", static_cast<int>(status));
-        SetSharedError(error);
-        return false;
-    }
-
-    status = MH_CreateHook(g_hookTarget,
-        reinterpret_cast<LPVOID>(&HookReflexSetOptions),
-        reinterpret_cast<LPVOID*>(&g_realReflexSetOptions));
-    if (status != MH_OK) {
-        wchar_t error[160]{};
-        swprintf_s(error, L"MH_CreateHook(slReflexSetOptions) failed (%d).", static_cast<int>(status));
-        SetSharedError(error);
-        return false;
-    }
-
-    status = MH_EnableHook(g_hookTarget);
-    if (status != MH_OK) {
-        wchar_t error[160]{};
-        swprintf_s(error, L"MH_EnableHook(slReflexSetOptions) failed (%d).", static_cast<int>(status));
-        SetSharedError(error);
-        return false;
-    }
 
     MemoryBarrier();
     InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateHooked);
-    return true;
+}
+
+sl::Result HookGetFeatureFunction(sl::Feature feature, const char* functionName, void*& function)
+{
+    PFun_slGetFeatureFunction* real = g_realGetFeatureFunction;
+    if (!real)
+        return sl::Result::eErrorNotInitialized;
+
+    const sl::Result result = real(feature, functionName, function);
+    if (result != sl::Result::eOk || !functionName || !function)
+        return result;
+
+    if (strcmp(functionName, "slReflexSetOptions") == 0) {
+        g_realReflexSetOptions = reinterpret_cast<PFun_slReflexSetOptions*>(function);
+        PublishReflexFunction(function);
+        function = reinterpret_cast<void*>(&HookReflexSetOptions);
+    }
+
+    return result;
+}
+
+bool PatchResolverImportInModule(HMODULE module, bool& sawTarget)
+{
+    if (!module)
+        return false;
+
+    auto* base = reinterpret_cast<unsigned char*>(module);
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE)
+        return false;
+
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+        return false;
+
+    const IMAGE_DATA_DIRECTORY& imports =
+        nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!imports.VirtualAddress || !imports.Size)
+        return false;
+
+    auto* descriptor = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + imports.VirtualAddress);
+    for (; descriptor->Name; ++descriptor) {
+        const char* dllName = reinterpret_cast<const char*>(base + descriptor->Name);
+        if (_stricmp(dllName, "sl.interposer.dll") != 0)
+            continue;
+
+        HMODULE interposer = GetModuleHandleA(dllName);
+        if (!interposer)
+            continue;
+
+        void* real = reinterpret_cast<void*>(GetProcAddress(interposer, "slGetFeatureFunction"));
+        if (!real)
+            continue;
+
+        auto* thunk = reinterpret_cast<IMAGE_THUNK_DATA64*>(base + descriptor->FirstThunk);
+        for (; thunk->u1.Function; ++thunk) {
+            void* current = reinterpret_cast<void*>(static_cast<uintptr_t>(thunk->u1.Function));
+            if (current == reinterpret_cast<void*>(&HookGetFeatureFunction)) {
+                sawTarget = true;
+                return true;
+            }
+            if (current != real)
+                continue;
+
+            sawTarget = true;
+            if (!g_realGetFeatureFunction)
+                g_realGetFeatureFunction = reinterpret_cast<PFun_slGetFeatureFunction*>(real);
+
+            DWORD oldProtect = 0;
+            if (!VirtualProtect(&thunk->u1.Function, sizeof(thunk->u1.Function), PAGE_READWRITE, &oldProtect)) {
+                wchar_t error[192]{};
+                swprintf_s(error, L"VirtualProtect failed while patching the slGetFeatureFunction IAT slot (%lu).",
+                    GetLastError());
+                SetSharedError(error);
+                return false;
+            }
+
+            InterlockedExchangePointer(
+                reinterpret_cast<PVOID volatile*>(&thunk->u1.Function),
+                reinterpret_cast<void*>(&HookGetFeatureFunction));
+
+            DWORD ignored = 0;
+            if (!VirtualProtect(&thunk->u1.Function, sizeof(thunk->u1.Function), oldProtect, &ignored)) {
+                wchar_t error[192]{};
+                swprintf_s(error, L"VirtualProtect failed restoring the slGetFeatureFunction IAT slot (%lu).",
+                    GetLastError());
+                SetSharedError(error);
+                return false;
+            }
+
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool PatchLoadedResolverImports(bool& foundAny)
+{
+    foundAny = false;
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(
+        TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return false;
+
+    MODULEENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+
+    bool success = true;
+    if (Module32FirstW(snapshot, &entry)) {
+        do {
+            bool sawTarget = false;
+            PatchResolverImportInModule(entry.hModule, sawTarget);
+            foundAny = foundAny || sawTarget;
+
+            if (g_shared && InterlockedCompareExchange(&g_shared->hookState, 0, 0) ==
+                    ReflexProbeProtocol::HookStateError) {
+                success = false;
+                break;
+            }
+        } while (Module32NextW(snapshot, &entry));
+    }
+
+    CloseHandle(snapshot);
+    return success;
 }
 
 DWORD WINAPI WorkerThread(void*)
@@ -223,16 +314,18 @@ DWORD WINAPI WorkerThread(void*)
 
     InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateWaitingForDll);
 
-    // Polling is deliberate for the bootstrap build. It keeps us out of loader-lock callbacks,
-    // and Streamline loads sl.reflex.dll well before normal gameplay begins.
+    // Direct-launch bootstrap: patch imports before the application asks Streamline for
+    // feature function pointers. This avoids modifying NVIDIA executable code entirely.
     for (uint32_t attempt = 0;; ++attempt) {
-        HMODULE reflexModule = GetModuleHandleW(L"sl.reflex.dll");
-        if (reflexModule) {
-            InstallReflexHook(reflexModule);
-            return 0;
-        }
+        bool foundResolverImport = false;
+        if (!PatchLoadedResolverImports(foundResolverImport))
+            return 1;
 
-        // Be aggressive during startup, then become practically idle if this is not a Streamline title.
+        if (InterlockedCompareExchange(&g_shared->hookState, 0, 0) ==
+                ReflexProbeProtocol::HookStateHooked)
+            return 0;
+
+        // Loaded engine DLLs can add another Streamline import later in startup.
         Sleep(attempt < 10000 ? 1 : 50);
     }
 }
