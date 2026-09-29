@@ -956,6 +956,37 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     return DefWindowProcW(window, message, wParam, lParam);
 }
 
+void CenterWindowOnChosenMonitor(HWND window)
+{
+    RECT windowRect{};
+    if (!GetWindowRect(window, &windowRect))
+        return;
+
+    const HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+    if (!monitor)
+        return;
+
+    MONITORINFO monitorInfo{};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    if (!GetMonitorInfoW(monitor, &monitorInfo))
+        return;
+
+    const int width = windowRect.right - windowRect.left;
+    const int height = windowRect.bottom - windowRect.top;
+    const int workWidth = monitorInfo.rcWork.right - monitorInfo.rcWork.left;
+    const int workHeight = monitorInfo.rcWork.bottom - monitorInfo.rcWork.top;
+
+    int x = monitorInfo.rcWork.left + (workWidth - width) / 2;
+    int y = monitorInfo.rcWork.top + (workHeight - height) / 2;
+    if (x < monitorInfo.rcWork.left)
+        x = monitorInfo.rcWork.left;
+    if (y < monitorInfo.rcWork.top)
+        y = monitorInfo.rcWork.top;
+
+    SetWindowPos(window, nullptr, x, y, 0, 0,
+        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
@@ -980,6 +1011,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
     if (!window)
         return 1;
 
+    CenterWindowOnChosenMonitor(window);
     ShowWindow(window, showCommand);
     UpdateWindow(window);
 
