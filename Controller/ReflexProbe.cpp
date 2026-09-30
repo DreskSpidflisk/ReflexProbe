@@ -136,6 +136,16 @@ void SetChildFont(HWND child, HFONT font)
         SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 }
 
+void SetStatusCaretToEnd()
+{
+    if (!g_app.status)
+        return;
+
+    const int textLength = GetWindowTextLengthW(g_app.status);
+    SendMessageW(g_app.status, EM_SETSEL,
+        static_cast<WPARAM>(textLength), static_cast<LPARAM>(textLength));
+}
+
 void AppendStatus(const wchar_t* text)
 {
     if (!g_app.status || !text)
@@ -149,13 +159,14 @@ void AppendStatus(const wchar_t* text)
             reinterpret_cast<WPARAM>(&selectionStart), reinterpret_cast<LPARAM>(&selectionEnd));
     }
 
-    SendMessageW(g_app.status, EM_SETSEL, static_cast<WPARAM>(-1), static_cast<LPARAM>(-1));
+    SetStatusCaretToEnd();
     SendMessageW(g_app.status, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(text));
 
     if (preserveSelection) {
         SendMessageW(g_app.status, EM_SETSEL,
             static_cast<WPARAM>(selectionStart), static_cast<LPARAM>(selectionEnd));
     } else {
+        SetStatusCaretToEnd();
         SendMessageW(g_app.status, EM_SCROLLCARET, 0, 0);
     }
 }
@@ -316,7 +327,7 @@ void ReplaceStatusText(const wchar_t* text)
 
     SendMessageW(g_app.status, WM_SETREDRAW, FALSE, 0);
     SetWindowTextW(g_app.status, text ? text : L"");
-    SendMessageW(g_app.status, EM_SETSEL, static_cast<WPARAM>(-1), static_cast<LPARAM>(-1));
+    SetStatusCaretToEnd();
     SendMessageW(g_app.status, WM_SETREDRAW, TRUE, 0);
     SendMessageW(g_app.status, EM_SCROLLCARET, 0, 0);
     InvalidateRect(g_app.status, nullptr, TRUE);
@@ -1170,7 +1181,7 @@ bool SameReflexState(const CapturedReflexEvent& a, const CapturedReflexEvent& b)
 
 void FormatRepeatCount(uint64_t repeatCount, wchar_t* line, size_t lineCount)
 {
-    swprintf_s(line, lineCount, L"PREVIOUS Reflex State repeated %llu more times.",
+    swprintf_s(line, lineCount, L"Previous Reflex State repeated %llu more times.",
         static_cast<unsigned long long>(repeatCount));
 }
 
