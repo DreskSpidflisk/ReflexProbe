@@ -41,7 +41,6 @@ enum ControlId : int {
     IDC_ARGUMENTS,
     IDC_OVERRIDE_ENABLE,
     IDC_OVERRIDE_FPS,
-    IDC_APPLY_OVERRIDE,
     IDC_LAUNCH,
     IDC_STATUS,
     IDC_WORD_WRAP,
@@ -97,7 +96,6 @@ struct AppState {
     HWND overrideEnable = nullptr;
     HWND overrideFps = nullptr;
     HWND fpsLabel = nullptr;
-    HWND applyOverride = nullptr;
     HWND launch = nullptr;
     HWND statusLabel = nullptr;
     HWND stateChanges = nullptr;
@@ -1481,8 +1479,6 @@ void LayoutControls(int clientWidth, int clientHeight)
         MoveWindow(g_app.overrideFps, 210, 126, 80, 24, TRUE);
     if (g_app.fpsLabel)
         MoveWindow(g_app.fpsLabel, 298, 130, 40, 20, TRUE);
-    if (g_app.applyOverride)
-        MoveWindow(g_app.applyOverride, 350, 124, 120, 28, TRUE);
     if (g_app.launch)
         MoveWindow(g_app.launch, clientWidth - kMargin - launchWidth, 124, launchWidth, 30, TRUE);
 
@@ -1546,11 +1542,6 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
         SetChildFont(g_app.fpsLabel, font);
 
-        g_app.applyOverride = CreateWindowExW(0, L"BUTTON", L"Apply Override",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_APPLY_OVERRIDE), g_app.instance, nullptr);
-        SetChildFont(g_app.applyOverride, font);
-
         g_app.launch = CreateWindowExW(0, L"BUTTON", L"Launch + Inject",
             WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
             0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_LAUNCH), g_app.instance, nullptr);
@@ -1579,7 +1570,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         LayoutControls(client.right - client.left, client.bottom - client.top);
 
         AppendStatusLine(L"ReflexProbe bootstrap: direct-launch Streamline observer/override.");
-        AppendStatusLine(L"Override is OFF by default. Anti-cheat/protected games are intentionally out of scope.");
+        AppendStatusLine(L"Override is OFF by default. When checked, the FPS value replaces frameLimitUs on intercepted Reflex settings calls.");
         AppendStatusLine(L"Reflex calls are retained in controller RAM. State changes only is ON by default; no capture is written to disk.");
         LogBinaryIdentity();
         SetTimer(window, kPollTimer, kPollIntervalMs, nullptr);
@@ -1602,8 +1593,15 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         case IDC_BROWSE:
             BrowseForGame();
             return 0;
-        case IDC_APPLY_OVERRIDE:
-            ApplyOverrideToShared();
+        case IDC_OVERRIDE_ENABLE:
+            if (HIWORD(wParam) == BN_CLICKED)
+                ApplyOverrideToShared();
+            return 0;
+        case IDC_OVERRIDE_FPS:
+            if (HIWORD(wParam) == EN_KILLFOCUS &&
+                Button_GetCheck(g_app.overrideEnable) == BST_CHECKED) {
+                ApplyOverrideToShared();
+            }
             return 0;
         case IDC_LAUNCH:
             LaunchAndInject();
