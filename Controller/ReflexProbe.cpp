@@ -983,7 +983,7 @@ bool LaunchAndInject()
 
     DWORD attributes = GetFileAttributesW(gamePath);
     if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
-        MessageBoxW(g_app.window, L"The selected game executable does not exist.", L"ReflexProbe", MB_ICONWARNING);
+        MessageBoxW(g_app.window, L"The selected game executable does not exist.", L"ReflexProbe", MB_ICONERROR);
         return false;
     }
 
@@ -1187,6 +1187,9 @@ void FormatRepeatCount(uint64_t repeatCount, wchar_t* line, size_t lineCount)
 
 void AppendRepeatCount(uint64_t repeatCount, LONGLONG eventQpc)
 {
+    if (!repeatCount)
+        return;
+
     wchar_t line[128]{};
     FormatRepeatCount(repeatCount, line, _countof(line));
     AppendDisplayLineAtQpc(line, eventQpc);
@@ -1194,6 +1197,9 @@ void AppendRepeatCount(uint64_t repeatCount, LONGLONG eventQpc)
 
 bool AppendRepeatCountToBuffer(TextBuffer& buffer, uint64_t repeatCount, LONGLONG eventQpc)
 {
+    if (!repeatCount)
+        return true;
+
     wchar_t line[128]{};
     FormatRepeatCount(repeatCount, line, _countof(line));
     return AppendTextBufferLineAtQpc(buffer, line, eventQpc);
@@ -1540,7 +1546,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
         SetChildFont(g_app.fpsLabel, font);
 
-        g_app.applyOverride = CreateWindowExW(0, L"BUTTON", L"Apply Override",
+    g_app.applyOverride = CreateWindowExW(0, L"BUTTON", L"Apply Override",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_APPLY_OVERRIDE), g_app.instance, nullptr);
         SetChildFont(g_app.applyOverride, font);
