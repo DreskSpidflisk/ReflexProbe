@@ -219,7 +219,7 @@ uint32_t ApplyConfiguredOverride(uint32_t requestedUs)
         return requestedUs;
 
     const LONG configured = InterlockedCompareExchange(&g_shared->overrideUs, 0, 0);
-    return configured > 0 ? static_cast<uint32_t>(configured) : requestedUs;
+    return static_cast<uint32_t>(configured);
 }
 
 void PublishEvent(LONG mode, uint32_t requestedUs, uint32_t effectiveUs, LONG result)

@@ -855,9 +855,14 @@ bool ParseOverrideFromUi(bool& enabled, uint32_t& frameLimitUs, wchar_t* error, 
 
     wchar_t* end = nullptr;
     const double fps = wcstod(fpsText, &end);
-    if (end == fpsText || !_finite(fps) || fps <= 0.0) {
-        swprintf_s(error, errorCount, L"Override FPS must be a positive number.");
+    if (end == fpsText || !_finite(fps) || fps < 0.0) {
+        swprintf_s(error, errorCount, L"Override FPS must be zero or a positive number.");
         return false;
+    }
+
+    if (fps == 0.0) {
+        frameLimitUs = 0;
+        return true;
     }
 
     double interval = 1000000.0 / fps;
@@ -888,9 +893,11 @@ void ApplyOverrideToShared()
     InterlockedIncrement(&g_app.shared->configSequence);
 
     wchar_t line[256]{};
-    if (enabled)
+    if (enabled && frameLimitUs)
         swprintf_s(line, L"Override armed: %u us (%.3f FPS). Takes effect on the next Reflex settings call.",
             frameLimitUs, 1000000.0 / static_cast<double>(frameLimitUs));
+    else if (enabled)
+        wcscpy_s(line, L"Override armed: 0 us (no explicit Reflex frame limit). Takes effect on the next Reflex settings call.");
     else
         wcscpy_s(line, L"Override disabled. Game Reflex options will pass through unchanged.");
     AppendStatusLine(line);
@@ -1076,10 +1083,12 @@ bool LaunchAndInject()
     wchar_t line[512]{};
     swprintf_s(line, L"Launched %s (PID %lu) and injected ReflexProbe64.dll.", PathFileName(gamePath), process.dwProcessId);
     AppendStatusLine(line);
-    if (overrideEnabled) {
+    if (overrideEnabled && overrideUs) {
         swprintf_s(line, L"Initial override: %u us (%.3f FPS).", overrideUs,
             1000000.0 / static_cast<double>(overrideUs));
         AppendStatusLine(line);
+    } else if (overrideEnabled) {
+        AppendStatusLine(L"Initial override: 0 us (no explicit Reflex frame limit).");
     } else {
         AppendStatusLine(L"Initial mode: observe only; game Reflex options pass through unchanged.");
     }
