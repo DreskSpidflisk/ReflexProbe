@@ -784,9 +784,6 @@ bool EnsureRawDebugBuffer()
     if (g_app.rawDebugEvents)
         return true;
 
-    if (kRawDebugCapacity > static_cast<size_t>(-1) / sizeof(CapturedReflexEvent))
-        return false;
-
     const SIZE_T bytes = static_cast<SIZE_T>(kRawDebugCapacity * sizeof(CapturedReflexEvent));
     g_app.rawDebugEvents = static_cast<CapturedReflexEvent*>(
         HeapAlloc(GetProcessHeap(), 0, bytes));
