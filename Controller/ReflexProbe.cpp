@@ -31,8 +31,8 @@ constexpr int kStatusTop = 186;
 constexpr int kMinimumWindowWidth = 700;
 constexpr int kMinimumWindowHeight = 480;
 constexpr WPARAM kStatusTextLimit = 16u * 1024u * 1024u;
-constexpr size_t kInitialHistoryCapacity = 4096;
 constexpr size_t kInitialTextBufferCapacity = 8 * 1024;
+constexpr size_t kRawDebugCapacity = 131072;
 constexpr UINT kPollIntervalMs = 50;
 
 enum ControlId : int {
@@ -44,13 +44,13 @@ enum ControlId : int {
     IDC_LAUNCH,
     IDC_STATUS,
     IDC_WORD_WRAP,
-    IDC_STATE_CHANGES
+    IDC_CAPTURE_STATE,
+    IDC_CAPTURE_RAW
 };
 
-enum HistoryRecordType : uint32_t {
-    HistoryRecordStatusLine = 1,
-    HistoryRecordReflexEvent = 2,
-    HistoryRecordRunBoundary = 3
+enum CaptureMode : uint32_t {
+    CaptureModeStateChanges = 0,
+    CaptureModeRawDebug = 1
 };
 
 struct CapturedReflexEvent {
@@ -61,21 +61,6 @@ struct CapturedReflexEvent {
     LONG backend;
     uint32_t requestedUs;
     uint32_t effectiveUs;
-};
-
-struct HistoryRecord {
-    uint32_t type;
-    uint32_t reserved;
-    union {
-        CapturedReflexEvent reflex;
-        struct {
-            LONGLONG qpc;
-            wchar_t* text;
-        } status;
-        struct {
-            LONGLONG qpc;
-        } boundary;
-    };
 };
 
 struct TextBuffer {
@@ -98,7 +83,9 @@ struct AppState {
     HWND fpsLabel = nullptr;
     HWND launch = nullptr;
     HWND statusLabel = nullptr;
-    HWND stateChanges = nullptr;
+    HWND captureModeLabel = nullptr;
+    HWND captureState = nullptr;
+    HWND captureRaw = nullptr;
     HWND wordWrap = nullptr;
     HWND status = nullptr;
     WNDPROC statusOriginalProc = nullptr;
@@ -111,13 +98,15 @@ struct AppState {
     LONG lastHookState = -1;
     LONG lastEventSerial = 0;
     bool loggedInjectedBuild = false;
-
-    HistoryRecord* history = nullptr;
-    size_t historyCount = 0;
-    size_t historyCapacity = 0;
-    bool historyCaptureDisabled = false;
-    bool historyCaptureWarningShown = false;
     bool rawUiBatchWarningShown = false;
+
+    CaptureMode captureMode = CaptureModeStateChanges;
+    CapturedReflexEvent* rawDebugEvents = nullptr;
+    size_t rawDebugCount = 0;
+    size_t rawDebugWriteIndex = 0;
+    uint64_t rawDebugTotalCaptured = 0;
+    bool rawDebugWrapped = false;
+    bool rawRingWrapNoticePending = false;
 
     bool haveStateEvent = false;
     CapturedReflexEvent stateEvent{};
@@ -318,20 +307,6 @@ bool AppendTextBufferLineAtQpc(TextBuffer& buffer, const wchar_t* text, LONGLONG
     return true;
 }
 
-void ReplaceStatusText(const wchar_t* text)
-{
-    if (!g_app.status)
-        return;
-
-    SendMessageW(g_app.status, WM_SETREDRAW, FALSE, 0);
-    SetWindowTextW(g_app.status, text ? text : L"");
-    SetStatusCaretToEnd();
-    SendMessageW(g_app.status, WM_SETREDRAW, TRUE, 0);
-    SendMessageW(g_app.status, EM_SCROLLCARET, 0, 0);
-    InvalidateRect(g_app.status, nullptr, TRUE);
-    UpdateWindow(g_app.status);
-}
-
 void AppendDisplayLineAtQpc(const wchar_t* text, LONGLONG eventQpc)
 {
     if (!text)
@@ -359,120 +334,14 @@ void AppendDisplayLine(const wchar_t* text)
     AppendDisplayLineAtQpc(text, 0);
 }
 
-bool EnsureHistoryCapacity(size_t requiredCount)
-{
-    if (requiredCount <= g_app.historyCapacity)
-        return true;
-    if (g_app.historyCaptureDisabled)
-        return false;
-
-    size_t newCapacity = g_app.historyCapacity ? g_app.historyCapacity : kInitialHistoryCapacity;
-    while (newCapacity < requiredCount) {
-        if (newCapacity > static_cast<size_t>(-1) / 2)
-            return false;
-        newCapacity *= 2;
-    }
-
-    if (newCapacity > static_cast<size_t>(-1) / sizeof(HistoryRecord))
-        return false;
-
-    const SIZE_T bytes = static_cast<SIZE_T>(newCapacity * sizeof(HistoryRecord));
-    void* memory = g_app.history
-        ? HeapReAlloc(GetProcessHeap(), 0, g_app.history, bytes)
-        : HeapAlloc(GetProcessHeap(), 0, bytes);
-    if (!memory)
-        return false;
-
-    g_app.history = static_cast<HistoryRecord*>(memory);
-    g_app.historyCapacity = newCapacity;
-    return true;
-}
-
-void ReportHistoryCaptureFailure()
-{
-    g_app.historyCaptureDisabled = true;
-    if (g_app.historyCaptureWarningShown)
-        return;
-
-    g_app.historyCaptureWarningShown = true;
-    AppendDisplayLine(L"WARNING: Controller RAM history allocation failed. Live display continues, but the captured-history view is incomplete.");
-}
-
-bool PushHistoryRecord(const HistoryRecord& record)
-{
-    if (g_app.historyCaptureDisabled)
-        return false;
-    if (!EnsureHistoryCapacity(g_app.historyCount + 1)) {
-        ReportHistoryCaptureFailure();
-        return false;
-    }
-
-    g_app.history[g_app.historyCount++] = record;
-    return true;
-}
-
-void RecordStatusHistory(const wchar_t* text, LONGLONG eventQpc)
-{
-    if (!text || g_app.historyCaptureDisabled)
-        return;
-
-    const size_t chars = wcslen(text) + 1;
-    if (chars > static_cast<size_t>(-1) / sizeof(wchar_t)) {
-        ReportHistoryCaptureFailure();
-        return;
-    }
-
-    wchar_t* copy = static_cast<wchar_t*>(
-        HeapAlloc(GetProcessHeap(), 0, chars * sizeof(wchar_t)));
-    if (!copy) {
-        ReportHistoryCaptureFailure();
-        return;
-    }
-    wcscpy_s(copy, chars, text);
-
-    HistoryRecord record{};
-    record.type = HistoryRecordStatusLine;
-    record.status.qpc = eventQpc;
-    record.status.text = copy;
-    if (!PushHistoryRecord(record))
-        HeapFree(GetProcessHeap(), 0, copy);
-}
-
 void AppendStatusLineAtQpc(const wchar_t* text, LONGLONG eventQpc)
 {
-    if (!text)
-        return;
-
-    LONGLONG resolvedQpc = eventQpc;
-    if (resolvedQpc <= 0) {
-        LARGE_INTEGER qpc{};
-        if (QueryPerformanceCounter(&qpc))
-            resolvedQpc = qpc.QuadPart;
-    }
-
-    RecordStatusHistory(text, resolvedQpc);
-    AppendDisplayLineAtQpc(text, resolvedQpc);
+    AppendDisplayLineAtQpc(text, eventQpc);
 }
 
 void AppendStatusLine(const wchar_t* text)
 {
     AppendStatusLineAtQpc(text, 0);
-}
-
-void FreeHistory()
-{
-    if (g_app.history) {
-        for (size_t i = 0; i < g_app.historyCount; ++i) {
-            HistoryRecord& record = g_app.history[i];
-            if (record.type == HistoryRecordStatusLine && record.status.text)
-                HeapFree(GetProcessHeap(), 0, record.status.text);
-        }
-        HeapFree(GetProcessHeap(), 0, g_app.history);
-    }
-
-    g_app.history = nullptr;
-    g_app.historyCount = 0;
-    g_app.historyCapacity = 0;
 }
 
 LRESULT CALLBACK StatusEditProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
@@ -910,6 +779,57 @@ void ResetLiveStateTracking()
     g_app.stateRepeatCount = 0;
 }
 
+bool EnsureRawDebugBuffer()
+{
+    if (g_app.rawDebugEvents)
+        return true;
+
+    if (kRawDebugCapacity > static_cast<size_t>(-1) / sizeof(CapturedReflexEvent))
+        return false;
+
+    const SIZE_T bytes = static_cast<SIZE_T>(kRawDebugCapacity * sizeof(CapturedReflexEvent));
+    g_app.rawDebugEvents = static_cast<CapturedReflexEvent*>(
+        HeapAlloc(GetProcessHeap(), 0, bytes));
+    return g_app.rawDebugEvents != nullptr;
+}
+
+void ResetRawDebugCapture()
+{
+    g_app.rawDebugCount = 0;
+    g_app.rawDebugWriteIndex = 0;
+    g_app.rawDebugTotalCaptured = 0;
+    g_app.rawDebugWrapped = false;
+    g_app.rawRingWrapNoticePending = false;
+    g_app.rawUiBatchWarningShown = false;
+}
+
+void FreeRawDebugBuffer()
+{
+    if (g_app.rawDebugEvents)
+        HeapFree(GetProcessHeap(), 0, g_app.rawDebugEvents);
+    g_app.rawDebugEvents = nullptr;
+    ResetRawDebugCapture();
+}
+
+bool CaptureRawDebugEvent(const CapturedReflexEvent& event)
+{
+    if (!EnsureRawDebugBuffer())
+        return false;
+
+    g_app.rawDebugEvents[g_app.rawDebugWriteIndex] = event;
+    g_app.rawDebugWriteIndex = (g_app.rawDebugWriteIndex + 1) % kRawDebugCapacity;
+    ++g_app.rawDebugTotalCaptured;
+
+    if (g_app.rawDebugCount < kRawDebugCapacity) {
+        ++g_app.rawDebugCount;
+    } else if (!g_app.rawDebugWrapped) {
+        g_app.rawDebugWrapped = true;
+        g_app.rawRingWrapNoticePending = true;
+    }
+
+    return true;
+}
+
 void CleanupTarget()
 {
     if (g_app.shared) {
@@ -1000,6 +920,17 @@ bool LaunchAndInject()
         return false;
     }
 
+    if (g_app.captureMode == CaptureModeRawDebug) {
+        if (!EnsureRawDebugBuffer()) {
+            MessageBoxW(g_app.window,
+                L"Could not allocate the bounded Raw debug capture buffer.",
+                L"ReflexProbe", MB_ICONERROR);
+            return false;
+        }
+        ResetRawDebugCapture();
+    }
+    ResetLiveStateTracking();
+
     wchar_t dllPath[MAX_PATH]{};
     if (!GetSiblingDllPath(dllPath, _countof(dllPath)) || GetFileAttributesW(dllPath) == INVALID_FILE_ATTRIBUTES) {
         MessageBoxW(g_app.window,
@@ -1077,7 +1008,6 @@ bool LaunchAndInject()
     g_app.lastEventSerial = 0;
     g_app.loggedInjectedBuild = false;
     g_app.rawUiBatchWarningShown = false;
-    ResetLiveStateTracking();
     EnableWindow(g_app.launch, FALSE);
 
     wchar_t line[512]{};
@@ -1092,6 +1022,11 @@ bool LaunchAndInject()
     } else {
         AppendStatusLine(L"Initial mode: observe only; game Reflex options pass through unchanged.");
     }
+
+    if (g_app.captureMode == CaptureModeRawDebug)
+        AppendStatusLine(L"Capture mode: Raw debug; bounded raw retention starts with this target.");
+    else
+        AppendStatusLine(L"Capture mode: State changes; identical Reflex calls are counted but not retained individually.");
 
     return true;
 }
@@ -1122,9 +1057,9 @@ const wchar_t* BackendCallName(LONG backend)
     }
 }
 
-bool StateChangesOnlyEnabled()
+CaptureMode CurrentCaptureMode()
 {
-    return !g_app.stateChanges || Button_GetCheck(g_app.stateChanges) == BST_CHECKED;
+    return g_app.captureMode;
 }
 
 void FormatReflexEvent(const CapturedReflexEvent& event, wchar_t* line, size_t lineCount)
@@ -1133,13 +1068,18 @@ void FormatReflexEvent(const CapturedReflexEvent& event, wchar_t* line, size_t l
                           (event.mode == 1 ? L"On" : L"Off");
     const wchar_t* callName = BackendCallName(event.backend);
 
-    if (event.requestedUs) {
+    if (event.requestedUs && event.effectiveUs) {
         swprintf_s(line, lineCount,
             L"%s #%ld: mode=%s, requested=%u us (%.3f FPS), effective=%u us (%.3f FPS), result=%ld",
             callName, event.sequence, mode,
             event.requestedUs, 1000000.0 / static_cast<double>(event.requestedUs),
-            event.effectiveUs, event.effectiveUs ? 1000000.0 / static_cast<double>(event.effectiveUs) : 0.0,
+            event.effectiveUs, 1000000.0 / static_cast<double>(event.effectiveUs),
             event.result);
+    } else if (event.requestedUs) {
+        swprintf_s(line, lineCount,
+            L"%s #%ld: mode=%s, requested=%u us (%.3f FPS), effective=0 us (no explicit frame limit), result=%ld",
+            callName, event.sequence, mode,
+            event.requestedUs, 1000000.0 / static_cast<double>(event.requestedUs), event.result);
     } else if (event.effectiveUs) {
         swprintf_s(line, lineCount,
             L"%s #%ld: mode=%s, requested=0 us (automatic), effective=%u us (%.3f FPS), result=%ld",
@@ -1147,7 +1087,7 @@ void FormatReflexEvent(const CapturedReflexEvent& event, wchar_t* line, size_t l
             event.effectiveUs, 1000000.0 / static_cast<double>(event.effectiveUs), event.result);
     } else {
         swprintf_s(line, lineCount,
-            L"%s #%ld: mode=%s, requested=0 us (automatic), effective=0 us (pass-through), result=%ld",
+            L"%s #%ld: mode=%s, requested=0 us (automatic), effective=0 us (no explicit frame limit), result=%ld",
             callName, event.sequence, mode, event.result);
     }
 }
@@ -1202,38 +1142,84 @@ void AppendRepeatCount(uint64_t repeatCount, LONGLONG eventQpc)
     AppendDisplayLineAtQpc(line, eventQpc);
 }
 
-bool AppendRepeatCountToBuffer(TextBuffer& buffer, uint64_t repeatCount, LONGLONG eventQpc)
+void FinalizeStateRun(LONGLONG eventQpc)
 {
-    if (!repeatCount)
-        return true;
+    if (g_app.haveStateEvent)
+        AppendRepeatCount(g_app.stateRepeatCount, eventQpc);
+    ResetLiveStateTracking();
+}
 
-    wchar_t line[128]{};
-    FormatRepeatCount(repeatCount, line, _countof(line));
-    return AppendTextBufferLineAtQpc(buffer, line, eventQpc);
+void SetCaptureButtons(CaptureMode mode)
+{
+    if (g_app.captureState)
+        Button_SetCheck(g_app.captureState, mode == CaptureModeStateChanges ? BST_CHECKED : BST_UNCHECKED);
+    if (g_app.captureRaw)
+        Button_SetCheck(g_app.captureRaw, mode == CaptureModeRawDebug ? BST_CHECKED : BST_UNCHECKED);
+}
+
+bool SetCaptureMode(CaptureMode mode)
+{
+    if (mode == g_app.captureMode) {
+        SetCaptureButtons(mode);
+        return true;
+    }
+
+    LARGE_INTEGER qpc{};
+    QueryPerformanceCounter(&qpc);
+
+    const CaptureMode previous = g_app.captureMode;
+    if (previous == CaptureModeStateChanges)
+        FinalizeStateRun(qpc.QuadPart);
+    else
+        ResetLiveStateTracking();
+
+    if (mode == CaptureModeRawDebug) {
+        if (!EnsureRawDebugBuffer()) {
+            MessageBoxW(g_app.window,
+                L"Could not allocate the bounded Raw debug capture buffer.",
+                L"ReflexProbe", MB_ICONERROR);
+            g_app.captureMode = previous;
+            SetCaptureButtons(previous);
+            return false;
+        }
+        ResetRawDebugCapture();
+    }
+
+    g_app.captureMode = mode;
+    SetCaptureButtons(mode);
+
+    if (mode == CaptureModeRawDebug) {
+        AppendStatusLineAtQpc(
+            L"Capture mode changed to Raw debug. Raw retention starts now; earlier calls are not reconstructed.",
+            qpc.QuadPart);
+    } else {
+        wchar_t line[224]{};
+        swprintf_s(line,
+            L"Capture mode changed to State changes. Raw debug stopped after %llu captured call(s); state tracking resumes with the next Reflex call.",
+            static_cast<unsigned long long>(g_app.rawDebugTotalCaptured));
+        AppendStatusLineAtQpc(line, qpc.QuadPart);
+    }
+
+    return true;
 }
 
 void HandleCapturedReflexEvent(const CapturedReflexEvent& event)
 {
-    HistoryRecord record{};
-    record.type = HistoryRecordReflexEvent;
-    record.reflex = event;
-    PushHistoryRecord(record);
-
-    const bool stateChangesOnly = StateChangesOnlyEnabled();
+    if (CurrentCaptureMode() == CaptureModeRawDebug) {
+        CaptureRawDebugEvent(event);
+        return;
+    }
 
     if (!g_app.haveStateEvent) {
         g_app.haveStateEvent = true;
         g_app.stateEvent = event;
         g_app.stateRepeatCount = 0;
-        if (stateChangesOnly)
-            AppendReflexEvent(event, true);
+        AppendReflexEvent(event, true);
     } else if (SameReflexState(g_app.stateEvent, event)) {
         ++g_app.stateRepeatCount;
     } else {
-        if (stateChangesOnly) {
-            AppendRepeatCount(g_app.stateRepeatCount, event.qpc);
-            AppendReflexEvent(event, true);
-        }
+        AppendRepeatCount(g_app.stateRepeatCount, event.qpc);
+        AppendReflexEvent(event, true);
         g_app.stateEvent = event;
         g_app.stateRepeatCount = 0;
     }
@@ -1241,78 +1227,10 @@ void HandleCapturedReflexEvent(const CapturedReflexEvent& event)
 
 void RecordRunBoundary(LONGLONG eventQpc)
 {
-    HistoryRecord record{};
-    record.type = HistoryRecordRunBoundary;
-    record.boundary.qpc = eventQpc;
-    PushHistoryRecord(record);
-
-    if (StateChangesOnlyEnabled() && g_app.haveStateEvent)
-        AppendRepeatCount(g_app.stateRepeatCount, eventQpc);
-    ResetLiveStateTracking();
-}
-
-void RebuildStatusView()
-{
-    if (!g_app.status)
-        return;
-
-    TextBuffer buffer{};
-    const bool stateChangesOnly = StateChangesOnlyEnabled();
-    bool haveState = false;
-    CapturedReflexEvent state{};
-    uint64_t repeatCount = 0;
-    bool success = true;
-
-    for (size_t i = 0; i < g_app.historyCount && success; ++i) {
-        const HistoryRecord& record = g_app.history[i];
-
-        if (record.type == HistoryRecordStatusLine) {
-            if (record.status.text)
-                success = AppendTextBufferLineAtQpc(buffer, record.status.text, record.status.qpc);
-            continue;
-        }
-
-        if (record.type == HistoryRecordRunBoundary) {
-            if (stateChangesOnly && haveState)
-                success = AppendRepeatCountToBuffer(buffer, repeatCount, record.boundary.qpc);
-            haveState = false;
-            repeatCount = 0;
-            continue;
-        }
-
-        if (record.type != HistoryRecordReflexEvent)
-            continue;
-
-        const CapturedReflexEvent& event = record.reflex;
-        if (!stateChangesOnly) {
-            success = AppendReflexEventToBuffer(buffer, event, false);
-            continue;
-        }
-
-        if (!haveState) {
-            success = AppendReflexEventToBuffer(buffer, event, true);
-            state = event;
-            haveState = true;
-            repeatCount = 0;
-        } else if (SameReflexState(state, event)) {
-            ++repeatCount;
-        } else {
-            success = AppendRepeatCountToBuffer(buffer, repeatCount, event.qpc) &&
-                      AppendReflexEventToBuffer(buffer, event, true);
-            state = event;
-            repeatCount = 0;
-        }
-    }
-
-    if (success) {
-        ReplaceStatusText(buffer.data ? buffer.data : L"");
-    } else {
-        MessageBoxW(g_app.window,
-            L"Could not allocate enough temporary RAM to rebuild the selected log view. The captured event history is still intact.",
-            L"ReflexProbe", MB_ICONWARNING);
-    }
-
-    FreeTextBuffer(buffer);
+    if (CurrentCaptureMode() == CaptureModeStateChanges)
+        FinalizeStateRun(eventQpc);
+    else
+        ResetLiveStateTracking();
 }
 
 void PollSharedState()
@@ -1321,7 +1239,7 @@ void PollSharedState()
         return;
 
     const bool targetExited = WaitForSingleObject(g_app.process, 0) == WAIT_OBJECT_0;
-    const bool stateChangesOnly = StateChangesOnlyEnabled();
+    const bool rawDebug = CurrentCaptureMode() == CaptureModeRawDebug;
     TextBuffer rawBatch{};
     bool rawBatchSuccess = true;
 
@@ -1379,7 +1297,7 @@ void PollSharedState()
 
         wchar_t line[256]{};
         swprintf_s(line,
-            L"WARNING: Reflex transport ring overrun; %ld call(s) were lost before the controller drained them. State-change run restarted.",
+            L"WARNING: Reflex transport ring overrun; %ld call(s) were lost before the controller drained them. Capture continuity is broken at this point.",
             lost);
         AppendStatusLineAtQpc(line, qpc.QuadPart);
 
@@ -1408,7 +1326,7 @@ void PollSharedState()
         captured.requestedUs = event.requestedUs;
         captured.effectiveUs = event.effectiveUs;
         HandleCapturedReflexEvent(captured);
-        if (!stateChangesOnly && rawBatchSuccess)
+        if (rawDebug && rawBatchSuccess)
             rawBatchSuccess = AppendReflexEventToBuffer(rawBatch, captured, false);
         processedSerial = serial;
     }
@@ -1416,12 +1334,17 @@ void PollSharedState()
     if (processedSerial > g_app.lastEventSerial)
         g_app.lastEventSerial = processedSerial;
 
-    if (!stateChangesOnly) {
+    if (rawDebug) {
         if (rawBatchSuccess && rawBatch.length) {
             AppendStatus(rawBatch.data);
         } else if (!rawBatchSuccess && !g_app.rawUiBatchWarningShown) {
             g_app.rawUiBatchWarningShown = true;
-            AppendStatusLine(L"WARNING: Live raw-view UI batching ran out of temporary RAM. Captured event history remains intact.");
+            AppendStatusLine(L"WARNING: Live Raw debug UI batching ran out of temporary RAM. The bounded binary Raw debug capture remains active.");
+        }
+
+        if (g_app.rawRingWrapNoticePending) {
+            g_app.rawRingWrapNoticePending = false;
+            AppendStatusLine(L"Raw debug retention reached 131072 calls; oldest retained raw calls are now overwritten as new calls arrive.");
         }
     }
     FreeTextBuffer(rawBatch);
@@ -1465,8 +1388,11 @@ void LayoutControls(int clientWidth, int clientHeight)
     const int usableWidth = clientWidth - (kMargin * 2);
     const int browseWidth = 96;
     const int launchWidth = 144;
-    const int stateWidth = 150;
     const int wrapWidth = 104;
+    const int rawWidth = 88;
+    const int stateWidth = 108;
+    const int captureLabelWidth = 92;
+    const int captureGap = 8;
 
     if (g_app.gameLabel)
         MoveWindow(g_app.gameLabel, kMargin, 12, 150, 20, TRUE);
@@ -1493,11 +1419,19 @@ void LayoutControls(int clientWidth, int clientHeight)
 
     if (g_app.statusLabel)
         MoveWindow(g_app.statusLabel, kMargin, 164, 180, 20, TRUE);
-    if (g_app.stateChanges)
-        MoveWindow(g_app.stateChanges,
-            clientWidth - kMargin - wrapWidth - 10 - stateWidth, 162, stateWidth, 22, TRUE);
+
+    const int wrapX = clientWidth - kMargin - wrapWidth;
+    const int rawX = wrapX - captureGap - rawWidth;
+    const int stateX = rawX - captureGap - stateWidth;
+    const int captureLabelX = stateX - captureGap - captureLabelWidth;
+    if (g_app.captureModeLabel)
+        MoveWindow(g_app.captureModeLabel, captureLabelX, 164, captureLabelWidth, 20, TRUE);
+    if (g_app.captureState)
+        MoveWindow(g_app.captureState, stateX, 162, stateWidth, 22, TRUE);
+    if (g_app.captureRaw)
+        MoveWindow(g_app.captureRaw, rawX, 162, rawWidth, 22, TRUE);
     if (g_app.wordWrap)
-        MoveWindow(g_app.wordWrap, clientWidth - kMargin - wrapWidth, 162, wrapWidth, 22, TRUE);
+        MoveWindow(g_app.wordWrap, wrapX, 162, wrapWidth, 22, TRUE);
 
     if (g_app.status) {
         int statusHeight = clientHeight - kStatusTop - kMargin;
@@ -1560,14 +1494,23 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
         SetChildFont(g_app.statusLabel, font);
 
-        g_app.stateChanges = CreateWindowExW(0, L"BUTTON", L"State changes only",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_STATE_CHANGES), g_app.instance, nullptr);
-        SetChildFont(g_app.stateChanges, font);
-        Button_SetCheck(g_app.stateChanges, BST_CHECKED);
+        g_app.captureModeLabel = CreateWindowExW(0, L"STATIC", L"Capture Mode:",
+            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
+        SetChildFont(g_app.captureModeLabel, font);
+
+        g_app.captureState = CreateWindowExW(0, L"BUTTON", L"State changes",
+            WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_CAPTURE_STATE), g_app.instance, nullptr);
+        SetChildFont(g_app.captureState, font);
+
+        g_app.captureRaw = CreateWindowExW(0, L"BUTTON", L"Raw debug",
+            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_CAPTURE_RAW), g_app.instance, nullptr);
+        SetChildFont(g_app.captureRaw, font);
+        SetCaptureButtons(CaptureModeStateChanges);
 
         g_app.wordWrap = CreateWindowExW(0, L"BUTTON", L"Word wrap",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTOCHECKBOX,
             0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_WORD_WRAP), g_app.instance, nullptr);
         SetChildFont(g_app.wordWrap, font);
         Button_SetCheck(g_app.wordWrap, BST_CHECKED);
@@ -1580,7 +1523,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 
         AppendStatusLine(L"ReflexProbe bootstrap: direct-launch Streamline observer/override.");
         AppendStatusLine(L"Override is OFF by default. When checked, the FPS value replaces frameLimitUs on intercepted Reflex settings calls.");
-        AppendStatusLine(L"Reflex calls are retained in controller RAM. State changes only is ON by default; no capture is written to disk.");
+        AppendStatusLine(L"Capture mode defaults to State changes. Raw debug retains at most 131072 calls in RAM. ReflexProbe never writes capture data to disk.");
         LogBinaryIdentity();
         SetTimer(window, kPollTimer, kPollIntervalMs, nullptr);
         return 0;
@@ -1615,9 +1558,13 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         case IDC_LAUNCH:
             LaunchAndInject();
             return 0;
-        case IDC_STATE_CHANGES:
-            if (HIWORD(wParam) == BN_CLICKED)
-                RebuildStatusView();
+        case IDC_CAPTURE_STATE:
+            if (HIWORD(wParam) == BN_CLICKED && Button_GetCheck(g_app.captureState) == BST_CHECKED)
+                SetCaptureMode(CaptureModeStateChanges);
+            return 0;
+        case IDC_CAPTURE_RAW:
+            if (HIWORD(wParam) == BN_CLICKED && Button_GetCheck(g_app.captureRaw) == BST_CHECKED)
+                SetCaptureMode(CaptureModeRawDebug);
             return 0;
         case IDC_WORD_WRAP:
             if (HIWORD(wParam) == BN_CLICKED) {
@@ -1642,7 +1589,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     case WM_DESTROY:
         KillTimer(window, kPollTimer);
         CleanupTarget();
-        FreeHistory();
+        FreeRawDebugBuffer();
         PostQuitMessage(0);
         return 0;
     }
