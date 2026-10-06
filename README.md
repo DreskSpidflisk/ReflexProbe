@@ -166,7 +166,7 @@ Every controller run records:
 - SHA-256 of the sibling `ReflexProbe64.dll`
 - the compile timestamp reported by the actually loaded injected DLL
 
-The hashes make stale or mismatched local binaries obvious.
+The hashes make stale or mismatched local binaries obvious. Interception-method metadata is tracked per resolver/backend path rather than through one shared mutable label, so discovering an unrelated NVAPI path cannot overwrite the method later reported for a Streamline hook (or vice versa).
 
 ## Streamline generations
 
@@ -214,7 +214,7 @@ Reflex Sleep interception is now strictly opt-in through **Count Reflex Sleep Ca
 
 Earlier diagnostic builds had startup-global `--wrap-reflex-sleep` and `--no-wrap-reflex-sleep` switches implemented with `CommandLineToArgvW`. Those switches and their Shell32 dependency were intentionally removed when sleep interception became an acquisition-time UI choice. The last pre-removal implementation is preserved in Git history at commit `d6439862403a20fc0b094e39945992495c64d99f`; the original sleep-counting implementation began at `9bee5eb7b638e8fb4d1de4cf53c49ef712b5682f`. If ReflexProbe needs command-line options again, that working parser can be recovered without keeping unused plumbing in the current binary.
 
-The controller's single-row policy/acquisition layout has a calculated minimum width based on the fixed policy controls plus the Launch / Watch / Attach group, preventing the controls from overlapping when the window is resized. The Force Boost and Count Reflex Sleep checkboxes use the same deliberate horizontal spacing as the surrounding policy controls.
+The controller's single-row policy/acquisition layout has a calculated minimum width based on the fixed policy controls plus the Launch / Watch / Attach group, preventing the controls from overlapping when the window is resized. The Force Boost control is sized to its visible checkbox/label content so the visual gap to Count Reflex Sleep Calls matches the surrounding policy-row spacing rather than inheriting dead button-rectangle width.
 
 The controller also keeps a compact **Current effective state** line and mirrors it in the window title. It updates only after an intercepted Reflex setter returns success and shows the effective mode and effective explicit Reflex FPS limit after ReflexProbe policy has been applied. Repeated identical calls do not churn the UI. A zero interval is shown as **None (0 us)** rather than inventing an FPS, and the display returns to **Unknown** when the target exits.
 
@@ -251,7 +251,7 @@ Entering `0` while override is enabled forces literal `frameLimitUs=0`. Frame-li
 - **Indiana Jones and the Great Circle (GOG):** Vulkan + modern Streamline. Reflex/Frame Generation behavior is gated behind DLSS as the selected upscaler: when DLSS is not selected, the Frame Generation option is hidden and the observed Reflex path is effectively absent. With DLSS active, the game repeatedly submits Reflex On with a zero interval at high frequency. In one 158 FPS run ReflexProbe observed **3,856 settings calls and 3,854 `slReflexSleep` calls**, consistent with approximately one setter and one sleep call per rendered frame during the active gameplay interval. Force Boost and frame-limit override both work, while the game's own limiter remains a separate pre-FG limiter.
 - **God of War (2018):** D3D11 + native NVAPI Reflex, independent of whether DLSS is enabled. Runtime-confirmed Off / On / On + Boost observation, with `NvAPI_D3D_SetSleepMode` called only when the menu setting changes. While Reflex was On, `NvAPI_D3D_Sleep` counts tracked approximately frame cadence; during the captured Reflex-Off interval the sleep count was **0**, yet the forced `minimumIntervalUs` limiter remained effective. This demonstrates that, in this shipped native-NVAPI integration on the tested driver, application-observed per-frame sleep calls are not required for the explicit limiter to remain active while low-latency mode is Off. Force Boost and `minimumIntervalUs` override both work.
 - **A Plague Tale: Requiem Force Boost caveat:** observing and frame-limit overriding through the SL1 plugin path works, but substituting plain On -> On + Boost causes severe progressive performance collapse in Requiem even though the game's native On + Boost mode is healthy. The capability remains exposed for diagnosis; the old SL1 Boost semantics need further investigation.
-- **Pragmata and other launcher titles:** practical future Watch + Inject targets after the GOG Galaxy Dawnwalker success.
+- **Pragmata (Steam):** D3D12 + modern Streamline 2.8.0. Watch + Inject acquired the Steam-launched executable successfully on the tested Denuvo-protected build, the frame-limit override worked, and Reflex settings were submitted only on option changes while `slReflexSleep` continued at approximately rendered-frame cadence. The tested DRM configuration did not block ReflexProbe's injection/interception path; that observation is specific to this build and is not a claim about every Denuvo integration.
 
 ## Deliberate limitations
 

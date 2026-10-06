@@ -90,12 +90,9 @@ PFunNvapiD3DSetSleepMode* g_realNvapiD3DSetSleepMode = nullptr;
 PFunNvapiD3DSleep* g_realNvapiD3DSleep = nullptr;
 volatile LONG g_modernReflexCaptured = 0;
 volatile LONG g_nativeNvapiCaptured = 0;
-const wchar_t* g_interceptionMethod = L"unknown";
-
-void SetInterceptionMethod(const wchar_t* method)
-{
-    g_interceptionMethod = method && *method ? method : L"unknown";
-}
+const wchar_t* g_modernInterceptionMethod = L"modern slGetFeatureFunction";
+const wchar_t* g_nvapiQueryInterceptionMethod =
+    L"native NVAPI D3D SetSleepMode via application nvapi_QueryInterface IAT";
 
 void BuildMappingName(DWORD processId, wchar_t* out, size_t outCount)
 {
@@ -317,10 +314,14 @@ void PublishSleepEvent(LONG result)
     InterlockedExchange(&event.sequence, serial);
 }
 
-void PublishReflexModule(HMODULE module, ReflexProbeProtocol::HookState state)
+void PublishReflexModule(HMODULE module, ReflexProbeProtocol::HookState state,
+                         const wchar_t* interceptionMethod)
 {
     if (!g_shared || !module)
         return;
+
+    const wchar_t* method =
+        interceptionMethod && *interceptionMethod ? interceptionMethod : L"unknown";
 
     wchar_t modulePath[ReflexProbeProtocol::kPathChars]{};
     if (!GetModulePath(module, modulePath, _countof(modulePath)))
@@ -329,26 +330,27 @@ void PublishReflexModule(HMODULE module, ReflexProbeProtocol::HookState state)
     GetFileVersionString(modulePath, g_shared->reflexVersion,
         _countof(g_shared->reflexVersion));
     _snwprintf_s(g_shared->reflexPath, _countof(g_shared->reflexPath), _TRUNCATE,
-        L"%s\r\nInterception method: %s", modulePath,
-        g_interceptionMethod ? g_interceptionMethod : L"unknown");
+        L"%s\r\nInterception method: %s", modulePath, method);
 
     MemoryBarrier();
     InterlockedExchange(&g_shared->hookState, static_cast<LONG>(state));
 }
 
-void PublishReflexFunction(void* function)
+void PublishReflexFunction(void* function, const wchar_t* interceptionMethod)
 {
     if (!g_shared || !function)
         return;
 
+    const wchar_t* method =
+        interceptionMethod && *interceptionMethod ? interceptionMethod : L"unknown";
+
     MEMORY_BASIC_INFORMATION memory{};
     if (VirtualQuery(function, &memory, sizeof(memory))) {
         PublishReflexModule(reinterpret_cast<HMODULE>(memory.AllocationBase),
-            ReflexProbeProtocol::HookStateHooked);
+            ReflexProbeProtocol::HookStateHooked, method);
     } else {
         _snwprintf_s(g_shared->reflexPath, _countof(g_shared->reflexPath), _TRUNCATE,
-            L"Reflex module\r\nInterception method: %s",
-            g_interceptionMethod ? g_interceptionMethod : L"unknown");
+            L"Reflex module\r\nInterception method: %s", method);
         g_shared->reflexVersion[0] = 0;
         MemoryBarrier();
         InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateHooked);
@@ -426,9 +428,8 @@ void* __cdecl HookNvapiQueryInterface(uint32_t interfaceId)
     if (interfaceId == kNvapiD3DSetSleepModeId) {
         g_realNvapiD3DSetSleepMode =
             reinterpret_cast<PFunNvapiD3DSetSleepMode*>(function);
-        SetInterceptionMethod(L"native NVAPI D3D SetSleepMode via application nvapi_QueryInterface IAT");
         SetBackend(ReflexProbeProtocol::ReflexBackendNativeNvapiD3D);
-        PublishReflexFunction(function);
+        PublishReflexFunction(function, g_nvapiQueryInterceptionMethod);
         InterlockedExchange(&g_nativeNvapiCaptured, 1);
         return reinterpret_cast<void*>(&HookNvapiD3DSetSleepMode);
     }
@@ -532,9 +533,9 @@ void* HookLegacyPluginGetFunction(const char* functionName)
     if (strcmp(functionName, "slSetConstants") == 0) {
         g_realLegacyPluginSetConstants =
             reinterpret_cast<PFunLegacyPluginSetConstants*>(function);
-        SetInterceptionMethod(L"SL1 slGetPluginFunction via interposer GetProcAddress IAT");
         SetBackend(ReflexProbeProtocol::ReflexBackendLegacyPluginConstants);
-        PublishReflexFunction(function);
+        PublishReflexFunction(function,
+            L"SL1 slGetPluginFunction via interposer GetProcAddress IAT");
         return reinterpret_cast<void*>(&HookLegacyPluginSetConstants);
     }
 
@@ -565,9 +566,9 @@ FARPROC WINAPI HookInterposerGetProcAddress(HMODULE module, LPCSTR procName)
     }
 
     g_realLegacyPluginGetFunction = reinterpret_cast<PFunLegacyPluginGetFunction*>(result);
-    SetInterceptionMethod(L"SL1 slGetPluginFunction via interposer GetProcAddress IAT");
     SetBackend(ReflexProbeProtocol::ReflexBackendLegacyPluginConstants);
-    PublishReflexModule(module, ReflexProbeProtocol::HookStateReflexFound);
+    PublishReflexModule(module, ReflexProbeProtocol::HookStateReflexFound,
+        L"SL1 slGetPluginFunction via interposer GetProcAddress IAT");
     return reinterpret_cast<FARPROC>(&HookLegacyPluginGetFunction);
 }
 
@@ -584,7 +585,7 @@ sl::Result HookGetFeatureFunction(sl::Feature feature, const char* functionName,
     if (strcmp(functionName, "slReflexSetOptions") == 0) {
         g_realReflexSetOptions = reinterpret_cast<PFun_slReflexSetOptions*>(function);
         SetBackend(ReflexProbeProtocol::ReflexBackendModernSetOptions);
-        PublishReflexFunction(function);
+        PublishReflexFunction(function, g_modernInterceptionMethod);
         function = reinterpret_cast<void*>(&HookReflexSetOptions);
         InterlockedExchange(&g_modernReflexCaptured, 1);
     } else if (strcmp(functionName, "slReflexSleep") == 0 &&
@@ -618,8 +619,8 @@ FARPROC WINAPI HookApplicationGetProcAddress(HMODULE module, LPCSTR procName)
     if (strcmp(procName, "nvapi_QueryInterface") == 0 &&
         _wcsicmp(moduleName, L"nvapi64.dll") == 0) {
         g_realNvapiQueryInterface = reinterpret_cast<PFunNvapiQueryInterface*>(result);
-        SetInterceptionMethod(
-            L"native NVAPI D3D SetSleepMode via application GetProcAddress IAT");
+        g_nvapiQueryInterceptionMethod =
+            L"native NVAPI D3D SetSleepMode via application GetProcAddress IAT";
         return reinterpret_cast<FARPROC>(&HookNvapiQueryInterface);
     }
 
@@ -636,9 +637,11 @@ FARPROC WINAPI HookApplicationGetProcAddress(HMODULE module, LPCSTR procName)
     }
 
     g_realGetFeatureFunction = reinterpret_cast<PFun_slGetFeatureFunction*>(result);
-    SetInterceptionMethod(L"modern slGetFeatureFunction via application GetProcAddress IAT");
+    g_modernInterceptionMethod =
+        L"modern slGetFeatureFunction via application GetProcAddress IAT";
     SetBackend(ReflexProbeProtocol::ReflexBackendModernSetOptions);
-    PublishReflexModule(module, ReflexProbeProtocol::HookStateReflexFound);
+    PublishReflexModule(module, ReflexProbeProtocol::HookStateReflexFound,
+        g_modernInterceptionMethod);
     return reinterpret_cast<FARPROC>(&HookGetFeatureFunction);
 }
 
@@ -738,6 +741,8 @@ bool PatchApplicationNvapiResolver(bool& armedAny)
                 if (current != reinterpret_cast<void*>(&HookNvapiQueryInterface)) {
                     g_realNvapiQueryInterface =
                         reinterpret_cast<PFunNvapiQueryInterface*>(current);
+                    g_nvapiQueryInterceptionMethod =
+                        L"native NVAPI D3D SetSleepMode via application nvapi_QueryInterface IAT";
                     if (!PatchImportSlot(&thunk[index],
                             reinterpret_cast<void*>(&HookNvapiQueryInterface),
                             L"nvapi_QueryInterface (native NVAPI Reflex resolver)")) {
@@ -755,15 +760,14 @@ bool PatchApplicationNvapiResolver(bool& armedAny)
                 if (current != reinterpret_cast<void*>(&HookNvapiD3DSetSleepMode)) {
                     g_realNvapiD3DSetSleepMode =
                         reinterpret_cast<PFunNvapiD3DSetSleepMode*>(current);
-                    SetInterceptionMethod(
-                        L"native NVAPI D3D SetSleepMode via application IAT");
                     if (!PatchImportSlot(&thunk[index],
                             reinterpret_cast<void*>(&HookNvapiD3DSetSleepMode),
                             L"NvAPI_D3D_SetSleepMode")) {
                         return false;
                     }
                     SetBackend(ReflexProbeProtocol::ReflexBackendNativeNvapiD3D);
-                    PublishReflexFunction(current);
+                    PublishReflexFunction(current,
+                        L"native NVAPI D3D SetSleepMode via application IAT");
                 }
             }
 
@@ -916,7 +920,6 @@ bool PatchLegacyPluginGatewayResolver(HMODULE module, bool& sawTarget)
                 return true;
 
             g_realGetProcAddress = reinterpret_cast<PFunGetProcAddress*>(current);
-            SetInterceptionMethod(L"SL1 slGetPluginFunction via interposer GetProcAddress IAT");
             if (!PatchImportSlot(&thunk[index], reinterpret_cast<void*>(&HookInterposerGetProcAddress),
                     L"GetProcAddress (SL1 plugin gateway)")) {
                 return false;
@@ -990,7 +993,7 @@ bool PatchStreamlineImportsInModule(HMODULE module, bool& sawTarget)
                 if (!g_realGetFeatureFunction)
                     g_realGetFeatureFunction = reinterpret_cast<PFun_slGetFeatureFunction*>(modernResolver);
 
-                SetInterceptionMethod(L"modern slGetFeatureFunction IAT");
+                g_modernInterceptionMethod = L"modern slGetFeatureFunction IAT";
                 if (!PatchImportSlot(thunk, reinterpret_cast<void*>(&HookGetFeatureFunction),
                         L"slGetFeatureFunction")) {
                     return false;
@@ -1015,14 +1018,14 @@ bool PatchStreamlineImportsInModule(HMODULE module, bool& sawTarget)
                         reinterpret_cast<PFunLegacySetFeatureConstants*>(legacySetConstants);
                 }
 
-                SetInterceptionMethod(L"SL1 slSetFeatureConstants IAT");
                 if (!PatchImportSlot(thunk, reinterpret_cast<void*>(&HookLegacySetFeatureConstants),
                         L"slSetFeatureConstants")) {
                     return false;
                 }
 
                 SetBackend(ReflexProbeProtocol::ReflexBackendLegacyFeatureConstants);
-                PublishReflexFunction(legacySetConstants);
+                PublishReflexFunction(legacySetConstants,
+                    L"SL1 slSetFeatureConstants IAT");
             }
         }
     }
