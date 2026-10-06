@@ -196,6 +196,8 @@ The old `ReflexConstants` ABI is defined locally with compile-time layout checks
 7. Watch/Attach logs the detected PID, parent PID, full executable path, process-open timing and DLL-injection timing. Command-line capture is intentionally not part of this first implementation.
 8. The injected DLL discovers a supported Streamline Reflex boundary and reports requested/effective state to the controller.
 
+The controller also keeps a compact **Current effective state** line and mirrors it in the window title. It updates only after an intercepted Reflex setter returns success and shows the effective mode and effective explicit Reflex FPS limit after ReflexProbe policy has been applied. Repeated identical calls do not churn the UI. A zero interval is shown as **None (0 us)** rather than inventing an FPS, and the display returns to **Unknown** when the target exits.
+
 **Watch is the preferred launcher mode for titles that submit Reflex state only at startup.** Runtime Attach can still be useful for engines that resubmit settings, but attaching after initialization can miss a setter that the game called once and cached before ReflexProbe arrived.
 
 For a positive FPS override, the controller converts FPS to microseconds using:

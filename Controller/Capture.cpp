@@ -106,6 +106,62 @@ const wchar_t* ReflexModeName(LONG mode)
     }
 }
 
+void ResetCurrentEffectiveState()
+{
+    g_app.haveEffectiveState = false;
+    g_app.currentEffectiveMode = 0;
+    g_app.currentEffectiveUs = 0;
+
+    if (g_app.currentState) {
+        SetWindowTextW(g_app.currentState,
+            L"Current effective state: Reflex Unknown | Reflex FPS limit: Unknown");
+    }
+    if (g_app.window)
+        SetWindowTextW(g_app.window, L"ReflexProbe - Reflex Unknown | FPS Limit Unknown");
+}
+
+void UpdateCurrentEffectiveState(const CapturedReflexEvent& event)
+{
+    if (event.result != 0)
+        return;
+
+    if (g_app.haveEffectiveState &&
+        g_app.currentEffectiveMode == event.effectiveMode &&
+        g_app.currentEffectiveUs == event.effectiveUs) {
+        return;
+    }
+
+    g_app.haveEffectiveState = true;
+    g_app.currentEffectiveMode = event.effectiveMode;
+    g_app.currentEffectiveUs = event.effectiveUs;
+
+    const wchar_t* mode = ReflexModeName(event.effectiveMode);
+    wchar_t label[320]{};
+    wchar_t title[224]{};
+
+    if (event.effectiveUs) {
+        const double fps = 1000000.0 / static_cast<double>(event.effectiveUs);
+        swprintf_s(label,
+            L"Current effective state: Reflex %s | Reflex FPS limit: %.3f FPS",
+            mode, fps);
+        swprintf_s(title,
+            L"ReflexProbe - Reflex %s | FPS Limit %.3f",
+            mode, fps);
+    } else {
+        swprintf_s(label,
+            L"Current effective state: Reflex %s | Reflex FPS limit: None (0 us)",
+            mode);
+        swprintf_s(title,
+            L"ReflexProbe - Reflex %s | FPS Limit None (0 us)",
+            mode);
+    }
+
+    if (g_app.currentState)
+        SetWindowTextW(g_app.currentState, label);
+    if (g_app.window)
+        SetWindowTextW(g_app.window, title);
+}
+
 void FormatReflexEvent(const CapturedReflexEvent& event, wchar_t* line, size_t lineCount)
 {
     const wchar_t* requestedMode = ReflexModeName(event.requestedMode);
@@ -370,6 +426,7 @@ void PollSharedState()
         captured.backend = backend;
         captured.requestedUs = event.requestedUs;
         captured.effectiveUs = event.effectiveUs;
+        UpdateCurrentEffectiveState(captured);
         HandleCapturedReflexEvent(captured);
         if (rawDebug && rawBatchSuccess)
             rawBatchSuccess = AppendReflexEventToBuffer(rawBatch, captured, false);

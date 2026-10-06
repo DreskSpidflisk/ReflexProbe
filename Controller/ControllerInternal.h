@@ -19,9 +19,9 @@ constexpr UINT_PTR kPollTimer = 1;
 constexpr UINT_PTR kWatchTimer = 2;
 constexpr UINT kWatchPollIntervalMs = 10;
 constexpr int kMargin = 12;
-constexpr int kStatusTop = 186;
+constexpr int kStatusTop = 212;
 constexpr int kMinimumWindowWidth = 700;
-constexpr int kMinimumWindowHeight = 480;
+constexpr int kMinimumWindowHeight = 506;
 constexpr WPARAM kStatusTextLimit = 16u * 1024u * 1024u;
 constexpr size_t kInitialTextBufferCapacity = 8 * 1024;
 constexpr size_t kRawDebugCapacity = 131072;
@@ -81,6 +81,7 @@ struct AppState {
     HWND launch = nullptr;
     HWND watch = nullptr;
     HWND attach = nullptr;
+    HWND currentState = nullptr;
     HWND statusLabel = nullptr;
     HWND captureModeLabel = nullptr;
     HWND captureState = nullptr;
@@ -98,6 +99,10 @@ struct AppState {
     LONG lastEventSerial = 0;
     bool loggedInjectedBuild = false;
     bool rawUiBatchWarningShown = false;
+
+    bool haveEffectiveState = false;
+    LONG currentEffectiveMode = 0;
+    uint32_t currentEffectiveUs = 0;
 
     bool watchArmed = false;
     wchar_t watchTargetPath[ReflexProbeProtocol::kPathChars]{};
@@ -157,6 +162,7 @@ void ResetRawDebugCapture();
 void FreeRawDebugBuffer();
 void SetCaptureButtons(CaptureMode mode);
 bool SetCaptureMode(CaptureMode mode);
+void ResetCurrentEffectiveState();
 void PollSharedState();
 
 } // namespace ReflexProbeController

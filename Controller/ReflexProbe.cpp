@@ -144,6 +144,7 @@ void CleanupTarget()
     g_app.loggedInjectedBuild = false;
     g_app.rawUiBatchWarningShown = false;
     ResetLiveStateTracking();
+    ResetCurrentEffectiveState();
     UpdateAcquisitionControls();
 }
 
@@ -437,21 +438,24 @@ void LayoutControls(int clientWidth, int clientHeight)
     if (g_app.attach)
         MoveWindow(g_app.attach, attachX, 124, attachWidth, 30, TRUE);
 
+    if (g_app.currentState)
+        MoveWindow(g_app.currentState, kMargin, 164, usableWidth > 50 ? usableWidth : 50, 20, TRUE);
+
     if (g_app.statusLabel)
-        MoveWindow(g_app.statusLabel, kMargin, 164, 180, 20, TRUE);
+        MoveWindow(g_app.statusLabel, kMargin, 190, 180, 20, TRUE);
 
     const int wrapX = clientWidth - kMargin - wrapWidth;
     const int rawX = wrapX - captureGap - rawWidth;
     const int stateX = rawX - captureGap - stateWidth;
     const int captureLabelX = stateX - captureGap - captureLabelWidth;
     if (g_app.captureModeLabel)
-        MoveWindow(g_app.captureModeLabel, captureLabelX, 164, captureLabelWidth, 20, TRUE);
+        MoveWindow(g_app.captureModeLabel, captureLabelX, 190, captureLabelWidth, 20, TRUE);
     if (g_app.captureState)
-        MoveWindow(g_app.captureState, stateX, 162, stateWidth, 22, TRUE);
+        MoveWindow(g_app.captureState, stateX, 188, stateWidth, 22, TRUE);
     if (g_app.captureRaw)
-        MoveWindow(g_app.captureRaw, rawX, 162, rawWidth, 22, TRUE);
+        MoveWindow(g_app.captureRaw, rawX, 188, rawWidth, 22, TRUE);
     if (g_app.wordWrap)
-        MoveWindow(g_app.wordWrap, wrapX, 162, wrapWidth, 22, TRUE);
+        MoveWindow(g_app.wordWrap, wrapX, 188, wrapWidth, 22, TRUE);
 
     if (g_app.status) {
         int statusHeight = clientHeight - kStatusTop - kMargin;
@@ -526,6 +530,12 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_ATTACH), g_app.instance, nullptr);
         SetChildFont(g_app.attach, font);
 
+        g_app.currentState = CreateWindowExW(0, L"STATIC",
+            L"Current effective state: Reflex Unknown | Reflex FPS limit: Unknown",
+            WS_CHILD | WS_VISIBLE,
+            0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
+        SetChildFont(g_app.currentState, font);
+
         g_app.statusLabel = CreateWindowExW(0, L"STATIC", L"Status / Reflex requests",
             WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
         SetChildFont(g_app.statusLabel, font);
@@ -552,6 +562,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         Button_SetCheck(g_app.wordWrap, BST_CHECKED);
 
         RecreateStatusControl(true);
+        ResetCurrentEffectiveState();
 
         RECT client{};
         GetClientRect(window, &client);
