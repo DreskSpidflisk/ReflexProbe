@@ -218,7 +218,7 @@ void FormatSleepDisplayLine(const CapturedReflexEvent& event,
                             wchar_t* line, size_t lineCount)
 {
     swprintf_s(line, lineCount, L"%s #%ld: result=%ld",
-        BackendSleepCallName(event.backend), event.sleepSequence, event.result);
+        BackendSleepCallName(event.backend), event.sequence, event.result);
 }
 
 void AppendReflexEvent(const CapturedReflexEvent& event, bool newState)
@@ -468,9 +468,8 @@ void PollSharedState()
 
         CapturedReflexEvent captured{};
         captured.qpc = event.qpc;
-        captured.sequence = serial;
+        captured.sequence = event.callSequence;
         captured.kind = event.kind;
-        captured.sleepSequence = event.sleepSequence;
         captured.requestedMode = event.requestedMode;
         captured.effectiveMode = event.effectiveMode;
         captured.result = event.result;

@@ -106,7 +106,7 @@ This makes the normal gameplay footprint essentially independent of whether an e
 
 **Raw debug** is an explicit debugging/tuning mode.
 
-Selecting it starts a new raw capture from that point forward. ReflexProbe does not reconstruct or pretend that calls from before Raw debug was selected were captured. Every subsequently drained Reflex settings call is displayed individually and retained in a fixed **131,072-call RAM ring**. When **Count Reflex Sleep Calls** is enabled, each wrapped sleep call is also displayed and retained individually. Once the ring is full, the oldest retained raw calls are overwritten by new ones.
+Selecting it starts a new raw capture from that point forward. ReflexProbe does not reconstruct or pretend that calls from before Raw debug was selected were captured. Every subsequently drained Reflex settings call is displayed individually and retained in a fixed **131,072-call RAM ring**. When **Count Reflex Sleep Calls** is enabled, each wrapped sleep call is also displayed and retained individually. Settings and sleep calls keep separate call numbers even though they share the same transport ring. Once the ring is full, the oldest retained raw calls are overwritten by new ones.
 
 The ring is allocated only when Raw debug is selected. With the current event structure it is roughly 6 MiB. Live raw text is still batched at the controller's 50 ms poll cadence, so the Win32 EDIT control receives at most about 20 batch appends per second rather than one mutation per Reflex call.
 

@@ -53,7 +53,6 @@ struct CapturedReflexEvent {
     LONGLONG qpc;
     LONG sequence;
     LONG kind;
-    LONG sleepSequence;
     LONG requestedMode;
     LONG effectiveMode;
     LONG result;

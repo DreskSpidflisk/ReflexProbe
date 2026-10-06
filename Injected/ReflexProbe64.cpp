@@ -267,6 +267,7 @@ void PublishSettingsEvent(LONG requestedMode, LONG effectiveMode,
     if (!g_shared)
         return;
 
+    const LONG callSequence = InterlockedIncrement(&g_shared->settingsCallSerial);
     const LONG serial = InterlockedIncrement(&g_shared->eventSerial);
     const uint32_t index = static_cast<uint32_t>(serial - 1) % ReflexProbeProtocol::kEventCapacity;
     ReflexProbeProtocol::ReflexEvent& event = g_shared->events[index];
@@ -277,7 +278,7 @@ void PublishSettingsEvent(LONG requestedMode, LONG effectiveMode,
     QueryPerformanceCounter(&qpc);
     event.qpc = qpc.QuadPart;
     event.kind = ReflexProbeProtocol::ReflexEventSettings;
-    event.sleepSequence = 0;
+    event.callSequence = callSequence;
     event.requestedMode = requestedMode;
     event.effectiveMode = effectiveMode;
     event.requestedUs = requestedUs;
@@ -307,7 +308,7 @@ void PublishSleepEvent(LONG result)
     QueryPerformanceCounter(&qpc);
     event.qpc = qpc.QuadPart;
     event.kind = ReflexProbeProtocol::ReflexEventSleep;
-    event.sleepSequence = sleepSequence;
+    event.callSequence = sleepSequence;
     event.requestedMode = 0;
     event.effectiveMode = 0;
     event.requestedUs = 0;
