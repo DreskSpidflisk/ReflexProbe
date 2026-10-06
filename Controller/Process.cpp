@@ -398,9 +398,7 @@ bool CreateSharedState(DWORD processId, const wchar_t* targetPath,
     g_app.shared->overrideEnabled = overrideEnabled ? 1 : 0;
     g_app.shared->overrideUs = static_cast<LONG>(overrideUs);
     g_app.shared->forceBoostWhenOn = forceBoostWhenOn ? 1 : 0;
-    g_app.shared->wrapReflexSleep = g_app.wrapReflexSleep ? 1 : 0;
-    g_app.shared->countReflexSleepCalls =
-        (g_app.wrapReflexSleep && countReflexSleepCalls) ? 1 : 0;
+    g_app.shared->countReflexSleepCalls = countReflexSleepCalls ? 1 : 0;
     wcsncpy_s(g_app.shared->targetPath, _countof(g_app.shared->targetPath), targetPath, _TRUNCATE);
     return true;
 }
@@ -514,12 +512,9 @@ void LogInitialTargetPolicy(bool overrideEnabled, uint32_t overrideUs, bool forc
     else
         AppendStatusLine(L"Initial Force Boost policy: disabled; Reflex mode requests pass through unchanged.");
 
-    if (!g_app.wrapReflexSleep)
-        AppendStatusLine(L"Reflex Sleep wrapping: disabled by command line; sleep-call counting unavailable.");
-    else if (countReflexSleepCalls)
-        AppendStatusLine(L"Initial Reflex Sleep call counting: enabled.");
-    else
-        AppendStatusLine(L"Initial Reflex Sleep call counting: disabled.");
+    AppendStatusLine(countReflexSleepCalls
+        ? L"Initial Reflex Sleep call counting: enabled; Reflex Sleep will be wrapped for this target."
+        : L"Initial Reflex Sleep call counting: disabled; Reflex Sleep will remain untouched for this target.");
 
     if (g_app.captureMode == CaptureModeRawDebug)
         AppendStatusLine(L"Capture mode: Raw debug; bounded raw retention starts with this target.");

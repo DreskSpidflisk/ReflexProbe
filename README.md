@@ -170,7 +170,7 @@ The hashes make stale or mismatched local binaries obvious.
 
 ### Modern Streamline (2.x+)
 
-The injected DLL intercepts `slGetFeatureFunction`, either from a normal application IAT import or through the narrowly scoped application-`GetProcAddress` path described above. When the game asks for `slReflexSetOptions`, ReflexProbe keeps the genuine NVIDIA function pointer and returns a wrapper that observes requested/effective Reflex mode and frame-limit state. When sleep wrapping is enabled, the same resolver can also return a thin `slReflexSleep` wrapper used only for optional call counting. The wrapper can independently replace `frameLimitUs` and upgrade only `eLowLatency` (On) to `eLowLatencyWithBoost`; Off and an existing On + Boost request are left unchanged.
+The injected DLL intercepts `slGetFeatureFunction`, either from a normal application IAT import or through the narrowly scoped application-`GetProcAddress` path described above. When the game asks for `slReflexSetOptions`, ReflexProbe keeps the genuine NVIDIA function pointer and returns a wrapper that observes requested/effective Reflex mode and frame-limit state. When **Count Reflex Sleep Calls** was selected for the target acquisition, the same resolver can also return a thin `slReflexSleep` wrapper used only for call counting. If counting was not selected, ReflexProbe returns the genuine sleep function pointer untouched. The wrapper can independently replace `frameLimitUs` and upgrade only `eLowLatency` (On) to `eLowLatencyWithBoost`; Off and an existing On + Boost request are left unchanged.
 
 Confirmed modern targets include Cyberpunk 2077, The Witcher 3 Remastered, GSyncProbe, Blood of the Dawnwalker, Indiana Jones and the Great Circle, and No Man's Sky. The same modern Streamline resolver interception has now worked across D3D12 and Vulkan titles without a Vulkan-specific hook.
 
@@ -178,7 +178,7 @@ Confirmed modern targets include Cyberpunk 2077, The Witcher 3 Remastered, GSync
 
 Pre-Streamline D3D integrations configure Reflex through `NvAPI_D3D_SetSleepMode`. ReflexProbe patches only the main executable's NVAPI resolution seam: a normal `nvapi_QueryInterface` IAT import, a dynamically obtained `nvapi_QueryInterface` through the already-narrow application `GetProcAddress` hook, or a direct `NvAPI_D3D_SetSleepMode` import if one exists. It recognizes NVIDIA's public SetSleepMode interface ID `0xac1ca9e0` and returns a narrow wrapper for that one function. It does not modify code bytes inside `nvapi64.dll`.
 
-The NVAPI request is normalized into the same Off / On / On + Boost plus requested/effective interval telemetry used by the Streamline backends. When sleep wrapping is enabled, native `NvAPI_D3D_Sleep` interface ID `0x852cd1d2` is wrapped for the same optional call counting. Frame-limit override changes `minimumIntervalUs`; Force Boost changes only a native request with low-latency mode enabled and Boost disabled. The caller's complete versioned sleep-mode structure is copied and preserved around those fields.
+The NVAPI request is normalized into the same Off / On / On + Boost plus requested/effective interval telemetry used by the Streamline backends. When **Count Reflex Sleep Calls** was selected for the target acquisition, native `NvAPI_D3D_Sleep` interface ID `0x852cd1d2` is wrapped for the same optional call counting; otherwise the genuine sleep function is left untouched. Frame-limit override changes `minimumIntervalUs`; Force Boost changes only a native request with low-latency mode enabled and Boost disabled. The caller's complete versioned sleep-mode structure is copied and preserved around those fields.
 
 **God of War (2018)** runtime-confirms the native-NVAPI/D3D11 backend: menu changes produced Off / On / On + Boost SetSleepMode calls, frame-limit override worked, Force Boost worked, and the explicit limiter remained effective with low-latency mode Off.
 
@@ -200,7 +200,7 @@ The old `ReflexConstants` ABI is defined locally with compile-time layout checks
 3. Choose a capture mode. **State changes** is the default for normal gameplay; **Raw debug** is for short diagnostic captures.
 4. Leave **Override Reflex frame limit** unchecked for pass-through, or check it and enter the desired FPS value. The FPS box is disabled while the override is off and defaults to **158 FPS** when ReflexProbe starts.
 5. Optionally enable **Force Boost when Reflex On**. This changes only a plain On request to On + Boost; Off stays Off and an existing On + Boost request stays unchanged.
-6. Optionally enable **Count Reflex Sleep Calls**. It defaults Off. In State changes mode, wrapped sleep calls are counted during each detected Reflex state and reported when that state ends; in Raw debug, every counted sleep call is printed individually. Calls before the first detected state are intentionally not assigned to a state.
+6. Optionally enable **Count Reflex Sleep Calls**. It defaults Off. This is an **acquisition-time diagnostic choice**: if checked, ReflexProbe wraps the supported Reflex Sleep call for that target and counts it; if unchecked, the sleep function pointer is left untouched. The choice is locked once Launch or Attach successfully acquires a target, and is snapshotted and locked immediately when Watch is armed. It becomes editable again after the target exits, an acquisition fails, or Watch is cancelled. In State changes mode, counted sleep calls are reported when each detected Reflex state ends; in Raw debug, every counted sleep call is printed individually. Calls before the first detected state are intentionally not assigned to a state.
 7. Choose one acquisition method:
    - **Launch + Inject** creates the selected executable suspended, injects `ReflexProbe64.dll`, then resumes it.
    - **Watch + Inject** arms a temporary 10 ms process scan, then you launch the game normally through Steam, GOG Galaxy, Ubisoft Connect, Epic, or another launcher. ReflexProbe first filters by executable name, then requires a case-insensitive exact full-path match before opening or injecting the process. The watch stops completely after a match or cancellation.
@@ -208,7 +208,9 @@ The old `ReflexConstants` ABI is defined locally with compile-time layout checks
 8. Watch/Attach logs the detected PID, parent PID, full executable path, process-open timing and DLL-injection timing. Command-line capture is intentionally not part of this first implementation.
 9. The injected DLL discovers a supported Streamline Reflex boundary and reports requested/effective state to the controller.
 
-Reflex Sleep wrapping is enabled by default for the current diagnostic phase, while counting remains opt-in. Start ReflexProbe with `--no-wrap-reflex-sleep` to return genuine sleep function pointers untouched; the **Count Reflex Sleep Calls** checkbox remains visible but disabled. `--wrap-reflex-sleep` explicitly selects wrapping and exists so the default can be inverted later without changing the command-line contract. Supplying both switches is an error. Streamline 1.x sleep interception is not implemented yet.
+Reflex Sleep interception is now strictly opt-in through **Count Reflex Sleep Calls**. The checkbox state is copied into the target's shared state before injection and is immutable for that acquisition. A disabled count therefore means more than "do not record events": ReflexProbe does **not** substitute `slReflexSleep` or `NvAPI_D3D_Sleep` at all. Streamline 1.x sleep interception is not implemented yet.
+
+Earlier diagnostic builds had startup-global `--wrap-reflex-sleep` and `--no-wrap-reflex-sleep` switches implemented with `CommandLineToArgvW`. Those switches and their Shell32 dependency were intentionally removed when sleep interception became an acquisition-time UI choice. The last pre-removal implementation is preserved in Git history at commit `d6439862403a20fc0b094e39945992495c64d99f`; the original sleep-counting implementation began at `9bee5eb7b638e8fb4d1de4cf53c49ef712b5682f`. If ReflexProbe needs command-line options again, that working parser can be recovered without keeping unused plumbing in the current binary.
 
 The controller also keeps a compact **Current effective state** line and mirrors it in the window title. It updates only after an intercepted Reflex setter returns success and shows the effective mode and effective explicit Reflex FPS limit after ReflexProbe policy has been applied. Repeated identical calls do not churn the UI. A zero interval is shown as **None (0 us)** rather than inventing an FPS, and the display returns to **Unknown** when the target exits.
 
@@ -232,7 +234,7 @@ Example:
 165 FPS -> 6061 us
 ```
 
-Entering `0` while override is enabled forces literal `frameLimitUs=0`. Frame-limit, Force Boost, and sleep-call counting are independent and can be changed while a wrapped target is running. Watch snapshots all three live policies when armed so startup-only behavior sees the intended configuration. The wrap/no-wrap decision itself is immutable for a controller run and is set only by the controller command line.
+Entering `0` while override is enabled forces literal `frameLimitUs=0`. Frame-limit and Force Boost remain live policies and can be changed while a target is running. Sleep-call counting is different: it is immutable for the acquired target because choosing whether to return a sleep wrapper must happen when the game resolves the function. Watch snapshots frame-limit, Force Boost, and the sleep-count choice when armed so startup-only behavior sees the intended configuration; Launch and Attach snapshot them when acquisition begins.
 
 ## Known test targets and results
 
@@ -268,7 +270,7 @@ Do not use ReflexProbe with anti-cheat/protected multiplayer titles. The intende
 1. Regression-test the hardened **Launch + Inject** verification across fresh and repeated launches while confirming that Watch behavior remains unchanged.
 2. Continue **Watch + Inject** coverage beyond the successful GOG Galaxy / Dawnwalker case, especially Steam and other launcher-owned games.
 3. Runtime-test **Attach** and document which titles resubmit enough Reflex state for a late attach to be useful.
-4. Expand sleep-call comparisons to Dawnwalker, Requiem where practical, and other integrations now that No Man's Sky, Indiana Jones, and God of War have produced sharply different patterns.
+4. Expand supported sleep-call comparisons to Dawnwalker and other integrations now that No Man's Sky, Indiana Jones, and God of War have produced sharply different patterns; add an SL1 sleep interception path before treating Requiem's displayed zero as a measurement.
 5. Try DOOM: The Dark Ages through Steam and compare its explicit `r_streamlineReflexMinFrameTimeUs` behavior with the zero-request commercial integrations.
 6. Add native `VK_NV_low_latency2` interception only if a Vulkan title bypasses the already-working modern Streamline resolver path.
 7. After launcher acquisition is sufficiently exercised, extend the same modern Streamline resolver interception to observe DLSS Frame Generation policy such as `slDLSSGSetOptions`.

@@ -291,10 +291,8 @@ void PublishSettingsEvent(LONG requestedMode, LONG effectiveMode,
 
 void PublishSleepEvent(LONG result)
 {
-    if (!g_shared ||
-        InterlockedCompareExchange(&g_shared->countReflexSleepCalls, 0, 0) == 0) {
+    if (!g_shared)
         return;
-    }
 
     const LONG sleepSequence = InterlockedIncrement(&g_shared->sleepCallSerial);
     const LONG serial = InterlockedIncrement(&g_shared->eventSerial);
@@ -436,7 +434,7 @@ void* __cdecl HookNvapiQueryInterface(uint32_t interfaceId)
     }
 
     if (interfaceId == kNvapiD3DSleepId &&
-        g_shared && g_shared->wrapReflexSleep) {
+        g_shared && g_shared->countReflexSleepCalls) {
         g_realNvapiD3DSleep = reinterpret_cast<PFunNvapiD3DSleep*>(function);
         return reinterpret_cast<void*>(&HookNvapiD3DSleep);
     }
@@ -590,7 +588,7 @@ sl::Result HookGetFeatureFunction(sl::Feature feature, const char* functionName,
         function = reinterpret_cast<void*>(&HookReflexSetOptions);
         InterlockedExchange(&g_modernReflexCaptured, 1);
     } else if (strcmp(functionName, "slReflexSleep") == 0 &&
-               g_shared && g_shared->wrapReflexSleep) {
+               g_shared && g_shared->countReflexSleepCalls) {
         g_realReflexSleep = reinterpret_cast<PFun_slReflexSleep*>(function);
         function = reinterpret_cast<void*>(&HookReflexSleep);
     }
@@ -627,7 +625,7 @@ FARPROC WINAPI HookApplicationGetProcAddress(HMODULE module, LPCSTR procName)
 
     if (strcmp(procName, "NvAPI_D3D_Sleep") == 0 &&
         _wcsicmp(moduleName, L"nvapi64.dll") == 0 &&
-        g_shared && g_shared->wrapReflexSleep) {
+        g_shared && g_shared->countReflexSleepCalls) {
         g_realNvapiD3DSleep = reinterpret_cast<PFunNvapiD3DSleep*>(result);
         return reinterpret_cast<FARPROC>(&HookNvapiD3DSleep);
     }
@@ -772,7 +770,7 @@ bool PatchApplicationNvapiResolver(bool& armedAny)
             const bool sleepMatches =
                 (importedName && strcmp(importedName, "NvAPI_D3D_Sleep") == 0) ||
                 (expectedSleep && current == expectedSleep);
-            if (sleepMatches && g_shared && g_shared->wrapReflexSleep) {
+            if (sleepMatches && g_shared && g_shared->countReflexSleepCalls) {
                 armedAny = true;
                 if (current != reinterpret_cast<void*>(&HookNvapiD3DSleep)) {
                     g_realNvapiD3DSleep =

@@ -107,8 +107,6 @@ struct AppState {
     LONG currentEffectiveMode = 0;
     uint32_t currentEffectiveUs = 0;
 
-    bool wrapReflexSleep = true;
-
     bool watchArmed = false;
     wchar_t watchTargetPath[ReflexProbeProtocol::kPathChars]{};
     bool watchOverrideEnabled = false;
