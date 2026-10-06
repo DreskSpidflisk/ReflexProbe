@@ -19,7 +19,7 @@ Modern Streamline exposes the useful value as `sl::ReflexOptions::frameLimitUs`.
 - `0` = no explicit Reflex frame-limit interval
 - nonzero = explicit minimum frame interval in microseconds
 
-ReflexProbe still labels a zero request as `automatic` in the log because NVIDIA's D3D Reflex/presentation path can apply its own below-refresh policy downstream. The API value itself is still literal zero; it is not NULL and it is not a request for a particular automatically calculated FPS.
+ReflexProbe labels a zero request as `0 us (no explicit frame limit)`. NVIDIA's D3D Reflex/presentation path can still apply its own below-refresh policy downstream, but that behavior is deliberately kept separate from the application's literal API request. Zero is not NULL and is not a request for a particular automatically calculated FPS.
 
 When override mode is enabled, ReflexProbe preserves the game's Reflex mode and every other option, copies the options/constants structure, changes only `frameLimitUs`, and forwards the copy to Streamline. **Zero is a real override value.** If the game requests `6061 us` and ReflexProbe is armed for `0`, NVIDIA receives `0`. If both the game and ReflexProbe choose zero, the numeric value is the same but the override policy still deliberately selected it.
 
@@ -37,8 +37,11 @@ Evidence includes:
 - **The Witcher 3 Remastered / modern Streamline:** the same zero-request pattern appears across Off, On and On + Boost.
 - **A Plague Tale: Requiem / Streamline 1.0:** the legacy `sl.reflex!slSetConstants` path likewise submits zero across Off, On and On + Boost.
 - **Blood of the Dawnwalker / modern Streamline:** with DLSS Frame Generation enabled the game submitted one Off state followed by one On state, both with `frameLimitUs=0`; with Frame Generation disabled it submitted one Off state. It did not spam the Reflex setter every frame.
+- **Indiana Jones and the Great Circle / modern Streamline + Vulkan:** the game repeatedly submits Reflex On with `frameLimitUs=0`. Its Reflex/Frame Generation feature branch is exposed only when DLSS is selected as the upscaler; with a non-DLSS upscaler, Frame Generation disappears from the menu and the observed Reflex behavior is not active. Its own limiter is separate from Reflex and limits the pre-Frame-Generation cadence.
+- **No Man's Sky / modern Streamline + Vulkan:** the game exposes an independent Reflex control and submits `frameLimitUs=0`. ReflexProbe can replace that request with a nonzero interval and the setter returns success, but the requested Reflex limit did not govern the observed presentation rate. NMS also has its own separate pre-Frame-Generation limiter.
+- **God of War (2018) / native NVAPI D3D11:** the game submits Reflex state only when its menu option changes, supports Off / On / On + Boost, and normally requests a zero minimum interval. ReflexProbe's native `minimumIntervalUs` override worked, including while low-latency mode itself was Off.
 
-This gives us two useful commercial integration styles: engines that resubmit settings constantly, and engines such as Dawnwalker that appear to set state only when policy changes.
+The commercial samples now show several distinct integration styles: constant setter resubmission, startup/policy-change-only setters, native NVAPI menu-change-only setters, engines that keep their own pre-FG limiter separate from Reflex, and integrations where a nonzero Reflex limiter request is accepted but does not produce the expected pacing.
 
 ### Empirical automatic-cap rule
 
@@ -65,7 +68,7 @@ This is an empirically reconstructed operational rule, not a claim about unpubli
 
 A nonzero Reflex interval is explicit application policy and is independent of whether Reflex Low Latency mode is On. NVIDIA documents the frame limiter as a separate Reflex subfeature, and GSyncProbe confirms the practical behavior: it can submit `mode=Off` while still supplying a nonzero `frameLimitUs` and continuing the Reflex sleep path.
 
-DOOM: The Dark Ages exposes `j_streamlineReflexMinFrameTimeUs`. Setting about `6050 us` targets about 165.3 FPS and produces a rigid presentation cadence even on its Vulkan path.
+DOOM: The Dark Ages exposes `r_streamlineReflexMinFrameTimeUs`. Setting about `6050 us` targets about 165.3 FPS and produces a rigid presentation cadence even on its Vulkan path.
 
 ReflexProbe's own override has now been proven against GSyncProbe. Forcing 165, 60, and 30 FPS replaced GSyncProbe's requested limiter value, and **GSyncProbe's measured App Present Rate followed the forced value**. The same worked while GSyncProbe's Reflex mode was Off because the frame limiter remains independently usable.
 
@@ -169,7 +172,7 @@ The hashes make stale or mismatched local binaries obvious.
 
 The injected DLL intercepts `slGetFeatureFunction`, either from a normal application IAT import or through the narrowly scoped application-`GetProcAddress` path described above. When the game asks for `slReflexSetOptions`, ReflexProbe keeps the genuine NVIDIA function pointer and returns a wrapper that observes requested/effective Reflex mode and frame-limit state. When sleep wrapping is enabled, the same resolver can also return a thin `slReflexSleep` wrapper used only for optional call counting. The wrapper can independently replace `frameLimitUs` and upgrade only `eLowLatency` (On) to `eLowLatencyWithBoost`; Off and an existing On + Boost request are left unchanged.
 
-Confirmed modern targets include Cyberpunk 2077, The Witcher 3 Remastered, GSyncProbe, and Blood of the Dawnwalker.
+Confirmed modern targets include Cyberpunk 2077, The Witcher 3 Remastered, GSyncProbe, Blood of the Dawnwalker, Indiana Jones and the Great Circle, and No Man's Sky. The same modern Streamline resolver interception has now worked across D3D12 and Vulkan titles without a Vulkan-specific hook.
 
 ### Native NVAPI D3D Reflex
 
@@ -209,7 +212,7 @@ Reflex Sleep wrapping is enabled by default for the current diagnostic phase, wh
 
 The controller also keeps a compact **Current effective state** line and mirrors it in the window title. It updates only after an intercepted Reflex setter returns success and shows the effective mode and effective explicit Reflex FPS limit after ReflexProbe policy has been applied. Repeated identical calls do not churn the UI. A zero interval is shown as **None (0 us)** rather than inventing an FPS, and the display returns to **Unknown** when the target exits.
 
-**Watch is the preferred launcher mode for titles that submit Reflex state only at startup.** Runtime Attach can still be useful for engines that resubmit settings, but attaching after initialization can miss a setter that the game called once and cached before ReflexProbe arrived.
+**Watch is the preferred launcher mode for titles that submit Reflex state only at startup.** It has now successfully acquired and injected the GOG Galaxy-launched Blood of the Dawnwalker before that title's sparse startup Reflex submissions. Runtime Attach can still be useful for engines that resubmit settings, but attaching after initialization can miss a setter that the game called once and cached before ReflexProbe arrived. Attach has not yet been exercised in the current commercial-game test pass.
 
 For a positive FPS override, the controller converts FPS to microseconds using:
 
@@ -231,11 +234,12 @@ Entering `0` while override is enabled forces literal `frameLimitUs=0`. Frame-li
 - **Cyberpunk 2077 (GOG):** D3D12, modern Streamline. Repeated setter calls; all tested Reflex modes requested zero.
 - **The Witcher 3 Remastered:** D3D12, modern Streamline. Repeated setter calls; Off, On and On + Boost requested zero.
 - **A Plague Tale: Requiem (GOG):** D3D12, Streamline 1.0 plugin gateway. Setter calls track roughly frame cadence and request zero across tested modes.
-- **Blood of the Dawnwalker (GOG):** UE5.5.3 local build, D3D12, modern dynamically resolved Streamline. Frame Generation enabled caused an Off -> On pair with zero intervals; Frame Generation disabled caused one Off call. With G-SYNC + forced VSync, the FG/Reflex-On case exhibited the familiar ~225 FPS at 240 Hz.
-- **No Man's Sky:** Vulkan + modern Streamline with an independent Reflex control. ReflexProbe successfully intercepts its settings calls, but forcing a nonzero `frameLimitUs` did not impose the requested presentation limit; the game's own limiter is separate and pre-FG. Sleep-call counting was added specifically to investigate this integration.
-- **Indiana Jones and the Great Circle:** Vulkan + modern Streamline. Reflex is active only in the DLSS feature path, the game repeatedly submits Reflex options at high frequency, and its own frame limiter is separate and pre-FG. ReflexProbe override and Force Boost both worked through the API-independent Streamline interception.
-- **God of War (2018):** D3D11 + native NVAPI Reflex. Runtime-confirmed Off / On / On + Boost observation plus working Force Boost and `minimumIntervalUs` override.
-- **Pragmata and other launcher titles:** practical Watch + Inject targets. Blood of the Dawnwalker under GOG Galaxy is an immediate launcher-owned test case because its Reflex state is only submitted at startup/policy changes.
+- **Blood of the Dawnwalker (GOG):** UE5.5.3 local build, D3D12, modern dynamically resolved Streamline. Frame Generation enabled caused an Off -> On pair with zero intervals; Frame Generation disabled caused one Off call. With G-SYNC + forced VSync, the FG/Reflex-On case exhibited the familiar ~225 FPS at 240 Hz. **Watch + Inject is runtime-confirmed through GOG Galaxy**: the watcher detected the launcher-created executable, injected successfully, and caught the later sparse Reflex startup calls.
+- **No Man's Sky (GOG):** Vulkan + modern Streamline with an independent Reflex control. ReflexProbe successfully intercepts its settings calls and can forward an overridden nonzero `frameLimitUs` with a successful result, but the forced Reflex interval did not impose the requested presentation limit in testing. The game's own limiter is separate and pre-FG. Optional `slReflexSleep` call counting was added specifically to investigate whether its sleep path explains this behavior.
+- **Indiana Jones and the Great Circle (GOG):** Vulkan + modern Streamline. Reflex/Frame Generation behavior is gated behind DLSS as the selected upscaler: when DLSS is not selected, the Frame Generation option is hidden and the observed Reflex path is effectively absent. With DLSS active, the game repeatedly submits Reflex On with a zero interval at high frequency. Force Boost and frame-limit override are both intercepted correctly, while the game's own limiter remains a separate pre-FG limiter.
+- **God of War (2018):** D3D11 + native NVAPI Reflex, independent of whether DLSS is enabled. Runtime-confirmed Off / On / On + Boost observation, with `NvAPI_D3D_SetSleepMode` called only when the menu setting changes. Force Boost and `minimumIntervalUs` override both work, and the explicit Reflex limiter remains effective with low-latency mode Off.
+- **A Plague Tale: Requiem Force Boost caveat:** observing and frame-limit overriding through the SL1 plugin path works, but substituting plain On -> On + Boost causes severe progressive performance collapse in Requiem even though the game's native On + Boost mode is healthy. The capability remains exposed for diagnosis; the old SL1 Boost semantics need further investigation.
+- **Pragmata and other launcher titles:** practical future Watch + Inject targets after the GOG Galaxy Dawnwalker success.
 
 ## Deliberate limitations
 
@@ -245,7 +249,8 @@ Entering `0` while override is enabled forces literal `frameLimitUs=0`. Frame-li
 - Raw debug retains only the latest 131,072 raw calls
 - the visible log is a standard Win32 EDIT control with a 16 MiB text limit
 - Watch currently uses low-overhead Toolhelp process polling rather than a kernel/ETW process-start notification path
-- Attach cannot recover Reflex setter calls that occurred before injection
+- Attach cannot recover Reflex setter calls that occurred before injection and has not yet been runtime-tested in the current commercial-game pass
+- an intermittent **Launch + Inject** post-build verification race has been observed: the injected DLL can report its build stamp through shared memory, proving it executed, while the controller's immediate one-shot Toolhelp module snapshot still fails to see `ReflexProbe64.dll` and falsely reports injection failure. This has only been observed with Launch so far; Watch has not exhibited it in testing, and Attach remains untested
 - Streamline 1.x sleep-call interception is not implemented
 - no native Vulkan `VK_NV_low_latency2` hook yet
 - no anti-cheat support
@@ -254,11 +259,12 @@ Do not use ReflexProbe with anti-cheat/protected multiplayer titles. The intende
 
 ## Planned next steps
 
-1. Exercise **Watch + Inject** against GOG Galaxy / Blood of the Dawnwalker, then Steam and other launcher-owned games.
-2. Build a tiny synthetic one-shot Reflex target/launcher to measure how quickly the 10 ms watcher acquires and injects before a startup-only `slReflexSetOptions` call.
-3. If ordinary low-overhead process polling actually loses that race, evaluate a lower-latency Windows process-start notification path rather than guessing in advance.
-4. Expand Vulkan coverage and later add native `VK_NV_low_latency2` interception when required.
-5. Runtime-test the native NVAPI D3D backend against God of War and refine resolver coverage only if its shipped NVAPI linkage requires it.
-6. After launcher acquisition is proven, extend the same modern Streamline resolver interception to observe DLSS Frame Generation policy such as `slDLSSGSetOptions`.
+1. Harden **Launch + Inject** post-`LoadLibraryW` verification without changing the working injection/interception path: retain the existing module check, add a short bounded retry, and treat the injected shared-memory build stamp as an independent positive proof that ReflexProbe64 executed.
+2. Continue **Watch + Inject** coverage beyond the successful GOG Galaxy / Dawnwalker case, especially Steam and other launcher-owned games.
+3. Runtime-test **Attach** and document which titles resubmit enough Reflex state for a late attach to be useful.
+4. Use the new optional sleep-call counting on No Man's Sky, Indiana Jones, God of War, and other targets to compare setter cadence with the actual Reflex sleep path.
+5. Try DOOM: The Dark Ages through Steam and compare its explicit `r_streamlineReflexMinFrameTimeUs` behavior with the zero-request commercial integrations.
+6. Add native `VK_NV_low_latency2` interception only if a Vulkan title bypasses the already-working modern Streamline resolver path.
+7. After launcher acquisition is sufficiently exercised, extend the same modern Streamline resolver interception to observe DLSS Frame Generation policy such as `slDLSSGSetOptions`.
 
 The architecture remains intentionally boring: a Win32 controller outside the game, one injected DLL inside it, Launch/Watch/Attach as interchangeable acquisition paths, fixed RAM transport, bounded capture policy, and a tiny requested/effective Reflex policy surface under the microscope.
