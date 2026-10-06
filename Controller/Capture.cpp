@@ -11,6 +11,7 @@ void ResetLiveStateTracking()
     g_app.haveStateEvent = false;
     g_app.stateEvent = {};
     g_app.stateRepeatCount = 0;
+    g_app.stateSleepCount = 0;
 }
 
 bool EnsureRawDebugBuffer()
@@ -89,6 +90,13 @@ const wchar_t* BackendCallName(LONG backend)
     default:
         return L"slReflexSetOptions";
     }
+}
+
+const wchar_t* BackendSleepCallName(LONG backend)
+{
+    return backend == ReflexProbeProtocol::ReflexBackendNativeNvapiD3D
+        ? L"NvAPI_D3D_Sleep"
+        : L"slReflexSleep";
 }
 
 CaptureMode CurrentCaptureMode()
@@ -206,6 +214,13 @@ void FormatReflexDisplayLine(const CapturedReflexEvent& event, bool newState,
         wcscpy_s(line, lineCount, raw);
 }
 
+void FormatSleepDisplayLine(const CapturedReflexEvent& event,
+                            wchar_t* line, size_t lineCount)
+{
+    swprintf_s(line, lineCount, L"%s #%ld: result=%ld",
+        BackendSleepCallName(event.backend), event.sleepSequence, event.result);
+}
+
 void AppendReflexEvent(const CapturedReflexEvent& event, bool newState)
 {
     wchar_t line[512]{};
@@ -213,10 +228,13 @@ void AppendReflexEvent(const CapturedReflexEvent& event, bool newState)
     AppendDisplayLineAtQpc(line, event.qpc);
 }
 
-bool AppendReflexEventToBuffer(TextBuffer& buffer, const CapturedReflexEvent& event, bool newState)
+bool AppendCapturedEventToBuffer(TextBuffer& buffer, const CapturedReflexEvent& event, bool newState)
 {
     wchar_t line[512]{};
-    FormatReflexDisplayLine(event, newState, line, _countof(line));
+    if (event.kind == ReflexProbeProtocol::ReflexEventSleep)
+        FormatSleepDisplayLine(event, line, _countof(line));
+    else
+        FormatReflexDisplayLine(event, newState, line, _countof(line));
     return AppendTextBufferLineAtQpc(buffer, line, event.qpc);
 }
 
@@ -246,10 +264,29 @@ void AppendRepeatCount(uint64_t repeatCount, LONGLONG eventQpc)
     AppendDisplayLineAtQpc(line, eventQpc);
 }
 
+bool SleepCountingCurrentlyEnabled()
+{
+    return g_app.countReflexSleep &&
+           Button_GetCheck(g_app.countReflexSleep) == BST_CHECKED;
+}
+
+void AppendSleepCount(uint64_t sleepCount, LONGLONG eventQpc)
+{
+    if (!sleepCount && !SleepCountingCurrentlyEnabled())
+        return;
+
+    wchar_t line[160]{};
+    swprintf_s(line, L"Reflex Sleep calls counted during previous state: %llu.",
+        static_cast<unsigned long long>(sleepCount));
+    AppendDisplayLineAtQpc(line, eventQpc);
+}
+
 void FinalizeStateRun(LONGLONG eventQpc)
 {
-    if (g_app.haveStateEvent)
+    if (g_app.haveStateEvent) {
         AppendRepeatCount(g_app.stateRepeatCount, eventQpc);
+        AppendSleepCount(g_app.stateSleepCount, eventQpc);
+    }
     ResetLiveStateTracking();
 }
 
@@ -314,21 +351,29 @@ void HandleCapturedReflexEvent(const CapturedReflexEvent& event)
         return;
     }
 
+    if (event.kind == ReflexProbeProtocol::ReflexEventSleep) {
+        if (g_app.haveStateEvent)
+            ++g_app.stateSleepCount;
+        return;
+    }
+
     if (!g_app.haveStateEvent) {
         g_app.haveStateEvent = true;
         g_app.stateEvent = event;
         g_app.stateRepeatCount = 0;
+        g_app.stateSleepCount = 0;
         AppendReflexEvent(event, true);
     } else if (SameReflexState(g_app.stateEvent, event)) {
         ++g_app.stateRepeatCount;
     } else {
         AppendRepeatCount(g_app.stateRepeatCount, event.qpc);
+        AppendSleepCount(g_app.stateSleepCount, event.qpc);
         AppendReflexEvent(event, true);
         g_app.stateEvent = event;
         g_app.stateRepeatCount = 0;
+        g_app.stateSleepCount = 0;
     }
 }
-
 void RecordRunBoundary(LONGLONG eventQpc)
 {
     if (CurrentCaptureMode() == CaptureModeStateChanges)
@@ -424,16 +469,19 @@ void PollSharedState()
         CapturedReflexEvent captured{};
         captured.qpc = event.qpc;
         captured.sequence = serial;
+        captured.kind = event.kind;
+        captured.sleepSequence = event.sleepSequence;
         captured.requestedMode = event.requestedMode;
         captured.effectiveMode = event.effectiveMode;
         captured.result = event.result;
         captured.backend = backend;
         captured.requestedUs = event.requestedUs;
         captured.effectiveUs = event.effectiveUs;
-        UpdateCurrentEffectiveState(captured);
+        if (captured.kind == ReflexProbeProtocol::ReflexEventSettings)
+            UpdateCurrentEffectiveState(captured);
         HandleCapturedReflexEvent(captured);
         if (rawDebug && rawBatchSuccess)
-            rawBatchSuccess = AppendReflexEventToBuffer(rawBatch, captured, false);
+            rawBatchSuccess = AppendCapturedEventToBuffer(rawBatch, captured, false);
         processedSerial = serial;
     }
 

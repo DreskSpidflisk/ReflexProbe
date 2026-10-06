@@ -2,18 +2,51 @@
 
 #include <windowsx.h>
 #include <commdlg.h>
+#include <shellapi.h>
 #include <wchar.h>
 #include <stdio.h>
 #include <math.h>
 #include <float.h>
 
 #pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "shell32.lib")
 
 namespace ReflexProbeController {
 
 constexpr wchar_t kWindowClass[] = L"ReflexProbeControlWindow";
 
 AppState g_app;
+
+bool ParseStartupOptions(bool& wrapReflexSleep)
+{
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv)
+        return false;
+
+    bool forceWrap = false;
+    bool forceNoWrap = false;
+    for (int i = 1; i < argc; ++i) {
+        if (_wcsicmp(argv[i], L"--wrap-reflex-sleep") == 0)
+            forceWrap = true;
+        else if (_wcsicmp(argv[i], L"--no-wrap-reflex-sleep") == 0)
+            forceNoWrap = true;
+    }
+
+    LocalFree(argv);
+
+    if (forceWrap && forceNoWrap) {
+        MessageBoxW(nullptr,
+            L"Use either --wrap-reflex-sleep or --no-wrap-reflex-sleep, not both.",
+            L"ReflexProbe", MB_ICONERROR);
+        return false;
+    }
+
+    // Current diagnostic default is to wrap. The explicit positive switch exists so
+    // this default can be inverted later without changing the command-line contract.
+    wrapReflexSleep = !forceNoWrap;
+    return true;
+}
 
 bool ParseOverrideFromUi(bool& enabled, uint32_t& frameLimitUs, wchar_t* error, size_t errorCount)
 {
@@ -88,6 +121,23 @@ void ApplyPolicyToShared(bool logFrameLimit, bool logBoost)
         AppendStatusLine(line);
     }
 }
+void ApplySleepCountingToShared()
+{
+    if (!g_app.shared || !g_app.wrapReflexSleep)
+        return;
+
+    const bool enabled =
+        g_app.countReflexSleep &&
+        Button_GetCheck(g_app.countReflexSleep) == BST_CHECKED;
+
+    InterlockedExchange(&g_app.shared->countReflexSleepCalls, enabled ? 1 : 0);
+    InterlockedIncrement(&g_app.shared->configSequence);
+
+    AppendStatusLine(enabled
+        ? L"Reflex Sleep call counting enabled."
+        : L"Reflex Sleep call counting disabled.");
+}
+
 void UpdateAcquisitionControls()
 {
     const bool targetActive = g_app.process != nullptr;
@@ -118,6 +168,8 @@ void UpdateAcquisitionControls()
     }
     if (g_app.forceBoost)
         EnableWindow(g_app.forceBoost, !watching);
+    if (g_app.countReflexSleep)
+        EnableWindow(g_app.countReflexSleep, g_app.wrapReflexSleep && !watching);
 }
 
 void CleanupTarget()
@@ -172,6 +224,9 @@ bool LaunchAndInject()
     bool overrideEnabled = false;
     uint32_t overrideUs = 0;
     const bool forceBoostWhenOn = Button_GetCheck(g_app.forceBoost) == BST_CHECKED;
+    const bool countReflexSleepCalls =
+        g_app.wrapReflexSleep &&
+        Button_GetCheck(g_app.countReflexSleep) == BST_CHECKED;
     wchar_t error[512]{};
     if (!ParseOverrideFromUi(overrideEnabled, overrideUs, error, _countof(error))) {
         MessageBoxW(g_app.window, error, L"ReflexProbe", MB_ICONWARNING);
@@ -230,7 +285,8 @@ bool LaunchAndInject()
     }
 
     if (!CreateSharedState(process.dwProcessId, gamePath,
-            overrideEnabled, overrideUs, forceBoostWhenOn, error, _countof(error))) {
+            overrideEnabled, overrideUs, forceBoostWhenOn, countReflexSleepCalls,
+            error, _countof(error))) {
         TerminateProcess(process.hProcess, 1);
         CloseHandle(process.hThread);
         MessageBoxW(g_app.window, error, L"ReflexProbe", MB_ICONERROR);
@@ -287,6 +343,13 @@ bool LaunchAndInject()
     else
         AppendStatusLine(L"Initial Force Boost policy: disabled; Reflex mode requests pass through unchanged.");
 
+    if (!g_app.wrapReflexSleep)
+        AppendStatusLine(L"Reflex Sleep wrapping: disabled by command line; sleep-call counting unavailable.");
+    else if (countReflexSleepCalls)
+        AppendStatusLine(L"Initial Reflex Sleep call counting: enabled.");
+    else
+        AppendStatusLine(L"Initial Reflex Sleep call counting: disabled.");
+
     if (g_app.captureMode == CaptureModeRawDebug)
         AppendStatusLine(L"Capture mode: Raw debug; bounded raw retention starts with this target.");
     else
@@ -298,7 +361,7 @@ bool LaunchAndInject()
 bool ReadTargetAndPolicyForExternalAcquisition(
     wchar_t* gamePath, size_t gamePathCount,
     bool& overrideEnabled, uint32_t& overrideUs, bool& forceBoostWhenOn,
-    wchar_t* error, size_t errorCount)
+    bool& countReflexSleepCalls, wchar_t* error, size_t errorCount)
 {
     if (!gamePath || !gamePathCount)
         return false;
@@ -316,6 +379,9 @@ bool ReadTargetAndPolicyForExternalAcquisition(
     }
 
     forceBoostWhenOn = Button_GetCheck(g_app.forceBoost) == BST_CHECKED;
+    countReflexSleepCalls =
+        g_app.wrapReflexSleep &&
+        Button_GetCheck(g_app.countReflexSleep) == BST_CHECKED;
     return ParseOverrideFromUi(overrideEnabled, overrideUs, error, errorCount);
 }
 
@@ -330,17 +396,18 @@ bool ToggleWatchAndInject()
     bool overrideEnabled = false;
     uint32_t overrideUs = 0;
     bool forceBoostWhenOn = false;
+    bool countReflexSleepCalls = false;
     wchar_t error[512]{};
 
     if (!ReadTargetAndPolicyForExternalAcquisition(
             gamePath, _countof(gamePath), overrideEnabled, overrideUs, forceBoostWhenOn,
-            error, _countof(error))) {
+            countReflexSleepCalls, error, _countof(error))) {
         MessageBoxW(g_app.window, error, L"ReflexProbe", MB_ICONWARNING);
         return false;
     }
 
     if (!ArmProcessWatch(gamePath, overrideEnabled, overrideUs, forceBoostWhenOn,
-            error, _countof(error))) {
+            countReflexSleepCalls, error, _countof(error))) {
         MessageBoxW(g_app.window, error, L"ReflexProbe Watch + Inject", MB_ICONERROR);
         return false;
     }
@@ -354,17 +421,18 @@ bool AttachToRunningTarget()
     bool overrideEnabled = false;
     uint32_t overrideUs = 0;
     bool forceBoostWhenOn = false;
+    bool countReflexSleepCalls = false;
     wchar_t error[512]{};
 
     if (!ReadTargetAndPolicyForExternalAcquisition(
             gamePath, _countof(gamePath), overrideEnabled, overrideUs, forceBoostWhenOn,
-            error, _countof(error))) {
+            countReflexSleepCalls, error, _countof(error))) {
         MessageBoxW(g_app.window, error, L"ReflexProbe", MB_ICONWARNING);
         return false;
     }
 
     if (!AttachRunningProcess(gamePath, overrideEnabled, overrideUs, forceBoostWhenOn,
-            error, _countof(error))) {
+            countReflexSleepCalls, error, _countof(error))) {
         MessageBoxW(g_app.window, error, L"ReflexProbe Attach", MB_ICONERROR);
         return false;
     }
@@ -428,6 +496,8 @@ void LayoutControls(int clientWidth, int clientHeight)
         MoveWindow(g_app.fpsLabel, 262, 130, 34, 20, TRUE);
     if (g_app.forceBoost)
         MoveWindow(g_app.forceBoost, 306, 128, 205, 22, TRUE);
+    if (g_app.countReflexSleep)
+        MoveWindow(g_app.countReflexSleep, 515, 128, 190, 22, TRUE);
     const int attachX = clientWidth - kMargin - attachWidth;
     const int watchX = attachX - acquisitionGap - watchWidth;
     const int launchX = watchX - acquisitionGap - launchWidth;
@@ -515,6 +585,12 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FORCE_BOOST), g_app.instance, nullptr);
         SetChildFont(g_app.forceBoost, font);
 
+        g_app.countReflexSleep = CreateWindowExW(0, L"BUTTON", L"Count Reflex Sleep Calls",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_COUNT_REFLEX_SLEEP), g_app.instance, nullptr);
+        SetChildFont(g_app.countReflexSleep, font);
+        EnableWindow(g_app.countReflexSleep, g_app.wrapReflexSleep ? TRUE : FALSE);
+
         g_app.launch = CreateWindowExW(0, L"BUTTON", L"Launch + Inject",
             WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
             0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_LAUNCH), g_app.instance, nullptr);
@@ -571,6 +647,9 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         AppendStatusLine(L"ReflexProbe bootstrap: Launch, Watch or Attach Reflex observer/override.");
         AppendStatusLine(L"Frame-limit override is OFF by default. When checked, the FPS value replaces frameLimitUs on intercepted Reflex settings calls.");
         AppendStatusLine(L"Force Boost when Reflex On is independent: plain On requests become On + Boost; Off and existing On + Boost requests are unchanged.");
+        AppendStatusLine(g_app.wrapReflexSleep
+            ? L"Reflex Sleep wrapping enabled; sleep-call counting is OFF by default."
+            : L"Reflex Sleep wrapping disabled by command line; sleep-call counting is unavailable.");
         AppendStatusLine(L"Capture mode defaults to State changes. Raw debug retains at most 131072 calls in RAM. ReflexProbe never writes capture data to disk.");
         LogBinaryIdentity();
         SetTimer(window, kPollTimer, kPollIntervalMs, nullptr);
@@ -608,6 +687,10 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         case IDC_FORCE_BOOST:
             if (HIWORD(wParam) == BN_CLICKED)
                 ApplyPolicyToShared(false, true);
+            return 0;
+        case IDC_COUNT_REFLEX_SLEEP:
+            if (HIWORD(wParam) == BN_CLICKED)
+                ApplySleepCountingToShared();
             return 0;
         case IDC_LAUNCH:
             LaunchAndInject();
@@ -700,6 +783,8 @@ using namespace ReflexProbeController;
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
 {
     g_app.instance = instance;
+    if (!ParseStartupOptions(g_app.wrapReflexSleep))
+        return 2;
 
     WNDCLASSW windowClass{};
     windowClass.lpfnWndProc = WindowProc;

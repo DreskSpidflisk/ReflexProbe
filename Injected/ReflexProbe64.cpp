@@ -35,6 +35,7 @@ constexpr uint32_t kLegacyFeatureReflex = 3;
 // We keep only the stable prefix we actually inspect/modify and copy the caller's complete
 // versioned structure byte-for-byte before forwarding it.
 constexpr uint32_t kNvapiD3DSetSleepModeId = 0xac1ca9e0u;
+constexpr uint32_t kNvapiD3DSleepId = 0x852cd1d2u;
 constexpr size_t kNvapiSleepModeMaxBytes = 256;
 
 struct NvapiSleepModePrefix {
@@ -73,17 +74,20 @@ using PFunLegacyPluginSetConstants = bool(const void* constants, uint32_t frameI
 using PFunGetProcAddress = FARPROC (WINAPI)(HMODULE module, LPCSTR procName);
 using PFunNvapiQueryInterface = void* (__cdecl)(uint32_t interfaceId);
 using PFunNvapiD3DSetSleepMode = int32_t (__cdecl)(void* device, void* params);
+using PFunNvapiD3DSleep = int32_t (__cdecl)(void* device);
 
 HANDLE g_mapping = nullptr;
 ReflexProbeProtocol::SharedState* g_shared = nullptr;
 PFun_slGetFeatureFunction* g_realGetFeatureFunction = nullptr;
 PFun_slReflexSetOptions* g_realReflexSetOptions = nullptr;
+PFun_slReflexSleep* g_realReflexSleep = nullptr;
 PFunLegacySetFeatureConstants* g_realLegacySetFeatureConstants = nullptr;
 PFunLegacyPluginGetFunction* g_realLegacyPluginGetFunction = nullptr;
 PFunLegacyPluginSetConstants* g_realLegacyPluginSetConstants = nullptr;
 PFunGetProcAddress* g_realGetProcAddress = nullptr;
 PFunNvapiQueryInterface* g_realNvapiQueryInterface = nullptr;
 PFunNvapiD3DSetSleepMode* g_realNvapiD3DSetSleepMode = nullptr;
+PFunNvapiD3DSleep* g_realNvapiD3DSleep = nullptr;
 volatile LONG g_modernReflexCaptured = 0;
 volatile LONG g_nativeNvapiCaptured = 0;
 const wchar_t* g_interceptionMethod = L"unknown";
@@ -257,8 +261,8 @@ LONG ApplyConfiguredModeOverride(LONG requestedMode)
     return requestedMode == 1 ? 2 : requestedMode;
 }
 
-void PublishEvent(LONG requestedMode, LONG effectiveMode,
-                  uint32_t requestedUs, uint32_t effectiveUs, LONG result)
+void PublishSettingsEvent(LONG requestedMode, LONG effectiveMode,
+                          uint32_t requestedUs, uint32_t effectiveUs, LONG result)
 {
     if (!g_shared)
         return;
@@ -272,10 +276,42 @@ void PublishEvent(LONG requestedMode, LONG effectiveMode,
     LARGE_INTEGER qpc{};
     QueryPerformanceCounter(&qpc);
     event.qpc = qpc.QuadPart;
+    event.kind = ReflexProbeProtocol::ReflexEventSettings;
+    event.sleepSequence = 0;
     event.requestedMode = requestedMode;
     event.effectiveMode = effectiveMode;
     event.requestedUs = requestedUs;
     event.effectiveUs = effectiveUs;
+    event.result = result;
+
+    MemoryBarrier();
+    InterlockedExchange(&event.sequence, serial);
+}
+
+void PublishSleepEvent(LONG result)
+{
+    if (!g_shared ||
+        InterlockedCompareExchange(&g_shared->countReflexSleepCalls, 0, 0) == 0) {
+        return;
+    }
+
+    const LONG sleepSequence = InterlockedIncrement(&g_shared->sleepCallSerial);
+    const LONG serial = InterlockedIncrement(&g_shared->eventSerial);
+    const uint32_t index =
+        static_cast<uint32_t>(serial - 1) % ReflexProbeProtocol::kEventCapacity;
+    ReflexProbeProtocol::ReflexEvent& event = g_shared->events[index];
+
+    InterlockedExchange(&event.sequence, 0);
+
+    LARGE_INTEGER qpc{};
+    QueryPerformanceCounter(&qpc);
+    event.qpc = qpc.QuadPart;
+    event.kind = ReflexProbeProtocol::ReflexEventSleep;
+    event.sleepSequence = sleepSequence;
+    event.requestedMode = 0;
+    event.effectiveMode = 0;
+    event.requestedUs = 0;
+    event.effectiveUs = 0;
     event.result = result;
 
     MemoryBarrier();
@@ -360,10 +396,21 @@ int32_t __cdecl HookNvapiD3DSetSleepMode(void* device, void* params)
     forwarded->minimumIntervalUs = effectiveUs;
 
     const int32_t result = real(device, forwarded);
-    PublishEvent(requestedMode, effectiveMode,
+    PublishSettingsEvent(requestedMode, effectiveMode,
         requested->minimumIntervalUs, effectiveUs, static_cast<LONG>(result));
 
     InterlockedExchange(&g_nativeNvapiCaptured, 1);
+    return result;
+}
+
+int32_t __cdecl HookNvapiD3DSleep(void* device)
+{
+    PFunNvapiD3DSleep* real = g_realNvapiD3DSleep;
+    if (!real)
+        return -4; // NVAPI_API_NOT_INITIALIZED
+
+    const int32_t result = real(device);
+    PublishSleepEvent(static_cast<LONG>(result));
     return result;
 }
 
@@ -374,16 +421,37 @@ void* __cdecl HookNvapiQueryInterface(uint32_t interfaceId)
         return nullptr;
 
     void* function = real(interfaceId);
-    if (interfaceId != kNvapiD3DSetSleepModeId || !function)
+    if (!function)
         return function;
 
-    g_realNvapiD3DSetSleepMode =
-        reinterpret_cast<PFunNvapiD3DSetSleepMode*>(function);
-    SetInterceptionMethod(L"native NVAPI D3D SetSleepMode via application nvapi_QueryInterface IAT");
-    SetBackend(ReflexProbeProtocol::ReflexBackendNativeNvapiD3D);
-    PublishReflexFunction(function);
-    InterlockedExchange(&g_nativeNvapiCaptured, 1);
-    return reinterpret_cast<void*>(&HookNvapiD3DSetSleepMode);
+    if (interfaceId == kNvapiD3DSetSleepModeId) {
+        g_realNvapiD3DSetSleepMode =
+            reinterpret_cast<PFunNvapiD3DSetSleepMode*>(function);
+        SetInterceptionMethod(L"native NVAPI D3D SetSleepMode via application nvapi_QueryInterface IAT");
+        SetBackend(ReflexProbeProtocol::ReflexBackendNativeNvapiD3D);
+        PublishReflexFunction(function);
+        InterlockedExchange(&g_nativeNvapiCaptured, 1);
+        return reinterpret_cast<void*>(&HookNvapiD3DSetSleepMode);
+    }
+
+    if (interfaceId == kNvapiD3DSleepId &&
+        g_shared && g_shared->wrapReflexSleep) {
+        g_realNvapiD3DSleep = reinterpret_cast<PFunNvapiD3DSleep*>(function);
+        return reinterpret_cast<void*>(&HookNvapiD3DSleep);
+    }
+
+    return function;
+}
+
+sl::Result HookReflexSleep(const sl::FrameToken& frame)
+{
+    PFun_slReflexSleep* real = g_realReflexSleep;
+    if (!real)
+        return sl::Result::eErrorNotInitialized;
+
+    const sl::Result result = real(frame);
+    PublishSleepEvent(static_cast<LONG>(result));
+    return result;
 }
 
 sl::Result HookReflexSetOptions(const sl::ReflexOptions& options)
@@ -400,7 +468,7 @@ sl::Result HookReflexSetOptions(const sl::ReflexOptions& options)
     forwarded.frameLimitUs = effectiveUs;
 
     const sl::Result result = real(forwarded);
-    PublishEvent(requestedMode, effectiveMode,
+    PublishSettingsEvent(requestedMode, effectiveMode,
         options.frameLimitUs, effectiveUs, static_cast<LONG>(result));
     return result;
 }
@@ -424,7 +492,7 @@ bool HookLegacySetFeatureConstants(uint32_t feature, const void* constants,
     forwarded.frameLimitUs = effectiveUs;
 
     const bool result = real(feature, &forwarded, frameIndex, id);
-    PublishEvent(requestedMode, effectiveMode, requested->frameLimitUs,
+    PublishSettingsEvent(requestedMode, effectiveMode, requested->frameLimitUs,
         effectiveUs, result ? 0 : 1);
     return result;
 }
@@ -447,7 +515,7 @@ bool HookLegacyPluginSetConstants(const void* constants, uint32_t frameIndex, ui
     forwarded.frameLimitUs = effectiveUs;
 
     const bool result = real(&forwarded, frameIndex, id);
-    PublishEvent(requestedMode, effectiveMode, requested->frameLimitUs,
+    PublishSettingsEvent(requestedMode, effectiveMode, requested->frameLimitUs,
         effectiveUs, result ? 0 : 1);
     return result;
 }
@@ -520,6 +588,10 @@ sl::Result HookGetFeatureFunction(sl::Feature feature, const char* functionName,
         PublishReflexFunction(function);
         function = reinterpret_cast<void*>(&HookReflexSetOptions);
         InterlockedExchange(&g_modernReflexCaptured, 1);
+    } else if (strcmp(functionName, "slReflexSleep") == 0 &&
+               g_shared && g_shared->wrapReflexSleep) {
+        g_realReflexSleep = reinterpret_cast<PFun_slReflexSleep*>(function);
+        function = reinterpret_cast<void*>(&HookReflexSleep);
     }
 
     return result;
@@ -550,6 +622,13 @@ FARPROC WINAPI HookApplicationGetProcAddress(HMODULE module, LPCSTR procName)
         SetInterceptionMethod(
             L"native NVAPI D3D SetSleepMode via application GetProcAddress IAT");
         return reinterpret_cast<FARPROC>(&HookNvapiQueryInterface);
+    }
+
+    if (strcmp(procName, "NvAPI_D3D_Sleep") == 0 &&
+        _wcsicmp(moduleName, L"nvapi64.dll") == 0 &&
+        g_shared && g_shared->wrapReflexSleep) {
+        g_realNvapiD3DSleep = reinterpret_cast<PFunNvapiD3DSleep*>(result);
+        return reinterpret_cast<FARPROC>(&HookNvapiD3DSleep);
     }
 
     if (strcmp(procName, "slGetFeatureFunction") != 0 ||
@@ -621,6 +700,9 @@ bool PatchApplicationNvapiResolver(bool& armedAny)
     void* expectedSetSleepMode = nvapi
         ? reinterpret_cast<void*>(GetProcAddress(nvapi, "NvAPI_D3D_SetSleepMode"))
         : nullptr;
+    void* expectedSleep = nvapi
+        ? reinterpret_cast<void*>(GetProcAddress(nvapi, "NvAPI_D3D_Sleep"))
+        : nullptr;
 
     auto* descriptor = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(
         base + imports.VirtualAddress);
@@ -683,6 +765,22 @@ bool PatchApplicationNvapiResolver(bool& armedAny)
                     }
                     SetBackend(ReflexProbeProtocol::ReflexBackendNativeNvapiD3D);
                     PublishReflexFunction(current);
+                }
+            }
+
+            const bool sleepMatches =
+                (importedName && strcmp(importedName, "NvAPI_D3D_Sleep") == 0) ||
+                (expectedSleep && current == expectedSleep);
+            if (sleepMatches && g_shared && g_shared->wrapReflexSleep) {
+                armedAny = true;
+                if (current != reinterpret_cast<void*>(&HookNvapiD3DSleep)) {
+                    g_realNvapiD3DSleep =
+                        reinterpret_cast<PFunNvapiD3DSleep*>(current);
+                    if (!PatchImportSlot(&thunk[index],
+                            reinterpret_cast<void*>(&HookNvapiD3DSleep),
+                            L"NvAPI_D3D_Sleep")) {
+                        return false;
+                    }
                 }
             }
         }

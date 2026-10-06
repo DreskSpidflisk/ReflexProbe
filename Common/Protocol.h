@@ -10,7 +10,7 @@
 namespace ReflexProbeProtocol {
 
 constexpr uint32_t kMagic = 0x31505246; // "FRP1" little-endian.
-constexpr uint32_t kVersion = 4;
+constexpr uint32_t kVersion = 5;
 constexpr uint32_t kEventCapacity = 4096;
 constexpr uint32_t kPathChars = 1024;
 constexpr uint32_t kVersionChars = 64;
@@ -18,7 +18,7 @@ constexpr uint32_t kErrorChars = 512;
 
 // Human-readable source tag for rapid local rebuild/testing. The controller also hashes the
 // actual EXE and DLL on disk, so a stale or mismatched binary is obvious in copied logs.
-constexpr wchar_t kBuildTag[] = L"2026-10-06.15-native-nvapi";
+constexpr wchar_t kBuildTag[] = L"2026-10-06.16-reflex-sleep-count";
 
 constexpr wchar_t kMappingPrefix[] = L"Local\\ReflexProbe.";
 
@@ -38,9 +38,16 @@ enum ReflexBackend : LONG {
     ReflexBackendNativeNvapiD3D = 4
 };
 
+enum ReflexEventKind : LONG {
+    ReflexEventSettings = 0,
+    ReflexEventSleep = 1
+};
+
 struct ReflexEvent {
     volatile LONG sequence;
     LONGLONG qpc;
+    LONG kind;
+    LONG sleepSequence;
     LONG requestedMode;
     LONG effectiveMode;
     uint32_t requestedUs;
@@ -58,10 +65,13 @@ struct SharedState {
     volatile LONG overrideEnabled;
     volatile LONG overrideUs;
     volatile LONG forceBoostWhenOn;
+    LONG wrapReflexSleep;
+    volatile LONG countReflexSleepCalls;
 
     volatile LONG hookState;
     volatile LONG backend;
     volatile LONG eventSerial;
+    volatile LONG sleepCallSerial;
 
     wchar_t targetPath[kPathChars];
     wchar_t reflexPath[kPathChars];
