@@ -173,7 +173,7 @@ Confirmed modern targets include Cyberpunk 2077, The Witcher 3 Remastered, GSync
 
 ### Native NVAPI D3D Reflex
 
-Pre-Streamline D3D integrations configure Reflex through `NvAPI_D3D_SetSleepMode`. ReflexProbe patches only the main executable's `nvapi_QueryInterface` IAT (or a direct `NvAPI_D3D_SetSleepMode` import if one exists), recognizes NVIDIA's public SetSleepMode interface ID `0xac1ca9e0`, and returns a narrow wrapper for that one function. It does not modify code bytes inside `nvapi64.dll`.
+Pre-Streamline D3D integrations configure Reflex through `NvAPI_D3D_SetSleepMode`. ReflexProbe patches only the main executable's NVAPI resolution seam: a normal `nvapi_QueryInterface` IAT import, a dynamically obtained `nvapi_QueryInterface` through the already-narrow application `GetProcAddress` hook, or a direct `NvAPI_D3D_SetSleepMode` import if one exists. It recognizes NVIDIA's public SetSleepMode interface ID `0xac1ca9e0` and returns a narrow wrapper for that one function. It does not modify code bytes inside `nvapi64.dll`.
 
 The NVAPI request is normalized into the same Off / On / On + Boost plus requested/effective interval telemetry used by the Streamline backends. Frame-limit override changes `minimumIntervalUs`; Force Boost changes only a native request with low-latency mode enabled and Boost disabled. The caller's complete versioned sleep-mode structure is copied and preserved around those fields.
 

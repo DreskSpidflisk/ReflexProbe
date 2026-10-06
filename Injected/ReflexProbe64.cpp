@@ -537,12 +537,23 @@ FARPROC WINAPI HookApplicationGetProcAddress(HMODULE module, LPCSTR procName)
 
     if (reinterpret_cast<uintptr_t>(procName) <= 0xFFFFu)
         return result;
-    if (strcmp(procName, "slGetFeatureFunction") != 0)
-        return result;
 
     wchar_t modulePath[ReflexProbeProtocol::kPathChars]{};
-    if (!GetModulePath(module, modulePath, _countof(modulePath)) ||
-        _wcsicmp(PathFileName(modulePath), L"sl.interposer.dll") != 0) {
+    if (!GetModulePath(module, modulePath, _countof(modulePath)))
+        return result;
+
+    const wchar_t* moduleName = PathFileName(modulePath);
+
+    if (strcmp(procName, "nvapi_QueryInterface") == 0 &&
+        _wcsicmp(moduleName, L"nvapi64.dll") == 0) {
+        g_realNvapiQueryInterface = reinterpret_cast<PFunNvapiQueryInterface*>(result);
+        SetInterceptionMethod(
+            L"native NVAPI D3D SetSleepMode via application GetProcAddress IAT");
+        return reinterpret_cast<FARPROC>(&HookNvapiQueryInterface);
+    }
+
+    if (strcmp(procName, "slGetFeatureFunction") != 0 ||
+        _wcsicmp(moduleName, L"sl.interposer.dll") != 0) {
         return result;
     }
 
@@ -738,13 +749,11 @@ bool PatchApplicationGetProcAddressResolver(bool& sawTarget)
                 return true;
 
             g_realGetProcAddress = reinterpret_cast<PFunGetProcAddress*>(current);
-            SetInterceptionMethod(L"modern slGetFeatureFunction via application GetProcAddress IAT");
             if (!PatchImportSlot(&thunk[index], reinterpret_cast<void*>(&HookApplicationGetProcAddress),
-                    L"GetProcAddress (modern Streamline resolver)")) {
+                    L"GetProcAddress (Reflex resolver)")) {
                 return false;
             }
 
-            SetBackend(ReflexProbeProtocol::ReflexBackendModernSetOptions);
             return true;
         }
     }
@@ -998,18 +1007,16 @@ DWORD WINAPI WorkerThread(void*)
         bool armedNvapiResolver = false;
         if (!PatchApplicationNvapiResolver(armedNvapiResolver))
             return 1;
-        if (armedNvapiResolver) {
-            // The IAT hook remains armed while the worker continues looking for other Reflex paths.
-        }
+
+        bool armedDynamicResolver = false;
+        if (!PatchApplicationGetProcAddressResolver(armedDynamicResolver))
+            return 1;
+
         if (InterlockedCompareExchange(&g_nativeNvapiCaptured, 0, 0) != 0) {
             OutputDebugStringW(
                 L"ReflexProbe64: captured native NVAPI D3D NvAPI_D3D_SetSleepMode; worker exiting.\n");
             return 0;
         }
-
-        bool armedDynamicResolver = false;
-        if (!PatchApplicationGetProcAddressResolver(armedDynamicResolver))
-            return 1;
 
         // Arming either resolver is only a pending discovery path. Do not stop scanning
         // merely because the main executable's IAT has been patched.
