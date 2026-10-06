@@ -59,6 +59,7 @@ PFunLegacySetFeatureConstants* g_realLegacySetFeatureConstants = nullptr;
 PFunLegacyPluginGetFunction* g_realLegacyPluginGetFunction = nullptr;
 PFunLegacyPluginSetConstants* g_realLegacyPluginSetConstants = nullptr;
 PFunGetProcAddress* g_realGetProcAddress = nullptr;
+volatile LONG g_modernReflexCaptured = 0;
 const wchar_t* g_interceptionMethod = L"unknown";
 
 void SetInterceptionMethod(const wchar_t* method)
@@ -406,6 +407,7 @@ sl::Result HookGetFeatureFunction(sl::Feature feature, const char* functionName,
         SetBackend(ReflexProbeProtocol::ReflexBackendModernSetOptions);
         PublishReflexFunction(function);
         function = reinterpret_cast<void*>(&HookReflexSetOptions);
+        InterlockedExchange(&g_modernReflexCaptured, 1);
     }
 
     return result;
@@ -783,9 +785,15 @@ DWORD WINAPI WorkerThread(void*)
         bool armedDynamicResolver = false;
         if (!PatchApplicationGetProcAddressResolver(armedDynamicResolver))
             return 1;
-        if (armedDynamicResolver) {
+
+        // Arming the application's GetProcAddress IAT is only a pending modern
+        // discovery path. Do not stop scanning loaded modules here: Streamline 1.x
+        // titles such as A Plague Tale: Requiem can load sl.interposer.dll later,
+        // and their Reflex path lives behind the interposer's own
+        // slGetPluginFunction("slSetConstants") gateway.
+        if (InterlockedCompareExchange(&g_modernReflexCaptured, 0, 0) != 0) {
             OutputDebugStringW(
-                L"ReflexProbe64: armed application GetProcAddress for dynamic modern Streamline resolution; worker exiting.\n");
+                L"ReflexProbe64: dynamic modern Reflex resolver captured slReflexSetOptions; worker exiting.\n");
             return 0;
         }
 

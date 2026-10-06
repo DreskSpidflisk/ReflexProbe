@@ -80,7 +80,9 @@ ReflexProbe now has two modern catches:
 
 Dawnwalker confirmed the dynamic path. Its local interposer reported `2.7.30.0`, while the loaded Reflex implementation came from NVIDIA's NGX model cache and reported `2.14.0.0`.
 
-This matters for the planned launcher/watch mode because a title that submits Reflex options only once or twice at startup must be intercepted before those calls occur.
+This matters for launcher/watch mode because a title that submits Reflex options only once or twice at startup must be intercepted before those calls occur.
+
+Arming the application's dynamic-modern `GetProcAddress` interception is **not** treated as a completed Reflex discovery. The injected worker continues scanning loaded modules until a concrete Reflex path is captured. This preserves the legacy SL1 case where `sl.interposer.dll` appears later and must have its own `GetProcAddress` import patched before `sl.reflex.dll!slGetPluginFunction("slSetConstants")` is resolved. A regression in this worker lifetime briefly broke A Plague Tale: Requiem while modern dynamic titles still worked; build `2026-10-05.11-sl1-worker` restores the patient SL1 scan while retaining Dawnwalker's dynamic-modern path.
 
 ## Capture modes
 
