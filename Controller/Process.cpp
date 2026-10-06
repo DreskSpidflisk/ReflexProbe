@@ -13,6 +13,8 @@
 namespace ReflexProbeController {
 
 constexpr wchar_t kControllerBuildStamp[] = RP_WIDEN(__DATE__) L" " RP_WIDEN(__TIME__);
+constexpr DWORD kLaunchVerificationTimeoutMs = 1000;
+constexpr DWORD kLaunchVerificationPollMs = 5;
 
 void BuildMappingName(DWORD processId, wchar_t* out, size_t outCount)
 {
@@ -236,7 +238,9 @@ bool WaitForRemoteFunctionOwner(DWORD processId, const wchar_t* moduleName, uint
     return false;
 }
 
-bool InjectDll(HANDLE process, DWORD processId, const wchar_t* dllPath, wchar_t* error, size_t errorCount)
+bool InjectDll(HANDLE process, DWORD processId, const wchar_t* dllPath,
+               bool allowPostLoadVerificationRecovery,
+               wchar_t* error, size_t errorCount)
 {
     HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
     FARPROC loadLibrary = kernel32 ? GetProcAddress(kernel32, "LoadLibraryW") : nullptr;
@@ -285,6 +289,18 @@ bool InjectDll(HANDLE process, DWORD processId, const wchar_t* dllPath, wchar_t*
     }
 
     const DWORD wait = WaitForSingleObject(thread, 10000);
+
+    DWORD remoteExitCode = 0;
+    bool haveRemoteExitCode = false;
+    DWORD remoteExitCodeError = ERROR_SUCCESS;
+    if (wait == WAIT_OBJECT_0) {
+        if (GetExitCodeThread(thread, &remoteExitCode)) {
+            haveRemoteExitCode = true;
+        } else {
+            remoteExitCodeError = GetLastError();
+        }
+    }
+
     CloseHandle(thread);
 
     if (wait != WAIT_OBJECT_0) {
@@ -294,12 +310,59 @@ bool InjectDll(HANDLE process, DWORD processId, const wchar_t* dllPath, wchar_t*
 
     VirtualFreeEx(process, remotePath, 0, MEM_RELEASE);
 
-    if (!FindRemoteModuleBase(processId, L"ReflexProbe64.dll")) {
-        swprintf_s(error, errorCount, L"ReflexProbe64.dll was not present after LoadLibraryW returned.");
+    // Preserve the original successful path exactly: one immediate Toolhelp module check.
+    if (FindRemoteModuleBase(processId, L"ReflexProbe64.dll"))
+        return true;
+
+    // The false negative has only been observed when Launch + Inject loads into a process
+    // that ReflexProbe itself just created. Watch/Attach deliberately keep the old one-shot
+    // behavior until there is evidence that those acquisition paths need this fallback.
+    if (!allowPostLoadVerificationRecovery) {
+        swprintf_s(error, errorCount,
+            L"ReflexProbe64.dll was not present after LoadLibraryW returned.");
         return false;
     }
 
-    return true;
+    bool recoveredByHandshake = false;
+    bool recoveredByModule = false;
+    const ULONGLONG verificationEnd =
+        GetTickCount64() + static_cast<ULONGLONG>(kLaunchVerificationTimeoutMs);
+
+    do {
+        if (g_app.shared && g_app.shared->injectedBuild[0]) {
+            recoveredByHandshake = true;
+            break;
+        }
+
+        if (FindRemoteModuleBase(processId, L"ReflexProbe64.dll")) {
+            recoveredByModule = true;
+            break;
+        }
+
+        Sleep(kLaunchVerificationPollMs);
+    } while (GetTickCount64() < verificationEnd);
+
+    if (recoveredByHandshake || recoveredByModule) {
+        AppendStatusLine(recoveredByHandshake
+            ? L"Launch injection verification recovered after the initial module snapshot miss: injected DLL shared-memory handshake observed."
+            : L"Launch injection verification recovered after the initial module snapshot miss: ReflexProbe64.dll became visible on retry.");
+        return true;
+    }
+
+    if (haveRemoteExitCode) {
+        swprintf_s(error, errorCount,
+            L"ReflexProbe64.dll could not be verified within %lu ms after LoadLibraryW returned. "
+            L"Remote thread exit code: 0x%08lX. No module snapshot or injected build handshake was observed.",
+            kLaunchVerificationTimeoutMs, remoteExitCode);
+    } else {
+        swprintf_s(error, errorCount,
+            L"ReflexProbe64.dll could not be verified within %lu ms after LoadLibraryW returned. "
+            L"Remote thread exit code was unavailable (GetExitCodeThread error %lu). "
+            L"No module snapshot or injected build handshake was observed.",
+            kLaunchVerificationTimeoutMs, remoteExitCodeError);
+    }
+
+    return false;
 }
 
 bool CreateSharedState(DWORD processId, const wchar_t* targetPath,
@@ -566,7 +629,7 @@ bool InjectMatchedProcess(const ProcessMatch& match,
     LARGE_INTEGER injectStartQpc{};
     QueryPerformanceCounter(&injectStartQpc);
 
-    if (!InjectDll(target, match.processId, dllPath, error, errorCount)) {
+    if (!InjectDll(target, match.processId, dllPath, false, error, errorCount)) {
         CleanupTarget();
         return false;
     }

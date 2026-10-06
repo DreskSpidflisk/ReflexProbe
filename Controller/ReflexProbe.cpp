@@ -307,7 +307,7 @@ bool LaunchAndInject()
         resumed = true;
     }
 
-    if (!InjectDll(process.hProcess, process.dwProcessId, dllPath, error, _countof(error))) {
+    if (!InjectDll(process.hProcess, process.dwProcessId, dllPath, true, error, _countof(error))) {
         TerminateProcess(process.hProcess, 1);
         CloseHandle(process.hThread);
         MessageBoxW(g_app.window, error, L"ReflexProbe injection failed", MB_ICONERROR);

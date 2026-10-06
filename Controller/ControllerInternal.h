@@ -152,7 +152,9 @@ bool GetSiblingDllPath(wchar_t* out, size_t outCount);
 void LogBinaryIdentity();
 bool GetLocalFunctionOwner(void* function, HMODULE& owner, wchar_t* moduleName, size_t moduleNameCount);
 bool WaitForRemoteFunctionOwner(DWORD processId, const wchar_t* moduleName, uintptr_t& baseOut, DWORD timeoutMs);
-bool InjectDll(HANDLE process, DWORD processId, const wchar_t* dllPath, wchar_t* error, size_t errorCount);
+bool InjectDll(HANDLE process, DWORD processId, const wchar_t* dllPath,
+               bool allowPostLoadVerificationRecovery,
+               wchar_t* error, size_t errorCount);
 bool CreateSharedState(DWORD processId, const wchar_t* targetPath,
                        bool overrideEnabled, uint32_t overrideUs, bool forceBoostWhenOn,
                        bool countReflexSleepCalls, wchar_t* error, size_t errorCount);
