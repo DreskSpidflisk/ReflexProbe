@@ -2,7 +2,7 @@
 
 ReflexProbe is a deliberately small Win32 tool for observing and overriding the frame-limit value applications send to NVIDIA Reflex.
 
-The current build focuses on **Streamline Reflex** and x64 games acquired by direct launch, launcher-compatible process watch, or runtime attach. It can independently override Reflex's frame-limit interval and upgrade plain Reflex On requests to On + Boost. It does not render an overlay, modify shaders, replace Streamline DLLs, or write capture data to disk.
+The current build focuses on **Reflex** in x64 games acquired by direct launch, launcher-compatible process watch, or runtime attach. It supports modern Streamline, legacy Streamline 1.x, and the native NVAPI D3D sleep-mode path used by pre-Streamline integrations. It can independently override Reflex's frame-limit interval and upgrade plain Reflex On requests to On + Boost. It does not render an overlay, modify shaders, replace Streamline DLLs, or write capture data to disk.
 
 ## Why this exists
 
@@ -171,6 +171,14 @@ The injected DLL intercepts `slGetFeatureFunction`, either from a normal applica
 
 Confirmed modern targets include Cyberpunk 2077, The Witcher 3 Remastered, GSyncProbe, and Blood of the Dawnwalker.
 
+### Native NVAPI D3D Reflex
+
+Pre-Streamline D3D integrations configure Reflex through `NvAPI_D3D_SetSleepMode`. ReflexProbe patches only the main executable's `nvapi_QueryInterface` IAT (or a direct `NvAPI_D3D_SetSleepMode` import if one exists), recognizes NVIDIA's public SetSleepMode interface ID `0xac1ca9e0`, and returns a narrow wrapper for that one function. It does not modify code bytes inside `nvapi64.dll`.
+
+The NVAPI request is normalized into the same Off / On / On + Boost plus requested/effective interval telemetry used by the Streamline backends. Frame-limit override changes `minimumIntervalUs`; Force Boost changes only a native request with low-latency mode enabled and Boost disabled. The caller's complete versioned sleep-mode structure is copied and preserved around those fields.
+
+**God of War (2018)** is the initial native-NVAPI/D3D11 test target. This backend is implemented but not yet runtime-confirmed.
+
 ### Legacy Streamline (1.x)
 
 Streamline 1.x has another layer between the game's public API and Reflex itself. NVIDIA's `sl.reflex.dll` exports `slGetPluginFunction`, and the Streamline loader asks that gateway for the plugin-private `slSetConstants` function that consumes `ReflexConstants`.
@@ -223,13 +231,13 @@ Entering `0` while override is enabled forces literal `frameLimitUs=0`. Frame-li
 - **Blood of the Dawnwalker (GOG):** UE5.5.3 local build, D3D12, modern dynamically resolved Streamline. Frame Generation enabled caused an Off -> On pair with zero intervals; Frame Generation disabled caused one Off call. With G-SYNC + forced VSync, the FG/Reflex-On case exhibited the familiar ~225 FPS at 240 Hz.
 - **No Man's Sky:** Vulkan + Streamline, DLSS Frame Generation and an independent Reflex control. Planned Vulkan comparison target.
 - **Indiana Jones and the Great Circle:** Vulkan + Frame Generation, no exposed Reflex control. Useful future target for discovering whether its menu limiter drives Reflex `frameLimitUs` or a separate engine limiter.
-- **God of War (2018):** unusual D3D11 + Reflex target; native NVAPI backend remains future work.
+- **God of War (2018):** unusual D3D11 + Reflex target and the first planned runtime validation target for the native NVAPI D3D backend.
 - **Pragmata and other launcher titles:** practical Watch + Inject targets. Blood of the Dawnwalker under GOG Galaxy is an immediate launcher-owned test case because its Reflex state is only submitted at startup/policy changes.
 
 ## Deliberate limitations
 
 - x64 only
-- Streamline interception only
+- Streamline plus native NVAPI D3D SetSleepMode interception
 - no disk capture or export path
 - Raw debug retains only the latest 131,072 raw calls
 - the visible log is a standard Win32 EDIT control with a 16 MiB text limit
@@ -247,7 +255,7 @@ Do not use ReflexProbe with anti-cheat/protected multiplayer titles. The intende
 2. Build a tiny synthetic one-shot Reflex target/launcher to measure how quickly the 10 ms watcher acquires and injects before a startup-only `slReflexSetOptions` call.
 3. If ordinary low-overhead process polling actually loses that race, evaluate a lower-latency Windows process-start notification path rather than guessing in advance.
 4. Expand Vulkan coverage and later add native `VK_NV_low_latency2` interception when required.
-5. Add native NVAPI D3D Reflex interception for titles such as God of War.
+5. Runtime-test the native NVAPI D3D backend against God of War and refine resolver coverage only if its shipped NVAPI linkage requires it.
 6. After launcher acquisition is proven, extend the same modern Streamline resolver interception to observe DLSS Frame Generation policy such as `slDLSSGSetOptions`.
 
 The architecture remains intentionally boring: a Win32 controller outside the game, one injected DLL inside it, Launch/Watch/Attach as interchangeable acquisition paths, fixed RAM transport, bounded capture policy, and a tiny requested/effective Reflex policy surface under the microscope.

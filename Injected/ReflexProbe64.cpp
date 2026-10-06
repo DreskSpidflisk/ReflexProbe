@@ -30,6 +30,27 @@ constexpr wchar_t kInjectedBuildStamp[] = RP_WIDEN(__DATE__) L" " RP_WIDEN(__TIM
 // payload through its private slSetConstants function.
 constexpr uint32_t kLegacyFeatureReflex = 3;
 
+// Native D3D Reflex predates Streamline. NVAPI applications resolve entry points through
+// nvapi_QueryInterface. NVIDIA's public interface table assigns SetSleepMode ID 0xac1ca9e0.
+// We keep only the stable prefix we actually inspect/modify and copy the caller's complete
+// versioned structure byte-for-byte before forwarding it.
+constexpr uint32_t kNvapiD3DSetSleepModeId = 0xac1ca9e0u;
+constexpr size_t kNvapiSleepModeMaxBytes = 256;
+
+struct NvapiSleepModePrefix {
+    uint32_t version;
+    uint8_t lowLatencyMode;
+    uint8_t lowLatencyBoost;
+    uint8_t alignment[2];
+    uint32_t minimumIntervalUs;
+};
+
+static_assert(offsetof(NvapiSleepModePrefix, version) == 0);
+static_assert(offsetof(NvapiSleepModePrefix, lowLatencyMode) == 4);
+static_assert(offsetof(NvapiSleepModePrefix, lowLatencyBoost) == 5);
+static_assert(offsetof(NvapiSleepModePrefix, minimumIntervalUs) == 8);
+static_assert(sizeof(NvapiSleepModePrefix) == 12);
+
 struct LegacyReflexConstants {
     int32_t mode;
     uint32_t frameLimitUs;
@@ -50,6 +71,8 @@ using PFunLegacySetFeatureConstants = bool(uint32_t feature, const void* constan
 using PFunLegacyPluginGetFunction = void* (const char* functionName);
 using PFunLegacyPluginSetConstants = bool(const void* constants, uint32_t frameIndex, uint32_t id);
 using PFunGetProcAddress = FARPROC (WINAPI)(HMODULE module, LPCSTR procName);
+using PFunNvapiQueryInterface = void* (__cdecl)(uint32_t interfaceId);
+using PFunNvapiD3DSetSleepMode = int32_t (__cdecl)(void* device, void* params);
 
 HANDLE g_mapping = nullptr;
 ReflexProbeProtocol::SharedState* g_shared = nullptr;
@@ -59,7 +82,10 @@ PFunLegacySetFeatureConstants* g_realLegacySetFeatureConstants = nullptr;
 PFunLegacyPluginGetFunction* g_realLegacyPluginGetFunction = nullptr;
 PFunLegacyPluginSetConstants* g_realLegacyPluginSetConstants = nullptr;
 PFunGetProcAddress* g_realGetProcAddress = nullptr;
+PFunNvapiQueryInterface* g_realNvapiQueryInterface = nullptr;
+PFunNvapiD3DSetSleepMode* g_realNvapiD3DSetSleepMode = nullptr;
 volatile LONG g_modernReflexCaptured = 0;
+volatile LONG g_nativeNvapiCaptured = 0;
 const wchar_t* g_interceptionMethod = L"unknown";
 
 void SetInterceptionMethod(const wchar_t* method)
@@ -263,7 +289,7 @@ void PublishReflexModule(HMODULE module, ReflexProbeProtocol::HookState state)
 
     wchar_t modulePath[ReflexProbeProtocol::kPathChars]{};
     if (!GetModulePath(module, modulePath, _countof(modulePath)))
-        wcscpy_s(modulePath, L"Streamline module");
+        wcscpy_s(modulePath, L"Reflex module");
 
     GetFileVersionString(modulePath, g_shared->reflexVersion,
         _countof(g_shared->reflexVersion));
@@ -286,12 +312,78 @@ void PublishReflexFunction(void* function)
             ReflexProbeProtocol::HookStateHooked);
     } else {
         _snwprintf_s(g_shared->reflexPath, _countof(g_shared->reflexPath), _TRUNCATE,
-            L"Streamline module\r\nInterception method: %s",
+            L"Reflex module\r\nInterception method: %s",
             g_interceptionMethod ? g_interceptionMethod : L"unknown");
         g_shared->reflexVersion[0] = 0;
         MemoryBarrier();
         InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateHooked);
     }
+}
+
+LONG NvapiModeFromSleepParams(const NvapiSleepModePrefix& params)
+{
+    if (!params.lowLatencyMode)
+        return 0;
+    return params.lowLatencyBoost ? 2 : 1;
+}
+
+int32_t __cdecl HookNvapiD3DSetSleepMode(void* device, void* params)
+{
+    PFunNvapiD3DSetSleepMode* real = g_realNvapiD3DSetSleepMode;
+    if (!real)
+        return -4; // NVAPI_API_NOT_INITIALIZED
+
+    if (!params)
+        return real(device, params);
+
+    const auto* requested = static_cast<const NvapiSleepModePrefix*>(params);
+    const uint32_t structSize = requested->version & 0xffffu;
+    if (structSize < sizeof(NvapiSleepModePrefix) || structSize > kNvapiSleepModeMaxBytes) {
+        OutputDebugStringW(
+            L"ReflexProbe64: NVAPI SetSleepMode structure size is outside the supported copy range; forwarding unchanged.\n");
+        return real(device, params);
+    }
+
+    alignas(8) unsigned char forwardedBytes[kNvapiSleepModeMaxBytes]{};
+    memcpy(forwardedBytes, params, structSize);
+    auto* forwarded = reinterpret_cast<NvapiSleepModePrefix*>(forwardedBytes);
+
+    const LONG requestedMode = NvapiModeFromSleepParams(*requested);
+    if (g_shared &&
+        InterlockedCompareExchange(&g_shared->forceBoostWhenOn, 0, 0) != 0 &&
+        forwarded->lowLatencyMode && !forwarded->lowLatencyBoost) {
+        forwarded->lowLatencyBoost = 1;
+    }
+
+    const LONG effectiveMode = NvapiModeFromSleepParams(*forwarded);
+    const uint32_t effectiveUs = ApplyConfiguredOverride(requested->minimumIntervalUs);
+    forwarded->minimumIntervalUs = effectiveUs;
+
+    const int32_t result = real(device, forwarded);
+    PublishEvent(requestedMode, effectiveMode,
+        requested->minimumIntervalUs, effectiveUs, static_cast<LONG>(result));
+
+    InterlockedExchange(&g_nativeNvapiCaptured, 1);
+    return result;
+}
+
+void* __cdecl HookNvapiQueryInterface(uint32_t interfaceId)
+{
+    PFunNvapiQueryInterface* real = g_realNvapiQueryInterface;
+    if (!real)
+        return nullptr;
+
+    void* function = real(interfaceId);
+    if (interfaceId != kNvapiD3DSetSleepModeId || !function)
+        return function;
+
+    g_realNvapiD3DSetSleepMode =
+        reinterpret_cast<PFunNvapiD3DSetSleepMode*>(function);
+    SetInterceptionMethod(L"native NVAPI D3D SetSleepMode via application nvapi_QueryInterface IAT");
+    SetBackend(ReflexProbeProtocol::ReflexBackendNativeNvapiD3D);
+    PublishReflexFunction(function);
+    InterlockedExchange(&g_nativeNvapiCaptured, 1);
+    return reinterpret_cast<void*>(&HookNvapiD3DSetSleepMode);
 }
 
 sl::Result HookReflexSetOptions(const sl::ReflexOptions& options)
@@ -482,6 +574,107 @@ bool PatchImportSlot(IMAGE_THUNK_DATA64* thunk, void* replacement, const wchar_t
             functionName, GetLastError());
         SetSharedError(error);
         return false;
+    }
+
+    return true;
+}
+
+bool PatchApplicationNvapiResolver(bool& armedAny)
+{
+    armedAny = false;
+
+    HMODULE module = GetModuleHandleW(nullptr);
+    if (!module)
+        return true;
+
+    auto* base = reinterpret_cast<unsigned char*>(module);
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE)
+        return true;
+
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE ||
+        nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+        return true;
+    }
+
+    const IMAGE_DATA_DIRECTORY& imports =
+        nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!imports.VirtualAddress || !imports.Size)
+        return true;
+
+    HMODULE nvapi = GetModuleHandleW(L"nvapi64.dll");
+    void* expectedQuery = nvapi
+        ? reinterpret_cast<void*>(GetProcAddress(nvapi, "nvapi_QueryInterface"))
+        : nullptr;
+    void* expectedSetSleepMode = nvapi
+        ? reinterpret_cast<void*>(GetProcAddress(nvapi, "NvAPI_D3D_SetSleepMode"))
+        : nullptr;
+
+    auto* descriptor = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(
+        base + imports.VirtualAddress);
+    for (; descriptor->Name; ++descriptor) {
+        if (!descriptor->FirstThunk)
+            continue;
+
+        const char* dllName = reinterpret_cast<const char*>(base + descriptor->Name);
+        if (_stricmp(dllName, "nvapi64.dll") != 0)
+            continue;
+
+        auto* thunk = reinterpret_cast<IMAGE_THUNK_DATA64*>(base + descriptor->FirstThunk);
+        auto* names = descriptor->OriginalFirstThunk
+            ? reinterpret_cast<IMAGE_THUNK_DATA64*>(base + descriptor->OriginalFirstThunk)
+            : nullptr;
+
+        for (size_t index = 0; thunk[index].u1.Function; ++index) {
+            void* current =
+                reinterpret_cast<void*>(static_cast<uintptr_t>(thunk[index].u1.Function));
+            const char* importedName = nullptr;
+
+            if (names && names[index].u1.AddressOfData &&
+                !IMAGE_SNAP_BY_ORDINAL64(names[index].u1.Ordinal)) {
+                auto* imported = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(
+                    base + names[index].u1.AddressOfData);
+                importedName = reinterpret_cast<const char*>(imported->Name);
+            }
+
+            const bool queryMatches =
+                (importedName && strcmp(importedName, "nvapi_QueryInterface") == 0) ||
+                (expectedQuery && current == expectedQuery);
+            if (queryMatches) {
+                armedAny = true;
+                if (current != reinterpret_cast<void*>(&HookNvapiQueryInterface)) {
+                    g_realNvapiQueryInterface =
+                        reinterpret_cast<PFunNvapiQueryInterface*>(current);
+                    if (!PatchImportSlot(&thunk[index],
+                            reinterpret_cast<void*>(&HookNvapiQueryInterface),
+                            L"nvapi_QueryInterface (native NVAPI Reflex resolver)")) {
+                        return false;
+                    }
+                }
+                continue;
+            }
+
+            const bool setSleepModeMatches =
+                (importedName && strcmp(importedName, "NvAPI_D3D_SetSleepMode") == 0) ||
+                (expectedSetSleepMode && current == expectedSetSleepMode);
+            if (setSleepModeMatches) {
+                armedAny = true;
+                if (current != reinterpret_cast<void*>(&HookNvapiD3DSetSleepMode)) {
+                    g_realNvapiD3DSetSleepMode =
+                        reinterpret_cast<PFunNvapiD3DSetSleepMode*>(current);
+                    SetInterceptionMethod(
+                        L"native NVAPI D3D SetSleepMode via application IAT");
+                    if (!PatchImportSlot(&thunk[index],
+                            reinterpret_cast<void*>(&HookNvapiD3DSetSleepMode),
+                            L"NvAPI_D3D_SetSleepMode")) {
+                        return false;
+                    }
+                    SetBackend(ReflexProbeProtocol::ReflexBackendNativeNvapiD3D);
+                    PublishReflexFunction(current);
+                }
+            }
+        }
     }
 
     return true;
@@ -802,10 +995,24 @@ DWORD WINAPI WorkerThread(void*)
             return 0;
         }
 
+        bool armedNvapiResolver = false;
+        if (!PatchApplicationNvapiResolver(armedNvapiResolver))
+            return 1;
+        if (armedNvapiResolver) {
+            // The IAT hook remains armed while the worker continues looking for other Reflex paths.
+        }
+        if (InterlockedCompareExchange(&g_nativeNvapiCaptured, 0, 0) != 0) {
+            OutputDebugStringW(
+                L"ReflexProbe64: captured native NVAPI D3D NvAPI_D3D_SetSleepMode; worker exiting.\n");
+            return 0;
+        }
+
         bool armedDynamicResolver = false;
         if (!PatchApplicationGetProcAddressResolver(armedDynamicResolver))
             return 1;
 
+        // Arming either resolver is only a pending discovery path. Do not stop scanning
+        // merely because the main executable's IAT has been patched.
         // Arming the application's GetProcAddress IAT is only a pending modern
         // discovery path. Do not stop scanning loaded modules here: Streamline 1.x
         // titles such as A Plague Tale: Requiem can load sl.interposer.dll later,

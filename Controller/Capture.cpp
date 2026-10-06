@@ -70,6 +70,8 @@ const wchar_t* BackendName(LONG backend)
         return L"Streamline 1.x slSetFeatureConstants";
     case ReflexProbeProtocol::ReflexBackendLegacyPluginConstants:
         return L"Streamline 1.x sl.reflex plugin gateway";
+    case ReflexProbeProtocol::ReflexBackendNativeNvapiD3D:
+        return L"Native NVAPI D3D Reflex";
     default:
         return L"unknown";
     }
@@ -82,6 +84,8 @@ const wchar_t* BackendCallName(LONG backend)
         return L"slSetFeatureConstants";
     case ReflexProbeProtocol::ReflexBackendLegacyPluginConstants:
         return L"sl.reflex!slSetConstants";
+    case ReflexProbeProtocol::ReflexBackendNativeNvapiD3D:
+        return L"NvAPI_D3D_SetSleepMode";
     default:
         return L"slReflexSetOptions";
     }
@@ -357,7 +361,7 @@ void PollSharedState()
         wchar_t line[2300]{};
         switch (hookState) {
         case ReflexProbeProtocol::HookStateWaitingForDll:
-            wcscpy_s(line, L"Waiting for a Streamline Reflex interception path...");
+            wcscpy_s(line, L"Waiting for a Reflex interception path...");
             break;
         case ReflexProbeProtocol::HookStateInterceptArmed:
             swprintf_s(line, L"Interception armed: %s. Waiting for sl.reflex.dll to resolve its plugin gateway.",
