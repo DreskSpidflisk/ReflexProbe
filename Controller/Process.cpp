@@ -303,7 +303,7 @@ bool InjectDll(HANDLE process, DWORD processId, const wchar_t* dllPath, wchar_t*
 }
 
 bool CreateSharedState(DWORD processId, const wchar_t* targetPath,
-                       bool overrideEnabled, uint32_t overrideUs,
+                       bool overrideEnabled, uint32_t overrideUs, bool forceBoostWhenOn,
                        wchar_t* error, size_t errorCount)
 {
     wchar_t mappingName[128]{};
@@ -334,6 +334,7 @@ bool CreateSharedState(DWORD processId, const wchar_t* targetPath,
     g_app.shared->backend = ReflexProbeProtocol::ReflexBackendUnknown;
     g_app.shared->overrideEnabled = overrideEnabled ? 1 : 0;
     g_app.shared->overrideUs = static_cast<LONG>(overrideUs);
+    g_app.shared->forceBoostWhenOn = forceBoostWhenOn ? 1 : 0;
     wcsncpy_s(g_app.shared->targetPath, _countof(g_app.shared->targetPath), targetPath, _TRUNCATE);
     return true;
 }
@@ -428,7 +429,7 @@ bool FindMatchingProcess(const wchar_t* targetPath, ProcessMatch& match)
     return found;
 }
 
-void LogInitialTargetPolicy(bool overrideEnabled, uint32_t overrideUs)
+void LogInitialTargetPolicy(bool overrideEnabled, uint32_t overrideUs, bool forceBoostWhenOn)
 {
     wchar_t line[256]{};
     if (overrideEnabled && overrideUs) {
@@ -438,8 +439,13 @@ void LogInitialTargetPolicy(bool overrideEnabled, uint32_t overrideUs)
     } else if (overrideEnabled) {
         AppendStatusLine(L"Initial override: 0 us (no explicit Reflex frame limit).");
     } else {
-        AppendStatusLine(L"Initial mode: observe only; game Reflex options pass through unchanged.");
+        AppendStatusLine(L"Initial frame-limit override: disabled.");
     }
+
+    if (forceBoostWhenOn)
+        AppendStatusLine(L"Initial Force Boost policy: enabled; plain Reflex On requests will be forwarded as On + Boost.");
+    else
+        AppendStatusLine(L"Initial Force Boost policy: disabled; Reflex mode requests pass through unchanged.");
 
     if (g_app.captureMode == CaptureModeRawDebug)
         AppendStatusLine(L"Capture mode: Raw debug; bounded raw retention starts with this target.");
@@ -462,7 +468,7 @@ bool PrepareCaptureForExternalTarget(wchar_t* error, size_t errorCount)
 }
 
 bool InjectMatchedProcess(const ProcessMatch& match,
-                          bool overrideEnabled, uint32_t overrideUs,
+                          bool overrideEnabled, uint32_t overrideUs, bool forceBoostWhenOn,
                           LONGLONG detectedQpc, LONGLONG watchStartQpc,
                           const wchar_t* acquisitionName,
                           wchar_t* error, size_t errorCount)
@@ -530,7 +536,7 @@ bool InjectMatchedProcess(const ProcessMatch& match,
     g_app.processId = match.processId;
 
     if (!CreateSharedState(match.processId, match.imagePath,
-            overrideEnabled, overrideUs, error, errorCount)) {
+            overrideEnabled, overrideUs, forceBoostWhenOn, error, errorCount)) {
         CleanupTarget();
         return false;
     }
@@ -568,12 +574,12 @@ bool InjectMatchedProcess(const ProcessMatch& match,
         QpcMilliseconds(openedQpc.QuadPart, injectedQpc.QuadPart));
     AppendStatusLineAtQpc(line, injectedQpc.QuadPart);
 
-    LogInitialTargetPolicy(overrideEnabled, overrideUs);
+    LogInitialTargetPolicy(overrideEnabled, overrideUs, forceBoostWhenOn);
     return true;
 }
 
 bool ArmProcessWatch(const wchar_t* targetPath, bool overrideEnabled, uint32_t overrideUs,
-                     wchar_t* error, size_t errorCount)
+                     bool forceBoostWhenOn, wchar_t* error, size_t errorCount)
 {
     if (g_app.process) {
         swprintf_s(error, errorCount, L"A target is already active.");
@@ -610,6 +616,7 @@ bool ArmProcessWatch(const wchar_t* targetPath, bool overrideEnabled, uint32_t o
     wcscpy_s(g_app.watchTargetPath, normalized);
     g_app.watchOverrideEnabled = overrideEnabled;
     g_app.watchOverrideUs = overrideUs;
+    g_app.watchForceBoostWhenOn = forceBoostWhenOn;
     g_app.watchStartQpc = now.QuadPart;
     g_app.watchArmed = true;
 
@@ -641,6 +648,7 @@ void CancelProcessWatch(bool logCancellation)
     g_app.watchTargetPath[0] = 0;
     g_app.watchOverrideEnabled = false;
     g_app.watchOverrideUs = 0;
+    g_app.watchForceBoostWhenOn = false;
     g_app.watchStartQpc = 0;
     UpdateAcquisitionControls();
 
@@ -662,6 +670,7 @@ void PollProcessWatch()
 
     const bool overrideEnabled = g_app.watchOverrideEnabled;
     const uint32_t overrideUs = g_app.watchOverrideUs;
+    const bool forceBoostWhenOn = g_app.watchForceBoostWhenOn;
     const LONGLONG watchStartQpc = g_app.watchStartQpc;
 
     KillTimer(g_app.window, kWatchTimer);
@@ -669,7 +678,7 @@ void PollProcessWatch()
     UpdateAcquisitionControls();
 
     wchar_t error[512]{};
-    if (!InjectMatchedProcess(match, overrideEnabled, overrideUs,
+    if (!InjectMatchedProcess(match, overrideEnabled, overrideUs, forceBoostWhenOn,
             detectedQpc.QuadPart, watchStartQpc, L"Watch",
             error, _countof(error))) {
         wchar_t line[768]{};
@@ -682,11 +691,12 @@ void PollProcessWatch()
     g_app.watchTargetPath[0] = 0;
     g_app.watchOverrideEnabled = false;
     g_app.watchOverrideUs = 0;
+    g_app.watchForceBoostWhenOn = false;
     g_app.watchStartQpc = 0;
 }
 
 bool AttachRunningProcess(const wchar_t* targetPath, bool overrideEnabled, uint32_t overrideUs,
-                          wchar_t* error, size_t errorCount)
+                          bool forceBoostWhenOn, wchar_t* error, size_t errorCount)
 {
     if (g_app.process) {
         swprintf_s(error, errorCount, L"A target is already active.");
@@ -713,7 +723,7 @@ bool AttachRunningProcess(const wchar_t* targetPath, bool overrideEnabled, uint3
     LARGE_INTEGER detectedQpc{};
     QueryPerformanceCounter(&detectedQpc);
 
-    return InjectMatchedProcess(match, overrideEnabled, overrideUs,
+    return InjectMatchedProcess(match, overrideEnabled, overrideUs, forceBoostWhenOn,
         detectedQpc.QuadPart, 0, L"Attach", error, errorCount);
 }
 

@@ -2,7 +2,7 @@
 
 ReflexProbe is a deliberately small Win32 tool for observing and overriding the frame-limit value applications send to NVIDIA Reflex.
 
-The current build focuses on **Streamline Reflex** and x64 games acquired by direct launch, launcher-compatible process watch, or runtime attach. It does not render an overlay, modify shaders, replace Streamline DLLs, or write capture data to disk.
+The current build focuses on **Streamline Reflex** and x64 games acquired by direct launch, launcher-compatible process watch, or runtime attach. It can independently override Reflex's frame-limit interval and upgrade plain Reflex On requests to On + Boost. It does not render an overlay, modify shaders, replace Streamline DLLs, or write capture data to disk.
 
 ## Why this exists
 
@@ -96,7 +96,7 @@ Every Reflex call is still intercepted, forwarded and examined, but identical ca
 
 - the first state is printed as `NEW Reflex State:`;
 - identical calls only increment the repeat count;
-- when backend, mode, requested interval, effective interval, or result changes, the previous run is closed with `Previous Reflex State repeated N more times.` and the new state is printed;
+- when backend, requested mode, effective mode, requested interval, effective interval, or result changes, the previous run is closed with `Previous Reflex State repeated N more times.` and the new state is printed;
 - if there were no repeats, no zero-repeat line is emitted;
 - target exit or a capture-mode change closes the current state run before continuing.
 
@@ -167,7 +167,7 @@ The hashes make stale or mismatched local binaries obvious.
 
 ### Modern Streamline (2.x+)
 
-The injected DLL intercepts `slGetFeatureFunction`, either from a normal application IAT import or through the narrowly scoped application-`GetProcAddress` path described above. When the game asks for `slReflexSetOptions`, ReflexProbe keeps the genuine NVIDIA function pointer and returns a wrapper that observes and optionally replaces only `frameLimitUs`.
+The injected DLL intercepts `slGetFeatureFunction`, either from a normal application IAT import or through the narrowly scoped application-`GetProcAddress` path described above. When the game asks for `slReflexSetOptions`, ReflexProbe keeps the genuine NVIDIA function pointer and returns a wrapper that observes requested/effective Reflex mode and frame-limit state. The wrapper can independently replace `frameLimitUs` and upgrade only `eLowLatency` (On) to `eLowLatencyWithBoost`; Off and an existing On + Boost request are left unchanged.
 
 Confirmed modern targets include Cyberpunk 2077, The Witcher 3 Remastered, GSyncProbe, and Blood of the Dawnwalker.
 
@@ -187,13 +187,14 @@ The old `ReflexConstants` ABI is defined locally with compile-time layout checks
 1. Start `ReflexProbe.exe`.
 2. Browse to the exact x64 game executable you want to target.
 3. Choose a capture mode. **State changes** is the default for normal gameplay; **Raw debug** is for short diagnostic captures.
-4. Leave **Override Reflex frame limit** unchecked for observation, or check it and enter the desired FPS value.
-5. Choose one acquisition method:
+4. Leave **Override Reflex frame limit** unchecked for pass-through, or check it and enter the desired FPS value. The FPS box is disabled while the override is off and defaults to **158 FPS** when ReflexProbe starts.
+5. Optionally enable **Force Boost when Reflex On**. This changes only a plain On request to On + Boost; Off stays Off and an existing On + Boost request stays unchanged.
+6. Choose one acquisition method:
    - **Launch + Inject** creates the selected executable suspended, injects `ReflexProbe64.dll`, then resumes it.
    - **Watch + Inject** arms a temporary 10 ms process scan, then you launch the game normally through Steam, GOG Galaxy, Ubisoft Connect, Epic, or another launcher. ReflexProbe first filters by executable name, then requires a case-insensitive exact full-path match before opening or injecting the process. The watch stops completely after a match or cancellation.
    - **Attach** performs the same exact-path match once against an already-running process and injects immediately when found.
-6. Watch/Attach logs the detected PID, parent PID, full executable path, process-open timing and DLL-injection timing. Command-line capture is intentionally not part of this first implementation.
-7. The injected DLL discovers a supported Streamline Reflex boundary and reports requested/effective state to the controller.
+7. Watch/Attach logs the detected PID, parent PID, full executable path, process-open timing and DLL-injection timing. Command-line capture is intentionally not part of this first implementation.
+8. The injected DLL discovers a supported Streamline Reflex boundary and reports requested/effective state to the controller.
 
 **Watch is the preferred launcher mode for titles that submit Reflex state only at startup.** Runtime Attach can still be useful for engines that resubmit settings, but attaching after initialization can miss a setter that the game called once and cached before ReflexProbe arrived.
 
@@ -209,7 +210,7 @@ Example:
 165 FPS -> 6061 us
 ```
 
-Entering `0` while override is enabled forces literal `frameLimitUs=0`. Changing the override while the game is running updates shared configuration immediately, but the new value takes effect on the next intercepted Reflex settings call.
+Entering `0` while override is enabled forces literal `frameLimitUs=0`. Frame-limit and Force Boost policy are independent and can be changed while a target is running; each new policy takes effect on the next intercepted Reflex settings call. Watch snapshots both policies when armed so a startup-only Reflex call sees the intended configuration.
 
 ## Known test targets and results
 
@@ -247,4 +248,4 @@ Do not use ReflexProbe with anti-cheat/protected multiplayer titles. The intende
 5. Add native NVAPI D3D Reflex interception for titles such as God of War.
 6. After launcher acquisition is proven, extend the same modern Streamline resolver interception to observe DLSS Frame Generation policy such as `slDLSSGSetOptions`.
 
-The architecture remains intentionally boring: a Win32 controller outside the game, one injected DLL inside it, Launch/Watch/Attach as interchangeable acquisition paths, fixed RAM transport, bounded capture policy, and one Reflex frame-limit field under the microscope.
+The architecture remains intentionally boring: a Win32 controller outside the game, one injected DLL inside it, Launch/Watch/Attach as interchangeable acquisition paths, fixed RAM transport, bounded capture policy, and a tiny requested/effective Reflex policy surface under the microscope.

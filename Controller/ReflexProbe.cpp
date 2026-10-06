@@ -48,7 +48,7 @@ bool ParseOverrideFromUi(bool& enabled, uint32_t& frameLimitUs, wchar_t* error, 
     return true;
 }
 
-void ApplyOverrideToShared()
+void ApplyPolicyToShared(bool logFrameLimit, bool logBoost)
 {
     if (!g_app.shared)
         return;
@@ -61,21 +61,33 @@ void ApplyOverrideToShared()
         return;
     }
 
+    const bool forceBoostWhenOn = Button_GetCheck(g_app.forceBoost) == BST_CHECKED;
+
     InterlockedExchange(&g_app.shared->overrideUs, static_cast<LONG>(frameLimitUs));
     InterlockedExchange(&g_app.shared->overrideEnabled, enabled ? 1 : 0);
+    InterlockedExchange(&g_app.shared->forceBoostWhenOn, forceBoostWhenOn ? 1 : 0);
     InterlockedIncrement(&g_app.shared->configSequence);
 
-    wchar_t line[256]{};
-    if (enabled && frameLimitUs)
-        swprintf_s(line, L"Override armed: %u us (%.3f FPS). Takes effect on the next Reflex settings call.",
-            frameLimitUs, 1000000.0 / static_cast<double>(frameLimitUs));
-    else if (enabled)
-        wcscpy_s(line, L"Override armed: 0 us (no explicit Reflex frame limit). Takes effect on the next Reflex settings call.");
-    else
-        wcscpy_s(line, L"Override disabled. Game Reflex options will pass through unchanged.");
-    AppendStatusLine(line);
-}
+    wchar_t line[320]{};
+    if (logFrameLimit) {
+        if (enabled && frameLimitUs)
+            swprintf_s(line, L"Frame-limit override armed: %u us (%.3f FPS). Takes effect on the next Reflex settings call.",
+                frameLimitUs, 1000000.0 / static_cast<double>(frameLimitUs));
+        else if (enabled)
+            wcscpy_s(line, L"Frame-limit override armed: 0 us (no explicit Reflex frame limit). Takes effect on the next Reflex settings call.");
+        else
+            wcscpy_s(line, L"Frame-limit override disabled. Game frameLimitUs requests will pass through unchanged.");
+        AppendStatusLine(line);
+    }
 
+    if (logBoost) {
+        if (forceBoostWhenOn)
+            wcscpy_s(line, L"Force Boost when Reflex On enabled. Plain On requests will be forwarded as On + Boost on the next Reflex settings call.");
+        else
+            wcscpy_s(line, L"Force Boost when Reflex On disabled. Reflex mode requests will pass through unchanged.");
+        AppendStatusLine(line);
+    }
+}
 void UpdateAcquisitionControls()
 {
     const bool targetActive = g_app.process != nullptr;
@@ -99,8 +111,13 @@ void UpdateAcquisitionControls()
 
     if (g_app.overrideEnable)
         EnableWindow(g_app.overrideEnable, !watching);
-    if (g_app.overrideFps)
-        EnableWindow(g_app.overrideFps, !watching);
+    if (g_app.overrideFps) {
+        const bool frameOverrideChecked =
+            g_app.overrideEnable && Button_GetCheck(g_app.overrideEnable) == BST_CHECKED;
+        EnableWindow(g_app.overrideFps, !watching && frameOverrideChecked);
+    }
+    if (g_app.forceBoost)
+        EnableWindow(g_app.forceBoost, !watching);
 }
 
 void CleanupTarget()
@@ -153,6 +170,7 @@ bool LaunchAndInject()
 
     bool overrideEnabled = false;
     uint32_t overrideUs = 0;
+    const bool forceBoostWhenOn = Button_GetCheck(g_app.forceBoost) == BST_CHECKED;
     wchar_t error[512]{};
     if (!ParseOverrideFromUi(overrideEnabled, overrideUs, error, _countof(error))) {
         MessageBoxW(g_app.window, error, L"ReflexProbe", MB_ICONWARNING);
@@ -210,7 +228,8 @@ bool LaunchAndInject()
         return false;
     }
 
-    if (!CreateSharedState(process.dwProcessId, gamePath, overrideEnabled, overrideUs, error, _countof(error))) {
+    if (!CreateSharedState(process.dwProcessId, gamePath,
+            overrideEnabled, overrideUs, forceBoostWhenOn, error, _countof(error))) {
         TerminateProcess(process.hProcess, 1);
         CloseHandle(process.hThread);
         MessageBoxW(g_app.window, error, L"ReflexProbe", MB_ICONERROR);
@@ -259,8 +278,13 @@ bool LaunchAndInject()
     } else if (overrideEnabled) {
         AppendStatusLine(L"Initial override: 0 us (no explicit Reflex frame limit).");
     } else {
-        AppendStatusLine(L"Initial mode: observe only; game Reflex options pass through unchanged.");
+        AppendStatusLine(L"Initial frame-limit override: disabled.");
     }
+
+    if (forceBoostWhenOn)
+        AppendStatusLine(L"Initial Force Boost policy: enabled; plain Reflex On requests will be forwarded as On + Boost.");
+    else
+        AppendStatusLine(L"Initial Force Boost policy: disabled; Reflex mode requests pass through unchanged.");
 
     if (g_app.captureMode == CaptureModeRawDebug)
         AppendStatusLine(L"Capture mode: Raw debug; bounded raw retention starts with this target.");
@@ -270,9 +294,9 @@ bool LaunchAndInject()
     return true;
 }
 
-bool ReadTargetAndOverrideForExternalAcquisition(
+bool ReadTargetAndPolicyForExternalAcquisition(
     wchar_t* gamePath, size_t gamePathCount,
-    bool& overrideEnabled, uint32_t& overrideUs,
+    bool& overrideEnabled, uint32_t& overrideUs, bool& forceBoostWhenOn,
     wchar_t* error, size_t errorCount)
 {
     if (!gamePath || !gamePathCount)
@@ -290,6 +314,7 @@ bool ReadTargetAndOverrideForExternalAcquisition(
         return false;
     }
 
+    forceBoostWhenOn = Button_GetCheck(g_app.forceBoost) == BST_CHECKED;
     return ParseOverrideFromUi(overrideEnabled, overrideUs, error, errorCount);
 }
 
@@ -303,16 +328,18 @@ bool ToggleWatchAndInject()
     wchar_t gamePath[ReflexProbeProtocol::kPathChars]{};
     bool overrideEnabled = false;
     uint32_t overrideUs = 0;
+    bool forceBoostWhenOn = false;
     wchar_t error[512]{};
 
-    if (!ReadTargetAndOverrideForExternalAcquisition(
-            gamePath, _countof(gamePath), overrideEnabled, overrideUs,
+    if (!ReadTargetAndPolicyForExternalAcquisition(
+            gamePath, _countof(gamePath), overrideEnabled, overrideUs, forceBoostWhenOn,
             error, _countof(error))) {
         MessageBoxW(g_app.window, error, L"ReflexProbe", MB_ICONWARNING);
         return false;
     }
 
-    if (!ArmProcessWatch(gamePath, overrideEnabled, overrideUs, error, _countof(error))) {
+    if (!ArmProcessWatch(gamePath, overrideEnabled, overrideUs, forceBoostWhenOn,
+            error, _countof(error))) {
         MessageBoxW(g_app.window, error, L"ReflexProbe Watch + Inject", MB_ICONERROR);
         return false;
     }
@@ -325,16 +352,18 @@ bool AttachToRunningTarget()
     wchar_t gamePath[ReflexProbeProtocol::kPathChars]{};
     bool overrideEnabled = false;
     uint32_t overrideUs = 0;
+    bool forceBoostWhenOn = false;
     wchar_t error[512]{};
 
-    if (!ReadTargetAndOverrideForExternalAcquisition(
-            gamePath, _countof(gamePath), overrideEnabled, overrideUs,
+    if (!ReadTargetAndPolicyForExternalAcquisition(
+            gamePath, _countof(gamePath), overrideEnabled, overrideUs, forceBoostWhenOn,
             error, _countof(error))) {
         MessageBoxW(g_app.window, error, L"ReflexProbe", MB_ICONWARNING);
         return false;
     }
 
-    if (!AttachRunningProcess(gamePath, overrideEnabled, overrideUs, error, _countof(error))) {
+    if (!AttachRunningProcess(gamePath, overrideEnabled, overrideUs, forceBoostWhenOn,
+            error, _countof(error))) {
         MessageBoxW(g_app.window, error, L"ReflexProbe Attach", MB_ICONERROR);
         return false;
     }
@@ -391,11 +420,13 @@ void LayoutControls(int clientWidth, int clientHeight)
         MoveWindow(g_app.arguments, kMargin, 90, usableWidth > 50 ? usableWidth : 50, 24, TRUE);
 
     if (g_app.overrideEnable)
-        MoveWindow(g_app.overrideEnable, kMargin, 128, 190, 22, TRUE);
+        MoveWindow(g_app.overrideEnable, kMargin, 128, 172, 22, TRUE);
     if (g_app.overrideFps)
-        MoveWindow(g_app.overrideFps, 210, 126, 80, 24, TRUE);
+        MoveWindow(g_app.overrideFps, 184, 126, 70, 24, TRUE);
     if (g_app.fpsLabel)
-        MoveWindow(g_app.fpsLabel, 298, 130, 40, 20, TRUE);
+        MoveWindow(g_app.fpsLabel, 262, 130, 34, 20, TRUE);
+    if (g_app.forceBoost)
+        MoveWindow(g_app.forceBoost, 306, 128, 205, 22, TRUE);
     const int attachX = clientWidth - kMargin - attachWidth;
     const int watchX = attachX - acquisitionGap - watchWidth;
     const int launchX = watchX - acquisitionGap - launchWidth;
@@ -465,14 +496,20 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_OVERRIDE_ENABLE), g_app.instance, nullptr);
         SetChildFont(g_app.overrideEnable, font);
 
-        g_app.overrideFps = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"165",
+        g_app.overrideFps = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"158",
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
             0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_OVERRIDE_FPS), g_app.instance, nullptr);
         SetChildFont(g_app.overrideFps, font);
+        EnableWindow(g_app.overrideFps, FALSE);
 
         g_app.fpsLabel = CreateWindowExW(0, L"STATIC", L"FPS",
             WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
         SetChildFont(g_app.fpsLabel, font);
+
+        g_app.forceBoost = CreateWindowExW(0, L"BUTTON", L"Force Boost when Reflex On",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FORCE_BOOST), g_app.instance, nullptr);
+        SetChildFont(g_app.forceBoost, font);
 
         g_app.launch = CreateWindowExW(0, L"BUTTON", L"Launch + Inject",
             WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
@@ -521,7 +558,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         LayoutControls(client.right - client.left, client.bottom - client.top);
 
         AppendStatusLine(L"ReflexProbe bootstrap: Launch, Watch or Attach Streamline observer/override.");
-        AppendStatusLine(L"Override is OFF by default. When checked, the FPS value replaces frameLimitUs on intercepted Reflex settings calls.");
+        AppendStatusLine(L"Frame-limit override is OFF by default. When checked, the FPS value replaces frameLimitUs on intercepted Reflex settings calls.");
+        AppendStatusLine(L"Force Boost when Reflex On is independent: plain On requests become On + Boost; Off and existing On + Boost requests are unchanged.");
         AppendStatusLine(L"Capture mode defaults to State changes. Raw debug retains at most 131072 calls in RAM. ReflexProbe never writes capture data to disk.");
         LogBinaryIdentity();
         SetTimer(window, kPollTimer, kPollIntervalMs, nullptr);
@@ -545,14 +583,20 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             BrowseForGame();
             return 0;
         case IDC_OVERRIDE_ENABLE:
-            if (HIWORD(wParam) == BN_CLICKED)
-                ApplyOverrideToShared();
+            if (HIWORD(wParam) == BN_CLICKED) {
+                UpdateAcquisitionControls();
+                ApplyPolicyToShared(true, false);
+            }
             return 0;
         case IDC_OVERRIDE_FPS:
             if (HIWORD(wParam) == EN_KILLFOCUS &&
                 Button_GetCheck(g_app.overrideEnable) == BST_CHECKED) {
-                ApplyOverrideToShared();
+                ApplyPolicyToShared(true, false);
             }
+            return 0;
+        case IDC_FORCE_BOOST:
+            if (HIWORD(wParam) == BN_CLICKED)
+                ApplyPolicyToShared(false, true);
             return 0;
         case IDC_LAUNCH:
             LaunchAndInject();

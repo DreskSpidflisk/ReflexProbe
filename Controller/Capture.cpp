@@ -92,36 +92,49 @@ CaptureMode CurrentCaptureMode()
     return g_app.captureMode;
 }
 
+const wchar_t* ReflexModeName(LONG mode)
+{
+    switch (mode) {
+    case 0:
+        return L"Off";
+    case 1:
+        return L"On";
+    case 2:
+        return L"On + Boost";
+    default:
+        return L"Unknown";
+    }
+}
+
 void FormatReflexEvent(const CapturedReflexEvent& event, wchar_t* line, size_t lineCount)
 {
-    const wchar_t* mode = event.mode == 2 ? L"On + Boost" :
-                          (event.mode == 1 ? L"On" : L"Off");
+    const wchar_t* requestedMode = ReflexModeName(event.requestedMode);
+    const wchar_t* effectiveMode = ReflexModeName(event.effectiveMode);
     const wchar_t* callName = BackendCallName(event.backend);
 
     if (event.requestedUs && event.effectiveUs) {
         swprintf_s(line, lineCount,
-            L"%s #%ld: mode=%s, requested=%u us (%.3f FPS), effective=%u us (%.3f FPS), result=%ld",
-            callName, event.sequence, mode,
+            L"%s #%ld: requested mode=%s, effective mode=%s, requested=%u us (%.3f FPS), effective=%u us (%.3f FPS), result=%ld",
+            callName, event.sequence, requestedMode, effectiveMode,
             event.requestedUs, 1000000.0 / static_cast<double>(event.requestedUs),
             event.effectiveUs, 1000000.0 / static_cast<double>(event.effectiveUs),
             event.result);
     } else if (event.requestedUs) {
         swprintf_s(line, lineCount,
-            L"%s #%ld: mode=%s, requested=%u us (%.3f FPS), effective=0 us (no explicit frame limit), result=%ld",
-            callName, event.sequence, mode,
+            L"%s #%ld: requested mode=%s, effective mode=%s, requested=%u us (%.3f FPS), effective=0 us (no explicit frame limit), result=%ld",
+            callName, event.sequence, requestedMode, effectiveMode,
             event.requestedUs, 1000000.0 / static_cast<double>(event.requestedUs), event.result);
     } else if (event.effectiveUs) {
         swprintf_s(line, lineCount,
-            L"%s #%ld: mode=%s, requested=0 us (automatic), effective=%u us (%.3f FPS), result=%ld",
-            callName, event.sequence, mode,
+            L"%s #%ld: requested mode=%s, effective mode=%s, requested=0 us (no explicit frame limit), effective=%u us (%.3f FPS), result=%ld",
+            callName, event.sequence, requestedMode, effectiveMode,
             event.effectiveUs, 1000000.0 / static_cast<double>(event.effectiveUs), event.result);
     } else {
         swprintf_s(line, lineCount,
-            L"%s #%ld: mode=%s, requested=0 us (automatic), effective=0 us (no explicit frame limit), result=%ld",
-            callName, event.sequence, mode, event.result);
+            L"%s #%ld: requested mode=%s, effective mode=%s, requested=0 us (no explicit frame limit), effective=0 us (no explicit frame limit), result=%ld",
+            callName, event.sequence, requestedMode, effectiveMode, event.result);
     }
 }
-
 void FormatReflexDisplayLine(const CapturedReflexEvent& event, bool newState,
                             wchar_t* line, size_t lineCount)
 {
@@ -150,7 +163,8 @@ bool AppendReflexEventToBuffer(TextBuffer& buffer, const CapturedReflexEvent& ev
 bool SameReflexState(const CapturedReflexEvent& a, const CapturedReflexEvent& b)
 {
     return a.backend == b.backend &&
-           a.mode == b.mode &&
+           a.requestedMode == b.requestedMode &&
+           a.effectiveMode == b.effectiveMode &&
            a.requestedUs == b.requestedUs &&
            a.effectiveUs == b.effectiveUs &&
            a.result == b.result;
@@ -350,7 +364,8 @@ void PollSharedState()
         CapturedReflexEvent captured{};
         captured.qpc = event.qpc;
         captured.sequence = serial;
-        captured.mode = event.mode;
+        captured.requestedMode = event.requestedMode;
+        captured.effectiveMode = event.effectiveMode;
         captured.result = event.result;
         captured.backend = backend;
         captured.requestedUs = event.requestedUs;

@@ -39,7 +39,8 @@ enum ControlId : int {
     IDC_CAPTURE_STATE,
     IDC_CAPTURE_RAW,
     IDC_WATCH,
-    IDC_ATTACH
+    IDC_ATTACH,
+    IDC_FORCE_BOOST
 };
 
 enum CaptureMode : uint32_t {
@@ -50,7 +51,8 @@ enum CaptureMode : uint32_t {
 struct CapturedReflexEvent {
     LONGLONG qpc;
     LONG sequence;
-    LONG mode;
+    LONG requestedMode;
+    LONG effectiveMode;
     LONG result;
     LONG backend;
     uint32_t requestedUs;
@@ -75,6 +77,7 @@ struct AppState {
     HWND overrideEnable = nullptr;
     HWND overrideFps = nullptr;
     HWND fpsLabel = nullptr;
+    HWND forceBoost = nullptr;
     HWND launch = nullptr;
     HWND watch = nullptr;
     HWND attach = nullptr;
@@ -100,6 +103,7 @@ struct AppState {
     wchar_t watchTargetPath[ReflexProbeProtocol::kPathChars]{};
     bool watchOverrideEnabled = false;
     uint32_t watchOverrideUs = 0;
+    bool watchForceBoostWhenOn = false;
     LONGLONG watchStartQpc = 0;
 
     CaptureMode captureMode = CaptureModeStateChanges;
@@ -138,14 +142,14 @@ bool GetLocalFunctionOwner(void* function, HMODULE& owner, wchar_t* moduleName, 
 bool WaitForRemoteFunctionOwner(DWORD processId, const wchar_t* moduleName, uintptr_t& baseOut, DWORD timeoutMs);
 bool InjectDll(HANDLE process, DWORD processId, const wchar_t* dllPath, wchar_t* error, size_t errorCount);
 bool CreateSharedState(DWORD processId, const wchar_t* targetPath,
-                       bool overrideEnabled, uint32_t overrideUs,
+                       bool overrideEnabled, uint32_t overrideUs, bool forceBoostWhenOn,
                        wchar_t* error, size_t errorCount);
 bool ArmProcessWatch(const wchar_t* targetPath, bool overrideEnabled, uint32_t overrideUs,
-                     wchar_t* error, size_t errorCount);
+                     bool forceBoostWhenOn, wchar_t* error, size_t errorCount);
 void CancelProcessWatch(bool logCancellation);
 void PollProcessWatch();
 bool AttachRunningProcess(const wchar_t* targetPath, bool overrideEnabled, uint32_t overrideUs,
-                          wchar_t* error, size_t errorCount);
+                          bool forceBoostWhenOn, wchar_t* error, size_t errorCount);
 
 void ResetLiveStateTracking();
 bool EnsureRawDebugBuffer();

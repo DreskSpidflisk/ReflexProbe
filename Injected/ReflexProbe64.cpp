@@ -223,7 +223,16 @@ uint32_t ApplyConfiguredOverride(uint32_t requestedUs)
     return static_cast<uint32_t>(configured);
 }
 
-void PublishEvent(LONG mode, uint32_t requestedUs, uint32_t effectiveUs, LONG result)
+LONG ApplyConfiguredModeOverride(LONG requestedMode)
+{
+    if (!g_shared || InterlockedCompareExchange(&g_shared->forceBoostWhenOn, 0, 0) == 0)
+        return requestedMode;
+
+    return requestedMode == 1 ? 2 : requestedMode;
+}
+
+void PublishEvent(LONG requestedMode, LONG effectiveMode,
+                  uint32_t requestedUs, uint32_t effectiveUs, LONG result)
 {
     if (!g_shared)
         return;
@@ -237,7 +246,8 @@ void PublishEvent(LONG mode, uint32_t requestedUs, uint32_t effectiveUs, LONG re
     LARGE_INTEGER qpc{};
     QueryPerformanceCounter(&qpc);
     event.qpc = qpc.QuadPart;
-    event.mode = mode;
+    event.requestedMode = requestedMode;
+    event.effectiveMode = effectiveMode;
     event.requestedUs = requestedUs;
     event.effectiveUs = effectiveUs;
     event.result = result;
@@ -291,11 +301,15 @@ sl::Result HookReflexSetOptions(const sl::ReflexOptions& options)
         return sl::Result::eErrorNotInitialized;
 
     sl::ReflexOptions forwarded = options;
+    const LONG requestedMode = static_cast<LONG>(options.mode);
+    const LONG effectiveMode = ApplyConfiguredModeOverride(requestedMode);
     const uint32_t effectiveUs = ApplyConfiguredOverride(options.frameLimitUs);
+    forwarded.mode = static_cast<sl::ReflexMode>(effectiveMode);
     forwarded.frameLimitUs = effectiveUs;
 
     const sl::Result result = real(forwarded);
-    PublishEvent(static_cast<LONG>(options.mode), options.frameLimitUs, effectiveUs, static_cast<LONG>(result));
+    PublishEvent(requestedMode, effectiveMode,
+        options.frameLimitUs, effectiveUs, static_cast<LONG>(result));
     return result;
 }
 
@@ -311,11 +325,14 @@ bool HookLegacySetFeatureConstants(uint32_t feature, const void* constants,
 
     const auto* requested = static_cast<const LegacyReflexConstants*>(constants);
     LegacyReflexConstants forwarded = *requested;
+    const LONG requestedMode = static_cast<LONG>(requested->mode);
+    const LONG effectiveMode = ApplyConfiguredModeOverride(requestedMode);
     const uint32_t effectiveUs = ApplyConfiguredOverride(requested->frameLimitUs);
+    forwarded.mode = static_cast<int32_t>(effectiveMode);
     forwarded.frameLimitUs = effectiveUs;
 
     const bool result = real(feature, &forwarded, frameIndex, id);
-    PublishEvent(static_cast<LONG>(requested->mode), requested->frameLimitUs,
+    PublishEvent(requestedMode, effectiveMode, requested->frameLimitUs,
         effectiveUs, result ? 0 : 1);
     return result;
 }
@@ -331,11 +348,14 @@ bool HookLegacyPluginSetConstants(const void* constants, uint32_t frameIndex, ui
 
     const auto* requested = static_cast<const LegacyReflexConstants*>(constants);
     LegacyReflexConstants forwarded = *requested;
+    const LONG requestedMode = static_cast<LONG>(requested->mode);
+    const LONG effectiveMode = ApplyConfiguredModeOverride(requestedMode);
     const uint32_t effectiveUs = ApplyConfiguredOverride(requested->frameLimitUs);
+    forwarded.mode = static_cast<int32_t>(effectiveMode);
     forwarded.frameLimitUs = effectiveUs;
 
     const bool result = real(&forwarded, frameIndex, id);
-    PublishEvent(static_cast<LONG>(requested->mode), requested->frameLimitUs,
+    PublishEvent(requestedMode, effectiveMode, requested->frameLimitUs,
         effectiveUs, result ? 0 : 1);
     return result;
 }

@@ -10,7 +10,7 @@
 namespace ReflexProbeProtocol {
 
 constexpr uint32_t kMagic = 0x31505246; // "FRP1" little-endian.
-constexpr uint32_t kVersion = 3;
+constexpr uint32_t kVersion = 4;
 constexpr uint32_t kEventCapacity = 4096;
 constexpr uint32_t kPathChars = 1024;
 constexpr uint32_t kVersionChars = 64;
@@ -18,7 +18,7 @@ constexpr uint32_t kErrorChars = 512;
 
 // Human-readable source tag for rapid local rebuild/testing. The controller also hashes the
 // actual EXE and DLL on disk, so a stale or mismatched binary is obvious in copied logs.
-constexpr wchar_t kBuildTag[] = L"2026-10-05.11-sl1-worker";
+constexpr wchar_t kBuildTag[] = L"2026-10-05.12-boost-policy";
 
 constexpr wchar_t kMappingPrefix[] = L"Local\\ReflexProbe.";
 
@@ -40,7 +40,8 @@ enum ReflexBackend : LONG {
 struct ReflexEvent {
     volatile LONG sequence;
     LONGLONG qpc;
-    LONG mode;
+    LONG requestedMode;
+    LONG effectiveMode;
     uint32_t requestedUs;
     uint32_t effectiveUs;
     LONG result;
@@ -55,6 +56,7 @@ struct SharedState {
     volatile LONG configSequence;
     volatile LONG overrideEnabled;
     volatile LONG overrideUs;
+    volatile LONG forceBoostWhenOn;
 
     volatile LONG hookState;
     volatile LONG backend;
