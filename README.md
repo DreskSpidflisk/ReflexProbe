@@ -113,7 +113,9 @@ Selecting it starts a new raw capture from that point forward. ReflexProbe does 
 
 The ring is allocated only when Raw debug is selected. With the current event structure it is roughly 6 MiB. Live raw text is still batched at the controller's 50 ms poll cadence, so the Win32 EDIT control receives at most about 20 batch appends per second rather than one mutation per Reflex call.
 
-Switching from State changes to Raw debug first closes the current compressed state run. Switching back stops raw retention and starts a fresh state-change run with the next Reflex call. The most recent raw ring remains in RAM until it is replaced by a new Raw debug session or the controller exits.
+Switching from State changes to Raw debug first closes the current compressed state run. Switching back stops raw retention and starts a fresh state-change run with the next Reflex call. The most recent raw ring remains in RAM until it is cleared, replaced by a new Raw debug session, or the controller exits.
+
+The **Clear** button empties the visible Status / Reflex requests text and frees any retained Raw debug ring so a new diagnostic pass can start without restarting ReflexProbe. It is intentionally available only while idle: it is disabled while a target is injected and while Watch is armed, so Clear never races the injected DLL's 4096-event shared transport ring or discards a live state/sleep-count run.
 
 **ReflexProbe never writes capture data to disk.** There is intentionally no capture logger or export path. SSDs must live.
 
@@ -196,8 +198,8 @@ The old `ReflexConstants` ABI is defined locally with compile-time layout checks
 ## Current workflow
 
 1. Start `ReflexProbe.exe`.
-2. Browse to the exact x64 game executable you want to target.
-3. Choose a capture mode. **State changes** is the default for normal gameplay; **Raw debug** is for short diagnostic captures.
+2. Browse to the exact x64 game executable you want to target. **Launch + Inject**, **Watch + Inject**, and **Attach** remain disabled until the selected path names an existing file rather than a directory. Browse validates immediately; a manually edited path is revalidated when Enter is pressed or the edit box loses focus. The acquisition functions still repeat the validation defensively in case the file disappears afterward.
+3. Choose a capture mode. **State changes** is the default for normal gameplay; **Raw debug** is for short diagnostic captures. When idle, **Clear** removes the visible history and any retained Raw debug calls without changing the selected capture mode or policy controls.
 4. Leave **Override Reflex frame limit** unchecked for pass-through, or check it and enter the desired FPS value. The FPS box is disabled while the override is off and defaults to **158 FPS** when ReflexProbe starts.
 5. Optionally enable **Force Boost when Reflex On**. This changes only a plain On request to On + Boost; Off stays Off and an existing On + Boost request stays unchanged.
 6. Optionally enable **Count Reflex Sleep Calls**. It defaults Off. This is an **acquisition-time diagnostic choice**: if checked, ReflexProbe wraps the supported Reflex Sleep call for that target and counts it; if unchecked, the sleep function pointer is left untouched. The choice is locked once Launch or Attach successfully acquires a target, and is snapshotted and locked immediately when Watch is armed. It becomes editable again after the target exits, an acquisition fails, or Watch is cancelled. In State changes mode, counted sleep calls are reported when each detected Reflex state ends; in Raw debug, every counted sleep call is printed individually. Calls before the first detected state are intentionally not assigned to a state.
@@ -211,6 +213,8 @@ The old `ReflexConstants` ABI is defined locally with compile-time layout checks
 Reflex Sleep interception is now strictly opt-in through **Count Reflex Sleep Calls**. The checkbox state is copied into the target's shared state before injection and is immutable for that acquisition. A disabled count therefore means more than "do not record events": ReflexProbe does **not** substitute `slReflexSleep` or `NvAPI_D3D_Sleep` at all. Streamline 1.x sleep interception is not implemented yet.
 
 Earlier diagnostic builds had startup-global `--wrap-reflex-sleep` and `--no-wrap-reflex-sleep` switches implemented with `CommandLineToArgvW`. Those switches and their Shell32 dependency were intentionally removed when sleep interception became an acquisition-time UI choice. The last pre-removal implementation is preserved in Git history at commit `d6439862403a20fc0b094e39945992495c64d99f`; the original sleep-counting implementation began at `9bee5eb7b638e8fb4d1de4cf53c49ef712b5682f`. If ReflexProbe needs command-line options again, that working parser can be recovered without keeping unused plumbing in the current binary.
+
+The controller's single-row policy/acquisition layout has a calculated minimum width based on the fixed policy controls plus the Launch / Watch / Attach group, preventing the controls from overlapping when the window is resized. The Force Boost and Count Reflex Sleep checkboxes use the same deliberate horizontal spacing as the surrounding policy controls.
 
 The controller also keeps a compact **Current effective state** line and mirrors it in the window title. It updates only after an intercepted Reflex setter returns success and shows the effective mode and effective explicit Reflex FPS limit after ReflexProbe policy has been applied. Repeated identical calls do not churn the UI. A zero interval is shown as **None (0 us)** rather than inventing an FPS, and the display returns to **Unknown** when the target exits.
 

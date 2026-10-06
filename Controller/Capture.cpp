@@ -43,6 +43,21 @@ void FreeRawDebugBuffer()
     ResetRawDebugCapture();
 }
 
+void ClearCaptureHistory()
+{
+    // Clear is deliberately idle-only. Never reset controller bookkeeping while
+    // an injected target can still be publishing into the shared transport ring.
+    if (g_app.process || g_app.watchArmed)
+        return;
+
+    FreeRawDebugBuffer();
+    ResetLiveStateTracking();
+    ResetCurrentEffectiveState();
+
+    if (g_app.status)
+        SetWindowTextW(g_app.status, L"");
+}
+
 bool CaptureRawDebugEvent(const CapturedReflexEvent& event)
 {
     if (!EnsureRawDebugBuffer())

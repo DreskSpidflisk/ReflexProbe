@@ -20,7 +20,6 @@ constexpr UINT_PTR kWatchTimer = 2;
 constexpr UINT kWatchPollIntervalMs = 10;
 constexpr int kMargin = 12;
 constexpr int kStatusTop = 212;
-constexpr int kMinimumWindowWidth = 700;
 constexpr int kMinimumWindowHeight = 506;
 constexpr WPARAM kStatusTextLimit = 16u * 1024u * 1024u;
 constexpr size_t kInitialTextBufferCapacity = 8 * 1024;
@@ -41,7 +40,8 @@ enum ControlId : int {
     IDC_WATCH,
     IDC_ATTACH,
     IDC_FORCE_BOOST,
-    IDC_COUNT_REFLEX_SLEEP
+    IDC_COUNT_REFLEX_SLEEP,
+    IDC_CLEAR_HISTORY
 };
 
 enum CaptureMode : uint32_t {
@@ -73,6 +73,7 @@ struct AppState {
 
     HWND gameLabel = nullptr;
     HWND gamePath = nullptr;
+    WNDPROC gamePathOriginalProc = nullptr;
     HWND browse = nullptr;
     HWND argumentsLabel = nullptr;
     HWND arguments = nullptr;
@@ -89,6 +90,7 @@ struct AppState {
     HWND captureModeLabel = nullptr;
     HWND captureState = nullptr;
     HWND captureRaw = nullptr;
+    HWND clearHistory = nullptr;
     HWND wordWrap = nullptr;
     HWND status = nullptr;
     WNDPROC statusOriginalProc = nullptr;
@@ -169,6 +171,7 @@ void ResetLiveStateTracking();
 bool EnsureRawDebugBuffer();
 void ResetRawDebugCapture();
 void FreeRawDebugBuffer();
+void ClearCaptureHistory();
 void SetCaptureButtons(CaptureMode mode);
 bool SetCaptureMode(CaptureMode mode);
 void ResetCurrentEffectiveState();

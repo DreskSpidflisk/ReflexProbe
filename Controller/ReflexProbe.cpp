@@ -15,6 +15,74 @@ constexpr wchar_t kWindowClass[] = L"ReflexProbeControlWindow";
 
 AppState g_app;
 
+constexpr int kBrowseWidth = 96;
+constexpr int kLaunchWidth = 108;
+constexpr int kWatchWidth = 116;
+constexpr int kAttachWidth = 92;
+constexpr int kAcquisitionGap = 8;
+constexpr int kPolicyGap = 10;
+constexpr int kPolicyToAcquisitionGap = 16;
+constexpr int kOverrideWidth = 172;
+constexpr int kOverrideFpsWidth = 70;
+constexpr int kFpsLabelWidth = 34;
+constexpr int kForceBoostWidth = 194;
+constexpr int kCountSleepWidth = 190;
+constexpr int kWordWrapWidth = 104;
+constexpr int kClearWidth = 58;
+constexpr int kRawWidth = 88;
+constexpr int kStateWidth = 108;
+constexpr int kCaptureLabelWidth = 92;
+constexpr int kCaptureGap = 8;
+
+constexpr int kFpsX = kMargin + kOverrideWidth;
+constexpr int kFpsLabelX = kFpsX + kOverrideFpsWidth + 8;
+constexpr int kForceBoostX = kFpsLabelX + kFpsLabelWidth + kPolicyGap;
+constexpr int kCountSleepX = kForceBoostX + kForceBoostWidth + kPolicyGap;
+constexpr int kPolicyRight = kCountSleepX + kCountSleepWidth;
+constexpr int kAcquisitionWidth =
+    kLaunchWidth + kAcquisitionGap + kWatchWidth + kAcquisitionGap + kAttachWidth;
+constexpr int kMinimumClientWidth =
+    kPolicyRight + kPolicyToAcquisitionGap + kAcquisitionWidth + kMargin;
+
+bool IsSelectedGameExecutableValid()
+{
+    if (!g_app.gamePath)
+        return false;
+
+    wchar_t gamePath[ReflexProbeProtocol::kPathChars]{};
+    GetWindowTextW(g_app.gamePath, gamePath, static_cast<int>(_countof(gamePath)));
+    if (!gamePath[0])
+        return false;
+
+    const DWORD attributes = GetFileAttributesW(gamePath);
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+           (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+int MinimumWindowTrackWidth(HWND window)
+{
+    RECT frame{ 0, 0, kMinimumClientWidth, 1 };
+    const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(window, GWL_STYLE));
+    const DWORD exStyle = static_cast<DWORD>(GetWindowLongPtrW(window, GWL_EXSTYLE));
+    if (AdjustWindowRectEx(&frame, style, FALSE, exStyle))
+        return frame.right - frame.left;
+    return kMinimumClientWidth;
+}
+
+LRESULT CALLBACK GamePathEditProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    if (message == WM_KEYDOWN && wParam == VK_RETURN) {
+        UpdateAcquisitionControls();
+        return 0;
+    }
+    if (message == WM_CHAR && wParam == VK_RETURN)
+        return 0;
+
+    if (g_app.gamePathOriginalProc)
+        return CallWindowProcW(g_app.gamePathOriginalProc, window, message, wParam, lParam);
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
 bool ParseOverrideFromUi(bool& enabled, uint32_t& frameLimitUs, wchar_t* error, size_t errorCount)
 {
     enabled = Button_GetCheck(g_app.overrideEnable) == BST_CHECKED;
@@ -92,13 +160,14 @@ void UpdateAcquisitionControls()
 {
     const bool targetActive = g_app.process != nullptr;
     const bool watching = g_app.watchArmed;
+    const bool validTarget = IsSelectedGameExecutableValid();
 
     if (g_app.launch)
-        EnableWindow(g_app.launch, !targetActive && !watching);
+        EnableWindow(g_app.launch, validTarget && !targetActive && !watching);
     if (g_app.attach)
-        EnableWindow(g_app.attach, !targetActive && !watching);
+        EnableWindow(g_app.attach, validTarget && !targetActive && !watching);
     if (g_app.watch) {
-        EnableWindow(g_app.watch, !targetActive);
+        EnableWindow(g_app.watch, watching || (validTarget && !targetActive));
         SetWindowTextW(g_app.watch, watching ? L"Cancel Watch" : L"Watch + Inject");
     }
 
@@ -120,6 +189,8 @@ void UpdateAcquisitionControls()
         EnableWindow(g_app.forceBoost, !watching);
     if (g_app.countReflexSleep)
         EnableWindow(g_app.countReflexSleep, !targetActive && !watching);
+    if (g_app.clearHistory)
+        EnableWindow(g_app.clearHistory, !targetActive && !watching);
 }
 
 void CleanupTarget()
@@ -398,8 +469,10 @@ void BrowseForGame()
     dialog.nMaxFile = static_cast<DWORD>(_countof(path));
     dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
 
-    if (GetOpenFileNameW(&dialog))
+    if (GetOpenFileNameW(&dialog)) {
         SetWindowTextW(g_app.gamePath, path);
+        UpdateAcquisitionControls();
+    }
 }
 
 void LayoutControls(int clientWidth, int clientHeight)
@@ -408,23 +481,13 @@ void LayoutControls(int clientWidth, int clientHeight)
         return;
 
     const int usableWidth = clientWidth - (kMargin * 2);
-    const int browseWidth = 96;
-    const int launchWidth = 108;
-    const int watchWidth = 116;
-    const int attachWidth = 92;
-    const int acquisitionGap = 8;
-    const int wrapWidth = 104;
-    const int rawWidth = 88;
-    const int stateWidth = 108;
-    const int captureLabelWidth = 92;
-    const int captureGap = 8;
 
     if (g_app.gameLabel)
         MoveWindow(g_app.gameLabel, kMargin, 12, 150, 20, TRUE);
     if (g_app.browse)
-        MoveWindow(g_app.browse, clientWidth - kMargin - browseWidth, 33, browseWidth, 26, TRUE);
+        MoveWindow(g_app.browse, clientWidth - kMargin - kBrowseWidth, 33, kBrowseWidth, 26, TRUE);
     if (g_app.gamePath) {
-        const int gameWidth = usableWidth - browseWidth - 10;
+        const int gameWidth = usableWidth - kBrowseWidth - 10;
         MoveWindow(g_app.gamePath, kMargin, 34, gameWidth > 50 ? gameWidth : 50, 24, TRUE);
     }
 
@@ -434,24 +497,24 @@ void LayoutControls(int clientWidth, int clientHeight)
         MoveWindow(g_app.arguments, kMargin, 90, usableWidth > 50 ? usableWidth : 50, 24, TRUE);
 
     if (g_app.overrideEnable)
-        MoveWindow(g_app.overrideEnable, kMargin, 128, 172, 22, TRUE);
+        MoveWindow(g_app.overrideEnable, kMargin, 128, kOverrideWidth, 22, TRUE);
     if (g_app.overrideFps)
-        MoveWindow(g_app.overrideFps, 184, 126, 70, 24, TRUE);
+        MoveWindow(g_app.overrideFps, kFpsX, 126, kOverrideFpsWidth, 24, TRUE);
     if (g_app.fpsLabel)
-        MoveWindow(g_app.fpsLabel, 262, 130, 34, 20, TRUE);
+        MoveWindow(g_app.fpsLabel, kFpsLabelX, 130, kFpsLabelWidth, 20, TRUE);
     if (g_app.forceBoost)
-        MoveWindow(g_app.forceBoost, 306, 128, 205, 22, TRUE);
+        MoveWindow(g_app.forceBoost, kForceBoostX, 128, kForceBoostWidth, 22, TRUE);
     if (g_app.countReflexSleep)
-        MoveWindow(g_app.countReflexSleep, 515, 128, 190, 22, TRUE);
-    const int attachX = clientWidth - kMargin - attachWidth;
-    const int watchX = attachX - acquisitionGap - watchWidth;
-    const int launchX = watchX - acquisitionGap - launchWidth;
+        MoveWindow(g_app.countReflexSleep, kCountSleepX, 128, kCountSleepWidth, 22, TRUE);
+    const int attachX = clientWidth - kMargin - kAttachWidth;
+    const int watchX = attachX - kAcquisitionGap - kWatchWidth;
+    const int launchX = watchX - kAcquisitionGap - kLaunchWidth;
     if (g_app.launch)
-        MoveWindow(g_app.launch, launchX, 124, launchWidth, 30, TRUE);
+        MoveWindow(g_app.launch, launchX, 124, kLaunchWidth, 30, TRUE);
     if (g_app.watch)
-        MoveWindow(g_app.watch, watchX, 124, watchWidth, 30, TRUE);
+        MoveWindow(g_app.watch, watchX, 124, kWatchWidth, 30, TRUE);
     if (g_app.attach)
-        MoveWindow(g_app.attach, attachX, 124, attachWidth, 30, TRUE);
+        MoveWindow(g_app.attach, attachX, 124, kAttachWidth, 30, TRUE);
 
     if (g_app.currentState)
         MoveWindow(g_app.currentState, kMargin, 164, usableWidth > 50 ? usableWidth : 50, 20, TRUE);
@@ -459,18 +522,21 @@ void LayoutControls(int clientWidth, int clientHeight)
     if (g_app.statusLabel)
         MoveWindow(g_app.statusLabel, kMargin, 190, 180, 20, TRUE);
 
-    const int wrapX = clientWidth - kMargin - wrapWidth;
-    const int rawX = wrapX - captureGap - rawWidth;
-    const int stateX = rawX - captureGap - stateWidth;
-    const int captureLabelX = stateX - captureGap - captureLabelWidth;
+    const int wrapX = clientWidth - kMargin - kWordWrapWidth;
+    const int clearX = wrapX - kCaptureGap - kClearWidth;
+    const int rawX = clearX - kCaptureGap - kRawWidth;
+    const int stateX = rawX - kCaptureGap - kStateWidth;
+    const int captureLabelX = stateX - kCaptureGap - kCaptureLabelWidth;
     if (g_app.captureModeLabel)
-        MoveWindow(g_app.captureModeLabel, captureLabelX, 190, captureLabelWidth, 20, TRUE);
+        MoveWindow(g_app.captureModeLabel, captureLabelX, 190, kCaptureLabelWidth, 20, TRUE);
     if (g_app.captureState)
-        MoveWindow(g_app.captureState, stateX, 188, stateWidth, 22, TRUE);
+        MoveWindow(g_app.captureState, stateX, 188, kStateWidth, 22, TRUE);
     if (g_app.captureRaw)
-        MoveWindow(g_app.captureRaw, rawX, 188, rawWidth, 22, TRUE);
+        MoveWindow(g_app.captureRaw, rawX, 188, kRawWidth, 22, TRUE);
+    if (g_app.clearHistory)
+        MoveWindow(g_app.clearHistory, clearX, 187, kClearWidth, 24, TRUE);
     if (g_app.wordWrap)
-        MoveWindow(g_app.wordWrap, wrapX, 188, wrapWidth, 22, TRUE);
+        MoveWindow(g_app.wordWrap, wrapX, 188, kWordWrapWidth, 22, TRUE);
 
     if (g_app.status) {
         int statusHeight = clientHeight - kStatusTop - kMargin;
@@ -495,6 +561,9 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
             0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_GAME_PATH), g_app.instance, nullptr);
         SetChildFont(g_app.gamePath, font);
+        g_app.gamePathOriginalProc = reinterpret_cast<WNDPROC>(
+            SetWindowLongPtrW(g_app.gamePath, GWLP_WNDPROC,
+                reinterpret_cast<LONG_PTR>(&GamePathEditProc)));
 
         g_app.browse = CreateWindowExW(0, L"BUTTON", L"Browse...",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
@@ -575,6 +644,11 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         SetChildFont(g_app.captureRaw, font);
         SetCaptureButtons(CaptureModeStateChanges);
 
+        g_app.clearHistory = CreateWindowExW(0, L"BUTTON", L"Clear",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_CLEAR_HISTORY), g_app.instance, nullptr);
+        SetChildFont(g_app.clearHistory, font);
+
         g_app.wordWrap = CreateWindowExW(0, L"BUTTON", L"Word wrap",
             WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTOCHECKBOX,
             0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_WORD_WRAP), g_app.instance, nullptr);
@@ -587,6 +661,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         RECT client{};
         GetClientRect(window, &client);
         LayoutControls(client.right - client.left, client.bottom - client.top);
+        UpdateAcquisitionControls();
 
         AppendStatusLine(L"ReflexProbe bootstrap: Launch, Watch or Attach Reflex observer/override.");
         AppendStatusLine(L"Frame-limit override is OFF by default. When checked, the FPS value replaces frameLimitUs on intercepted Reflex settings calls.");
@@ -604,7 +679,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 
     case WM_GETMINMAXINFO: {
         auto* info = reinterpret_cast<MINMAXINFO*>(lParam);
-        info->ptMinTrackSize.x = kMinimumWindowWidth;
+        info->ptMinTrackSize.x = MinimumWindowTrackWidth(window);
         info->ptMinTrackSize.y = kMinimumWindowHeight;
         return 0;
     }
@@ -613,6 +688,10 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         switch (LOWORD(wParam)) {
         case IDC_BROWSE:
             BrowseForGame();
+            return 0;
+        case IDC_GAME_PATH:
+            if (HIWORD(wParam) == EN_KILLFOCUS)
+                UpdateAcquisitionControls();
             return 0;
         case IDC_OVERRIDE_ENABLE:
             if (HIWORD(wParam) == BN_CLICKED) {
@@ -649,6 +728,10 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             if (HIWORD(wParam) == BN_CLICKED && Button_GetCheck(g_app.captureRaw) == BST_CHECKED)
                 SetCaptureMode(CaptureModeRawDebug);
             return 0;
+        case IDC_CLEAR_HISTORY:
+            if (HIWORD(wParam) == BN_CLICKED)
+                ClearCaptureHistory();
+            return 0;
         case IDC_WORD_WRAP:
             if (HIWORD(wParam) == BN_CLICKED) {
                 const bool wordWrap = Button_GetCheck(g_app.wordWrap) == BST_CHECKED;
@@ -676,6 +759,11 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     case WM_DESTROY:
         KillTimer(window, kPollTimer);
         KillTimer(window, kWatchTimer);
+        if (g_app.gamePath && g_app.gamePathOriginalProc) {
+            SetWindowLongPtrW(g_app.gamePath, GWLP_WNDPROC,
+                reinterpret_cast<LONG_PTR>(g_app.gamePathOriginalProc));
+            g_app.gamePathOriginalProc = nullptr;
+        }
         CleanupTarget();
         FreeRawDebugBuffer();
         PostQuitMessage(0);
