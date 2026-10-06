@@ -16,6 +16,8 @@
 namespace ReflexProbeController {
 
 constexpr UINT_PTR kPollTimer = 1;
+constexpr UINT_PTR kWatchTimer = 2;
+constexpr UINT kWatchPollIntervalMs = 10;
 constexpr int kMargin = 12;
 constexpr int kStatusTop = 186;
 constexpr int kMinimumWindowWidth = 700;
@@ -35,7 +37,9 @@ enum ControlId : int {
     IDC_STATUS,
     IDC_WORD_WRAP,
     IDC_CAPTURE_STATE,
-    IDC_CAPTURE_RAW
+    IDC_CAPTURE_RAW,
+    IDC_WATCH,
+    IDC_ATTACH
 };
 
 enum CaptureMode : uint32_t {
@@ -72,6 +76,8 @@ struct AppState {
     HWND overrideFps = nullptr;
     HWND fpsLabel = nullptr;
     HWND launch = nullptr;
+    HWND watch = nullptr;
+    HWND attach = nullptr;
     HWND statusLabel = nullptr;
     HWND captureModeLabel = nullptr;
     HWND captureState = nullptr;
@@ -90,6 +96,12 @@ struct AppState {
     bool loggedInjectedBuild = false;
     bool rawUiBatchWarningShown = false;
 
+    bool watchArmed = false;
+    wchar_t watchTargetPath[ReflexProbeProtocol::kPathChars]{};
+    bool watchOverrideEnabled = false;
+    uint32_t watchOverrideUs = 0;
+    LONGLONG watchStartQpc = 0;
+
     CaptureMode captureMode = CaptureModeStateChanges;
     CapturedReflexEvent* rawDebugEvents = nullptr;
     size_t rawDebugCount = 0;
@@ -107,6 +119,7 @@ extern AppState g_app;
 
 void LayoutControls(int clientWidth, int clientHeight);
 void CleanupTarget();
+void UpdateAcquisitionControls();
 
 void SetChildFont(HWND child, HFONT font);
 void AppendStatus(const wchar_t* text);
@@ -127,6 +140,12 @@ bool InjectDll(HANDLE process, DWORD processId, const wchar_t* dllPath, wchar_t*
 bool CreateSharedState(DWORD processId, const wchar_t* targetPath,
                        bool overrideEnabled, uint32_t overrideUs,
                        wchar_t* error, size_t errorCount);
+bool ArmProcessWatch(const wchar_t* targetPath, bool overrideEnabled, uint32_t overrideUs,
+                     wchar_t* error, size_t errorCount);
+void CancelProcessWatch(bool logCancellation);
+void PollProcessWatch();
+bool AttachRunningProcess(const wchar_t* targetPath, bool overrideEnabled, uint32_t overrideUs,
+                          wchar_t* error, size_t errorCount);
 
 void ResetLiveStateTracking();
 bool EnsureRawDebugBuffer();

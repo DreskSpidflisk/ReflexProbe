@@ -2,7 +2,7 @@
 
 ReflexProbe is a deliberately small Win32 tool for observing and overriding the frame-limit value applications send to NVIDIA Reflex.
 
-The current build focuses on **Streamline Reflex** and **directly launched x64 games**. It does not render an overlay, modify shaders, replace Streamline DLLs, write capture data to disk, or know anything about Steam/GOG/Ubisoft launchers yet.
+The current build focuses on **Streamline Reflex** and x64 games acquired by direct launch, launcher-compatible process watch, or runtime attach. It does not render an overlay, modify shaders, replace Streamline DLLs, or write capture data to disk.
 
 ## Why this exists
 
@@ -118,10 +118,17 @@ The shared transport between the injected DLL and controller remains a fixed 409
 
 ```text
 ReflexProbe.sln
-    ReflexProbe      - Win32 controller / direct-launch injector
+    ReflexProbe      - Win32 controller / launcher watcher / injector
     ReflexProbe64    - x64 injected DLL / Streamline Reflex interception
 
-Common/Protocol.h    - tiny shared-memory protocol
+Controller/
+    ReflexProbe.cpp      - Win32 UI and acquisition orchestration
+    Process.cpp          - process discovery, exact-path matching and injection
+    Capture.cpp          - shared transport and capture modes
+    Status.cpp           - bounded text/status presentation helpers
+    ControllerInternal.h - small controller-internal contract
+
+Common/Protocol.h        - tiny shared-memory protocol
 ```
 
 Both projects write to:
@@ -176,12 +183,17 @@ The old `ReflexConstants` ABI is defined locally with compile-time layout checks
 ## Current workflow
 
 1. Start `ReflexProbe.exe`.
-2. Browse to a directly launchable x64 game executable.
+2. Browse to the exact x64 game executable you want to target.
 3. Choose a capture mode. **State changes** is the default for normal gameplay; **Raw debug** is for short diagnostic captures.
 4. Leave **Override Reflex frame limit** unchecked for observation, or check it and enter the desired FPS value.
-5. Choose **Launch + Inject**.
-6. ReflexProbe creates the game suspended, injects `ReflexProbe64.dll`, and resumes it.
+5. Choose one acquisition method:
+   - **Launch + Inject** creates the selected executable suspended, injects `ReflexProbe64.dll`, then resumes it.
+   - **Watch + Inject** arms a temporary 10 ms process scan, then you launch the game normally through Steam, GOG Galaxy, Ubisoft Connect, Epic, or another launcher. ReflexProbe first filters by executable name, then requires a case-insensitive exact full-path match before opening or injecting the process. The watch stops completely after a match or cancellation.
+   - **Attach** performs the same exact-path match once against an already-running process and injects immediately when found.
+6. Watch/Attach logs the detected PID, parent PID, full executable path, process-open timing and DLL-injection timing. Command-line capture is intentionally not part of this first implementation.
 7. The injected DLL discovers a supported Streamline Reflex boundary and reports requested/effective state to the controller.
+
+**Watch is the preferred launcher mode for titles that submit Reflex state only at startup.** Runtime Attach can still be useful for engines that resubmit settings, but attaching after initialization can miss a setter that the game called once and cached before ReflexProbe arrived.
 
 For a positive FPS override, the controller converts FPS to microseconds using:
 
@@ -207,17 +219,17 @@ Entering `0` while override is enabled forces literal `frameLimitUs=0`. Changing
 - **No Man's Sky:** Vulkan + Streamline, DLSS Frame Generation and an independent Reflex control. Planned Vulkan comparison target.
 - **Indiana Jones and the Great Circle:** Vulkan + Frame Generation, no exposed Reflex control. Useful future target for discovering whether its menu limiter drives Reflex `frameLimitUs` or a separate engine limiter.
 - **God of War (2018):** unusual D3D11 + Reflex target; native NVAPI backend remains future work.
-- **Pragmata and other launcher titles:** practical target once runtime Watch/Attach acquisition is added.
+- **Pragmata and other launcher titles:** practical Watch + Inject targets. Blood of the Dawnwalker under GOG Galaxy is an immediate launcher-owned test case because its Reflex state is only submitted at startup/policy changes.
 
 ## Deliberate limitations
 
-- direct launch only
 - x64 only
 - Streamline interception only
 - no disk capture or export path
 - Raw debug retains only the latest 131,072 raw calls
 - the visible log is a standard Win32 EDIT control with a 16 MiB text limit
-- no runtime Watch/Attach yet
+- Watch currently uses low-overhead Toolhelp process polling rather than a kernel/ETW process-start notification path
+- Attach cannot recover Reflex setter calls that occurred before injection
 - no native NVAPI hook yet
 - no native Vulkan hook yet
 - no anti-cheat support
@@ -226,11 +238,11 @@ Do not use ReflexProbe with anti-cheat/protected multiplayer titles. The intende
 
 ## Planned next steps
 
-1. Add launcher-compatible **Watch + Inject** acquisition using exact executable-path matching where possible, verbose PID/path/timing diagnostics, and the same existing Reflex interception backends.
-2. Build a tiny synthetic one-shot Reflex target/launcher to measure how quickly Watch must acquire and inject before a startup-only `slReflexSetOptions` call.
+1. Exercise **Watch + Inject** against GOG Galaxy / Blood of the Dawnwalker, then Steam and other launcher-owned games.
+2. Build a tiny synthetic one-shot Reflex target/launcher to measure how quickly the 10 ms watcher acquires and injects before a startup-only `slReflexSetOptions` call.
 3. If ordinary low-overhead process polling actually loses that race, evaluate a lower-latency Windows process-start notification path rather than guessing in advance.
-4. Exercise Watch against Steam/GOG launcher titles such as Dawnwalker and eventually Pragmata.
-5. Expand Vulkan coverage and later add native `VK_NV_low_latency2` interception when required.
-6. Add native NVAPI D3D Reflex interception for titles such as God of War.
+4. Expand Vulkan coverage and later add native `VK_NV_low_latency2` interception when required.
+5. Add native NVAPI D3D Reflex interception for titles such as God of War.
+6. After launcher acquisition is proven, extend the same modern Streamline resolver interception to observe DLSS Frame Generation policy such as `slDLSSGSetOptions`.
 
-The architecture remains intentionally boring: a Win32 controller outside the game, one injected DLL inside it, fixed RAM transport, bounded capture policy, and one Reflex frame-limit field under the microscope.
+The architecture remains intentionally boring: a Win32 controller outside the game, one injected DLL inside it, Launch/Watch/Attach as interchangeable acquisition paths, fixed RAM transport, bounded capture policy, and one Reflex frame-limit field under the microscope.

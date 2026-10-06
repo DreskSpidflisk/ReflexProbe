@@ -76,8 +76,38 @@ void ApplyOverrideToShared()
     AppendStatusLine(line);
 }
 
+void UpdateAcquisitionControls()
+{
+    const bool targetActive = g_app.process != nullptr;
+    const bool watching = g_app.watchArmed;
+
+    if (g_app.launch)
+        EnableWindow(g_app.launch, !targetActive && !watching);
+    if (g_app.attach)
+        EnableWindow(g_app.attach, !targetActive && !watching);
+    if (g_app.watch) {
+        EnableWindow(g_app.watch, !targetActive);
+        SetWindowTextW(g_app.watch, watching ? L"Cancel Watch" : L"Watch + Inject");
+    }
+
+    if (g_app.gamePath)
+        EnableWindow(g_app.gamePath, !watching);
+    if (g_app.browse)
+        EnableWindow(g_app.browse, !watching);
+    if (g_app.arguments)
+        EnableWindow(g_app.arguments, !watching);
+
+    if (g_app.overrideEnable)
+        EnableWindow(g_app.overrideEnable, !watching);
+    if (g_app.overrideFps)
+        EnableWindow(g_app.overrideFps, !watching);
+}
+
 void CleanupTarget()
 {
+    if (g_app.watchArmed)
+        CancelProcessWatch(false);
+
     if (g_app.shared) {
         UnmapViewOfFile(g_app.shared);
         g_app.shared = nullptr;
@@ -97,13 +127,12 @@ void CleanupTarget()
     g_app.loggedInjectedBuild = false;
     g_app.rawUiBatchWarningShown = false;
     ResetLiveStateTracking();
-    if (g_app.launch)
-        EnableWindow(g_app.launch, TRUE);
+    UpdateAcquisitionControls();
 }
 
 bool LaunchAndInject()
 {
-    if (g_app.process)
+    if (g_app.process || g_app.watchArmed)
         return false;
 
     wchar_t gamePath[ReflexProbeProtocol::kPathChars]{};
@@ -218,7 +247,7 @@ bool LaunchAndInject()
     g_app.lastEventSerial = 0;
     g_app.loggedInjectedBuild = false;
     g_app.rawUiBatchWarningShown = false;
-    EnableWindow(g_app.launch, FALSE);
+    UpdateAcquisitionControls();
 
     wchar_t line[512]{};
     swprintf_s(line, L"Launched %s (PID %lu) and injected ReflexProbe64.dll.", PathFileName(gamePath), process.dwProcessId);
@@ -237,6 +266,78 @@ bool LaunchAndInject()
         AppendStatusLine(L"Capture mode: Raw debug; bounded raw retention starts with this target.");
     else
         AppendStatusLine(L"Capture mode: State changes; identical Reflex calls are counted but not retained individually.");
+
+    return true;
+}
+
+bool ReadTargetAndOverrideForExternalAcquisition(
+    wchar_t* gamePath, size_t gamePathCount,
+    bool& overrideEnabled, uint32_t& overrideUs,
+    wchar_t* error, size_t errorCount)
+{
+    if (!gamePath || !gamePathCount)
+        return false;
+
+    GetWindowTextW(g_app.gamePath, gamePath, static_cast<int>(gamePathCount));
+    if (!gamePath[0]) {
+        swprintf_s(error, errorCount, L"Choose a game executable first.");
+        return false;
+    }
+
+    const DWORD attributes = GetFileAttributesW(gamePath);
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        swprintf_s(error, errorCount, L"The selected game executable does not exist.");
+        return false;
+    }
+
+    return ParseOverrideFromUi(overrideEnabled, overrideUs, error, errorCount);
+}
+
+bool ToggleWatchAndInject()
+{
+    if (g_app.watchArmed) {
+        CancelProcessWatch(true);
+        return true;
+    }
+
+    wchar_t gamePath[ReflexProbeProtocol::kPathChars]{};
+    bool overrideEnabled = false;
+    uint32_t overrideUs = 0;
+    wchar_t error[512]{};
+
+    if (!ReadTargetAndOverrideForExternalAcquisition(
+            gamePath, _countof(gamePath), overrideEnabled, overrideUs,
+            error, _countof(error))) {
+        MessageBoxW(g_app.window, error, L"ReflexProbe", MB_ICONWARNING);
+        return false;
+    }
+
+    if (!ArmProcessWatch(gamePath, overrideEnabled, overrideUs, error, _countof(error))) {
+        MessageBoxW(g_app.window, error, L"ReflexProbe Watch + Inject", MB_ICONERROR);
+        return false;
+    }
+
+    return true;
+}
+
+bool AttachToRunningTarget()
+{
+    wchar_t gamePath[ReflexProbeProtocol::kPathChars]{};
+    bool overrideEnabled = false;
+    uint32_t overrideUs = 0;
+    wchar_t error[512]{};
+
+    if (!ReadTargetAndOverrideForExternalAcquisition(
+            gamePath, _countof(gamePath), overrideEnabled, overrideUs,
+            error, _countof(error))) {
+        MessageBoxW(g_app.window, error, L"ReflexProbe", MB_ICONWARNING);
+        return false;
+    }
+
+    if (!AttachRunningProcess(gamePath, overrideEnabled, overrideUs, error, _countof(error))) {
+        MessageBoxW(g_app.window, error, L"ReflexProbe Attach", MB_ICONERROR);
+        return false;
+    }
 
     return true;
 }
@@ -265,7 +366,10 @@ void LayoutControls(int clientWidth, int clientHeight)
 
     const int usableWidth = clientWidth - (kMargin * 2);
     const int browseWidth = 96;
-    const int launchWidth = 144;
+    const int launchWidth = 108;
+    const int watchWidth = 116;
+    const int attachWidth = 92;
+    const int acquisitionGap = 8;
     const int wrapWidth = 104;
     const int rawWidth = 88;
     const int stateWidth = 108;
@@ -292,8 +396,15 @@ void LayoutControls(int clientWidth, int clientHeight)
         MoveWindow(g_app.overrideFps, 210, 126, 80, 24, TRUE);
     if (g_app.fpsLabel)
         MoveWindow(g_app.fpsLabel, 298, 130, 40, 20, TRUE);
+    const int attachX = clientWidth - kMargin - attachWidth;
+    const int watchX = attachX - acquisitionGap - watchWidth;
+    const int launchX = watchX - acquisitionGap - launchWidth;
     if (g_app.launch)
-        MoveWindow(g_app.launch, clientWidth - kMargin - launchWidth, 124, launchWidth, 30, TRUE);
+        MoveWindow(g_app.launch, launchX, 124, launchWidth, 30, TRUE);
+    if (g_app.watch)
+        MoveWindow(g_app.watch, watchX, 124, watchWidth, 30, TRUE);
+    if (g_app.attach)
+        MoveWindow(g_app.attach, attachX, 124, attachWidth, 30, TRUE);
 
     if (g_app.statusLabel)
         MoveWindow(g_app.statusLabel, kMargin, 164, 180, 20, TRUE);
@@ -368,6 +479,16 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_LAUNCH), g_app.instance, nullptr);
         SetChildFont(g_app.launch, font);
 
+        g_app.watch = CreateWindowExW(0, L"BUTTON", L"Watch + Inject",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_WATCH), g_app.instance, nullptr);
+        SetChildFont(g_app.watch, font);
+
+        g_app.attach = CreateWindowExW(0, L"BUTTON", L"Attach",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_ATTACH), g_app.instance, nullptr);
+        SetChildFont(g_app.attach, font);
+
         g_app.statusLabel = CreateWindowExW(0, L"STATIC", L"Status / Reflex requests",
             WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
         SetChildFont(g_app.statusLabel, font);
@@ -399,7 +520,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         GetClientRect(window, &client);
         LayoutControls(client.right - client.left, client.bottom - client.top);
 
-        AppendStatusLine(L"ReflexProbe bootstrap: direct-launch Streamline observer/override.");
+        AppendStatusLine(L"ReflexProbe bootstrap: Launch, Watch or Attach Streamline observer/override.");
         AppendStatusLine(L"Override is OFF by default. When checked, the FPS value replaces frameLimitUs on intercepted Reflex settings calls.");
         AppendStatusLine(L"Capture mode defaults to State changes. Raw debug retains at most 131072 calls in RAM. ReflexProbe never writes capture data to disk.");
         LogBinaryIdentity();
@@ -436,6 +557,12 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         case IDC_LAUNCH:
             LaunchAndInject();
             return 0;
+        case IDC_WATCH:
+            ToggleWatchAndInject();
+            return 0;
+        case IDC_ATTACH:
+            AttachToRunningTarget();
+            return 0;
         case IDC_CAPTURE_STATE:
             if (HIWORD(wParam) == BN_CLICKED && Button_GetCheck(g_app.captureState) == BST_CHECKED)
                 SetCaptureMode(CaptureModeStateChanges);
@@ -458,6 +585,10 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             PollSharedState();
             return 0;
         }
+        if (wParam == kWatchTimer) {
+            PollProcessWatch();
+            return 0;
+        }
         break;
 
     case WM_CLOSE:
@@ -466,6 +597,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 
     case WM_DESTROY:
         KillTimer(window, kPollTimer);
+        KillTimer(window, kWatchTimer);
         CleanupTarget();
         FreeRawDebugBuffer();
         PostQuitMessage(0);

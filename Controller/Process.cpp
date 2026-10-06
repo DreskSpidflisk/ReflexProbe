@@ -338,6 +338,385 @@ bool CreateSharedState(DWORD processId, const wchar_t* targetPath,
     return true;
 }
 
+
+struct ProcessMatch {
+    DWORD processId = 0;
+    DWORD parentProcessId = 0;
+    wchar_t imagePath[ReflexProbeProtocol::kPathChars]{};
+};
+
+double QpcMilliseconds(LONGLONG start, LONGLONG end)
+{
+    if (start <= 0 || end < start)
+        return 0.0;
+
+    LARGE_INTEGER frequency{};
+    if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0)
+        return 0.0;
+
+    return (static_cast<double>(end - start) * 1000.0) /
+        static_cast<double>(frequency.QuadPart);
+}
+
+bool NormalizeTargetPath(const wchar_t* path, wchar_t* out, size_t outCount)
+{
+    if (!path || !*path || !out || !outCount)
+        return false;
+
+    const DWORD chars = GetFullPathNameW(path, static_cast<DWORD>(outCount), out, nullptr);
+    return chars > 0 && chars < outCount;
+}
+
+bool QueryProcessImagePath(DWORD processId, wchar_t* out, size_t outCount)
+{
+    if (!out || !outCount)
+        return false;
+
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+    if (!process)
+        return false;
+
+    DWORD chars = static_cast<DWORD>(outCount);
+    const BOOL ok = QueryFullProcessImageNameW(process, 0, out, &chars);
+    CloseHandle(process);
+
+    if (!ok || !chars || chars >= outCount) {
+        out[0] = 0;
+        return false;
+    }
+
+    return true;
+}
+
+bool FindMatchingProcess(const wchar_t* targetPath, ProcessMatch& match)
+{
+    match = {};
+
+    const wchar_t* targetName = PathFileName(targetPath);
+    if (!targetName || !*targetName)
+        return false;
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return false;
+
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+
+    bool found = false;
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            if (_wcsicmp(entry.szExeFile, targetName) != 0)
+                continue;
+
+            wchar_t imagePath[ReflexProbeProtocol::kPathChars]{};
+            if (!QueryProcessImagePath(entry.th32ProcessID, imagePath, _countof(imagePath)))
+                continue;
+
+            if (_wcsicmp(imagePath, targetPath) != 0)
+                continue;
+
+            match.processId = entry.th32ProcessID;
+            match.parentProcessId = entry.th32ParentProcessID;
+            wcscpy_s(match.imagePath, imagePath);
+            found = true;
+            break;
+        } while (Process32NextW(snapshot, &entry));
+    }
+
+    CloseHandle(snapshot);
+    return found;
+}
+
+void LogInitialTargetPolicy(bool overrideEnabled, uint32_t overrideUs)
+{
+    wchar_t line[256]{};
+    if (overrideEnabled && overrideUs) {
+        swprintf_s(line, L"Initial override: %u us (%.3f FPS).", overrideUs,
+            1000000.0 / static_cast<double>(overrideUs));
+        AppendStatusLine(line);
+    } else if (overrideEnabled) {
+        AppendStatusLine(L"Initial override: 0 us (no explicit Reflex frame limit).");
+    } else {
+        AppendStatusLine(L"Initial mode: observe only; game Reflex options pass through unchanged.");
+    }
+
+    if (g_app.captureMode == CaptureModeRawDebug)
+        AppendStatusLine(L"Capture mode: Raw debug; bounded raw retention starts with this target.");
+    else
+        AppendStatusLine(L"Capture mode: State changes; identical Reflex calls are counted but not retained individually.");
+}
+
+bool PrepareCaptureForExternalTarget(wchar_t* error, size_t errorCount)
+{
+    if (g_app.captureMode == CaptureModeRawDebug) {
+        if (!EnsureRawDebugBuffer()) {
+            swprintf_s(error, errorCount, L"Could not allocate the bounded Raw debug capture buffer.");
+            return false;
+        }
+        ResetRawDebugCapture();
+    }
+
+    ResetLiveStateTracking();
+    return true;
+}
+
+bool InjectMatchedProcess(const ProcessMatch& match,
+                          bool overrideEnabled, uint32_t overrideUs,
+                          LONGLONG detectedQpc, LONGLONG watchStartQpc,
+                          const wchar_t* acquisitionName,
+                          wchar_t* error, size_t errorCount)
+{
+    wchar_t line[2300]{};
+
+    if (watchStartQpc > 0) {
+        swprintf_s(line,
+            L"Process detected:\r\nPID: %lu\r\nParent PID: %lu\r\nImage: %s\r\nWatch elapsed: %.3f ms",
+            match.processId, match.parentProcessId, match.imagePath,
+            QpcMilliseconds(watchStartQpc, detectedQpc));
+    } else {
+        swprintf_s(line,
+            L"Process detected:\r\nPID: %lu\r\nParent PID: %lu\r\nImage: %s\r\nAcquisition: %s",
+            match.processId, match.parentProcessId, match.imagePath,
+            acquisitionName ? acquisitionName : L"Attach");
+    }
+    AppendStatusLineAtQpc(line, detectedQpc);
+
+    const DWORD access =
+        PROCESS_CREATE_THREAD |
+        PROCESS_QUERY_INFORMATION |
+        PROCESS_VM_OPERATION |
+        PROCESS_VM_WRITE |
+        PROCESS_VM_READ |
+        SYNCHRONIZE;
+
+    HANDLE target = OpenProcess(access, FALSE, match.processId);
+    LARGE_INTEGER openedQpc{};
+    QueryPerformanceCounter(&openedQpc);
+
+    if (!target) {
+        swprintf_s(error, errorCount, L"OpenProcess failed for PID %lu (%lu).",
+            match.processId, GetLastError());
+        return false;
+    }
+
+    swprintf_s(line,
+        L"Process opened:\r\nPID: %lu\r\nImage: %s\r\n+%.3f ms after detection",
+        match.processId, match.imagePath,
+        QpcMilliseconds(detectedQpc, openedQpc.QuadPart));
+    AppendStatusLineAtQpc(line, openedQpc.QuadPart);
+
+    BOOL targetIsWow64 = FALSE;
+    if (IsWow64Process(target, &targetIsWow64) && targetIsWow64) {
+        CloseHandle(target);
+        swprintf_s(error, errorCount, L"ReflexProbe supports x64 targets only.");
+        return false;
+    }
+
+    if (FindRemoteModuleBase(match.processId, L"ReflexProbe64.dll")) {
+        CloseHandle(target);
+        swprintf_s(error, errorCount,
+            L"ReflexProbe64.dll is already loaded in PID %lu. Refusing to inject a second controller instance.",
+            match.processId);
+        return false;
+    }
+
+    if (!PrepareCaptureForExternalTarget(error, errorCount)) {
+        CloseHandle(target);
+        return false;
+    }
+
+    g_app.process = target;
+    g_app.processId = match.processId;
+
+    if (!CreateSharedState(match.processId, match.imagePath,
+            overrideEnabled, overrideUs, error, errorCount)) {
+        CleanupTarget();
+        return false;
+    }
+
+    wchar_t dllPath[MAX_PATH]{};
+    if (!GetSiblingDllPath(dllPath, _countof(dllPath)) ||
+        GetFileAttributesW(dllPath) == INVALID_FILE_ATTRIBUTES) {
+        swprintf_s(error, errorCount,
+            L"ReflexProbe64.dll was not found beside ReflexProbe.exe. Build both projects in the solution.");
+        CleanupTarget();
+        return false;
+    }
+
+    LARGE_INTEGER injectStartQpc{};
+    QueryPerformanceCounter(&injectStartQpc);
+
+    if (!InjectDll(target, match.processId, dllPath, error, errorCount)) {
+        CleanupTarget();
+        return false;
+    }
+
+    LARGE_INTEGER injectedQpc{};
+    QueryPerformanceCounter(&injectedQpc);
+
+    g_app.lastHookState = -1;
+    g_app.lastEventSerial = 0;
+    g_app.loggedInjectedBuild = false;
+    g_app.rawUiBatchWarningShown = false;
+    UpdateAcquisitionControls();
+
+    swprintf_s(line,
+        L"DLL injection complete:\r\nPID: %lu\r\nImage: %s\r\nInjection call: %.3f ms\r\n+%.3f ms after process open",
+        match.processId, match.imagePath,
+        QpcMilliseconds(injectStartQpc.QuadPart, injectedQpc.QuadPart),
+        QpcMilliseconds(openedQpc.QuadPart, injectedQpc.QuadPart));
+    AppendStatusLineAtQpc(line, injectedQpc.QuadPart);
+
+    LogInitialTargetPolicy(overrideEnabled, overrideUs);
+    return true;
+}
+
+bool ArmProcessWatch(const wchar_t* targetPath, bool overrideEnabled, uint32_t overrideUs,
+                     wchar_t* error, size_t errorCount)
+{
+    if (g_app.process) {
+        swprintf_s(error, errorCount, L"A target is already active.");
+        return false;
+    }
+    if (g_app.watchArmed) {
+        swprintf_s(error, errorCount, L"Process watch is already armed.");
+        return false;
+    }
+
+    wchar_t normalized[ReflexProbeProtocol::kPathChars]{};
+    if (!NormalizeTargetPath(targetPath, normalized, _countof(normalized))) {
+        swprintf_s(error, errorCount, L"Could not normalize the selected game executable path.");
+        return false;
+    }
+
+    const DWORD attributes = GetFileAttributesW(normalized);
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        swprintf_s(error, errorCount, L"The selected game executable does not exist.");
+        return false;
+    }
+
+    wchar_t dllPath[MAX_PATH]{};
+    if (!GetSiblingDllPath(dllPath, _countof(dllPath)) ||
+        GetFileAttributesW(dllPath) == INVALID_FILE_ATTRIBUTES) {
+        swprintf_s(error, errorCount,
+            L"ReflexProbe64.dll was not found beside ReflexProbe.exe. Build both projects in the solution.");
+        return false;
+    }
+
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+
+    wcscpy_s(g_app.watchTargetPath, normalized);
+    g_app.watchOverrideEnabled = overrideEnabled;
+    g_app.watchOverrideUs = overrideUs;
+    g_app.watchStartQpc = now.QuadPart;
+    g_app.watchArmed = true;
+
+    if (!SetTimer(g_app.window, kWatchTimer, kWatchPollIntervalMs, nullptr)) {
+        g_app.watchArmed = false;
+        g_app.watchTargetPath[0] = 0;
+        g_app.watchStartQpc = 0;
+        swprintf_s(error, errorCount, L"Could not start the process watch timer.");
+        return false;
+    }
+
+    UpdateAcquisitionControls();
+
+    wchar_t line[1400]{};
+    swprintf_s(line,
+        L"Watch armed:\r\nTarget: %s\r\nPolling: %u ms while armed; exact full-path match required.",
+        g_app.watchTargetPath, static_cast<unsigned int>(kWatchPollIntervalMs));
+    AppendStatusLineAtQpc(line, now.QuadPart);
+    return true;
+}
+
+void CancelProcessWatch(bool logCancellation)
+{
+    if (!g_app.watchArmed)
+        return;
+
+    KillTimer(g_app.window, kWatchTimer);
+    g_app.watchArmed = false;
+    g_app.watchTargetPath[0] = 0;
+    g_app.watchOverrideEnabled = false;
+    g_app.watchOverrideUs = 0;
+    g_app.watchStartQpc = 0;
+    UpdateAcquisitionControls();
+
+    if (logCancellation)
+        AppendStatusLine(L"Process watch cancelled.");
+}
+
+void PollProcessWatch()
+{
+    if (!g_app.watchArmed || g_app.process)
+        return;
+
+    ProcessMatch match{};
+    if (!FindMatchingProcess(g_app.watchTargetPath, match))
+        return;
+
+    LARGE_INTEGER detectedQpc{};
+    QueryPerformanceCounter(&detectedQpc);
+
+    const bool overrideEnabled = g_app.watchOverrideEnabled;
+    const uint32_t overrideUs = g_app.watchOverrideUs;
+    const LONGLONG watchStartQpc = g_app.watchStartQpc;
+
+    KillTimer(g_app.window, kWatchTimer);
+    g_app.watchArmed = false;
+    UpdateAcquisitionControls();
+
+    wchar_t error[512]{};
+    if (!InjectMatchedProcess(match, overrideEnabled, overrideUs,
+            detectedQpc.QuadPart, watchStartQpc, L"Watch",
+            error, _countof(error))) {
+        wchar_t line[768]{};
+        swprintf_s(line, L"Watch injection failed: %s", error);
+        AppendStatusLineAtQpc(line, detectedQpc.QuadPart);
+        MessageBoxW(g_app.window, error, L"ReflexProbe Watch + Inject", MB_ICONERROR);
+        UpdateAcquisitionControls();
+    }
+
+    g_app.watchTargetPath[0] = 0;
+    g_app.watchOverrideEnabled = false;
+    g_app.watchOverrideUs = 0;
+    g_app.watchStartQpc = 0;
+}
+
+bool AttachRunningProcess(const wchar_t* targetPath, bool overrideEnabled, uint32_t overrideUs,
+                          wchar_t* error, size_t errorCount)
+{
+    if (g_app.process) {
+        swprintf_s(error, errorCount, L"A target is already active.");
+        return false;
+    }
+    if (g_app.watchArmed) {
+        swprintf_s(error, errorCount, L"Cancel the active process watch before attaching.");
+        return false;
+    }
+
+    wchar_t normalized[ReflexProbeProtocol::kPathChars]{};
+    if (!NormalizeTargetPath(targetPath, normalized, _countof(normalized))) {
+        swprintf_s(error, errorCount, L"Could not normalize the selected game executable path.");
+        return false;
+    }
+
+    ProcessMatch match{};
+    if (!FindMatchingProcess(normalized, match)) {
+        swprintf_s(error, errorCount,
+            L"No running process matches the selected executable path exactly.");
+        return false;
+    }
+
+    LARGE_INTEGER detectedQpc{};
+    QueryPerformanceCounter(&detectedQpc);
+
+    return InjectMatchedProcess(match, overrideEnabled, overrideUs,
+        detectedQpc.QuadPart, 0, L"Attach", error, errorCount);
+}
+
 } // namespace ReflexProbeController
 
 #undef RP_WIDEN
