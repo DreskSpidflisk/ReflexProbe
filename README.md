@@ -25,9 +25,9 @@ When override mode is enabled, ReflexProbe preserves the game's Reflex mode and 
 
 ## What we have established so far
 
-### The application is generally passing zero
+### Most tested applications pass zero; Satisfactory is a notable exception
 
-The below-refresh D3D behavior is **not being produced by the game calculating its own cap** in the samples tested so far.
+In most tested titles, the familiar below-refresh D3D behavior is **not being produced by the game calculating its own cap**. Satisfactory is the first captured commercial title in this test set that deliberately supplies a meaningful nonzero Reflex frame interval of its own.
 
 Evidence includes:
 
@@ -42,6 +42,7 @@ Evidence includes:
 - **God of War (2018) / native NVAPI D3D11:** the game submits Reflex state only when its menu option changes, supports Off / On / On + Boost, and normally requests a zero minimum interval. ReflexProbe's native `minimumIntervalUs` override worked, including while low-latency mode itself was Off.
 - **DOOM: The Dark Ages / modern Streamline 2.11.1 + Vulkan:** `r_streamlineReflexMinFrameTimeUs` maps literally to `frameLimitUs`. Values such as 6050, 6329, 6330, 7000 and 0 were observed directly, and ReflexProbe's 6329 us override replaced every request. DOOM calls `slReflexSetOptions` and `slReflexSleep` essentially 1:1 in the active frame loop.
 - **Shadow Warrior 3 (GOG) / native NVAPI D3D Reflex:** the top-level `SW3.exe` is an Epic `BootstrapPackagedGame` wrapper which launches the real `SW3\Binaries\Win64\SW3.exe`. Launch + Inject therefore targets the wrong process, while Watch + Inject with the exact real-game path succeeds. The game submits SetSleepMode only on Reflex state changes; frame-limit override and Force Boost both work.
+- **Satisfactory / modern Streamline:** the game requires its bootstrapper and therefore needs Watch or Attach against the real `FactoryGameSteam-Win64-Shipping.exe` process. Its local `sl.interposer.dll` reports 2.7.30.0 while the loaded Reflex plugin is an NVIDIA NGX OTA copy reporting 2.14.0.0. Satisfactory resolves `slGetFeatureFunction` from `FactoryGameSteam-Core-Win64-Shipping.dll`, not from the main EXE. On the main menu with Frame Generation active, it was observed requesting `frameLimitUs=16666` (~60.002 FPS), implementing an otherwise non-user-configurable 60 FPS Reflex cap. A ReflexProbe override of 6329 us replaced that request and raised the effective Reflex target to ~158.003 FPS. In the observed gameplay transitions, turning Frame Generation Off submitted Reflex Off with a zero interval and turning it back On submitted Reflex On with a zero interval.
 
 The commercial samples now show several distinct integration styles: constant setter resubmission, startup/policy-change-only setters, native NVAPI menu-change-only setters, engines that keep their own pre-FG limiter separate from Reflex, launcher/bootstrapper topologies that require exact-path Watch acquisition, and integrations where a nonzero Reflex limiter request is accepted but does not produce the expected pacing.
 
@@ -106,20 +107,72 @@ That is nearly a 2X relationship, matching the separate Dawnwalker evidence and 
 
 The current interpretation is therefore **not** “Path Tracing breaks Reflex.” The better model is that Frame Generation / renderer / presentation state determines whether the explicit Reflex limiter visibly governs final output, while PT can expose a delayed or state-transition “grace window.” Direct FG telemetry is needed to distinguish those states cleanly instead of inferring them from output FPS alone.
 
+### Satisfactory runtime findings
+
+Satisfactory exposed a real resolver-coverage hole in ReflexProbe rather than an environmental failure. The real engine process must be acquired through **Watch + Inject** because launching `FactoryGameSteam-Win64-Shipping.exe` directly fails; the bootstrapper is required even though the actual Reflex integration lives in the child engine process.
+
+Build `2026-10-06.22-module-resolver-scan` generalized dynamic `GetProcAddress` interception beyond the main EXE to loaded non-system game / engine / plugin modules. That immediately found Satisfactory's previously invisible route:
+
+```text
+sl.interposer.dll: 2.7.30.0
+resolver caller:    FactoryGameSteam-Core-Win64-Shipping.dll
+sl.reflex.dll:      2.14.0.0 from NVIDIA NGX OTA cache
+```
+
+The decisive method report was:
+
+```text
+modern slGetFeatureFunction via FactoryGameSteam-Core-Win64-Shipping.dll GetProcAddress IAT
+```
+
+This proves that the earlier miss was not a missing Reflex integration and was not primarily a Watch timing failure. ReflexProbe had been watching only the main executable's dynamic resolver seam while this UE-derived integration resolved Streamline from another loaded game module.
+
+Satisfactory also produced the first captured commercial example in this test set of a game deliberately using Reflex's own explicit frame limiter. On the main menu, with Frame Generation active, it repeatedly requested:
+
+```text
+mode=On
+frameLimitUs=16666
+≈ 60.002 FPS
+```
+
+That menu cap is not exposed as an independent user setting. With ReflexProbe forcing 6329 us, the same calls became effective at ~158.003 FPS, directly overriding the hidden 60 FPS policy. Satisfactory also has a separate conventional pre-Frame-Generation limiter whose normal default can remain unlimited.
+
+The exposed **Frame Generation** option is tightly coupled to Reflex behavior. In the observed test, it was the only user-facing setting found that forced a new Reflex state. Turning Frame Generation Off submitted Reflex Off with a zero interval; turning it back On submitted Reflex On with a zero interval. Menu / initialization transitions also caused rapid `16666 -> 0 -> 16666` policy changes before settling.
+
+Sleep-call counting was coherent but not yet a direct FG measurement. Long active intervals produced approximately:
+
+```text
+2708 sleeps / ~37 s ≈ 73.2 sleeps/s
+1872 sleeps / ~26 s ≈ 72.0 sleeps/s
+1245 sleeps / ~19 s ≈ 65.5 sleeps/s
+```
+
+Captured Reflex-Off intervals produced **0 sleeps**. The active rates are consistent with the existing Dawnwalker / DOOM hypothesis that Reflex Sleep follows the real rendered-frame cadence rather than generated presentation frames under 2X FG, but direct DLSS-G state telemetry is still needed before treating the Satisfactory counts as proof.
+
 ### Dynamic modern Streamline resolution is supported
 
-Some games do not statically import the modern Streamline resolver. Blood of the Dawnwalker exposed this topology.
+Some games do not statically import the modern Streamline resolver, and the code that performs dynamic resolution is not necessarily the main executable.
 
 ReflexProbe now has two modern catches:
 
-1. patch a normal application import of `slGetFeatureFunction` from `sl.interposer.dll`;
-2. if the main executable resolves Streamline dynamically, patch only the application's imported `GetProcAddress`, pass every unrelated lookup through untouched, and substitute `slGetFeatureFunction` only when it is resolved from `sl.interposer.dll`.
+1. patch a normal import of `slGetFeatureFunction` from `sl.interposer.dll` wherever it appears in a loaded module;
+2. patch imported `GetProcAddress` slots across loaded **non-system game / engine / plugin modules**, pass every unrelated lookup through untouched, and substitute `slGetFeatureFunction` only when that symbol is resolved from `sl.interposer.dll`.
 
-Dawnwalker confirmed the dynamic path. Its local interposer reported `2.7.30.0`, while the loaded Reflex implementation came from NVIDIA's NGX model cache and reported `2.14.0.0`.
+The broader resolver scan was added in build `2026-10-06.22-module-resolver-scan`. It deliberately leaves Windows system modules, `ReflexProbe64.dll`, and `sl.interposer.dll`'s dedicated SL1 plugin-gateway path alone. It also refuses to overwrite a `GetProcAddress` IAT slot that no longer points at the canonical Kernel32 resolver, avoiding blind interference with another injector or overlay that already owns that slot.
 
-This matters for launcher/watch mode because a title that submits Reflex options only once or twice at startup must be intercepted before those calls occur.
+Blood of the Dawnwalker confirmed the original dynamic path from the main executable. Its local interposer reported `2.7.30.0`, while the loaded Reflex implementation came from NVIDIA's NGX model cache and reported `2.14.0.0`.
 
-Arming the application's dynamic-modern `GetProcAddress` interception is **not** treated as a completed Reflex discovery. The injected worker continues scanning loaded modules until a concrete Reflex path is captured. This preserves the legacy SL1 case where `sl.interposer.dll` appears later and must have its own `GetProcAddress` import patched before `sl.reflex.dll!slGetPluginFunction("slSetConstants")` is resolved. A regression in this worker lifetime briefly broke A Plague Tale: Requiem while modern dynamic titles still worked; build `2026-10-05.11-sl1-worker` restores the patient SL1 scan while retaining Dawnwalker's dynamic-modern path.
+Satisfactory then proved why module-wide dynamic discovery is necessary. The main `FactoryGameSteam-Win64-Shipping.exe` process was injected successfully but the old main-EXE-only resolver interception saw nothing even though `sl.reflex.dll` was loaded. The broadened scan immediately found that `FactoryGameSteam-Core-Win64-Shipping.dll` was the module resolving `slGetFeatureFunction`. The interception-method report now includes the actual caller module so this topology is visible in copied logs rather than inferred afterward.
+
+Arming a dynamic-modern `GetProcAddress` interception is **not** treated as completed Reflex discovery. The injected worker continues scanning loaded modules until a concrete Reflex path is captured. This preserves the legacy SL1 case where `sl.interposer.dll` appears later and must have its own `GetProcAddress` import patched before `sl.reflex.dll!slGetPluginFunction("slSetConstants")` is resolved.
+
+The broadened resolver change was regression-tested successfully against three structurally different existing paths:
+
+- **God of War (2018):** native NVAPI D3D path remained healthy, including Force Boost, explicit interval override, and optional Sleep counting.
+- **A Plague Tale: Requiem:** Streamline 1.x plugin-gateway interception remained healthy and was not trampled by the modern module scan.
+- **DOOM: The Dark Ages:** modern Streamline 2.11.1 Watch interception remained healthy and still resolved through the main EXE, now reported explicitly as `DOOMTheDarkAges.exe GetProcAddress IAT`.
+
+This matters for launcher / Watch mode because a title that submits Reflex options only once or twice at startup must be intercepted before those calls occur, and the relevant resolver can live in a game DLL rather than the process image itself.
 
 ## Capture modes
 
@@ -206,9 +259,9 @@ The hashes make stale or mismatched local binaries obvious. Interception-method 
 
 ### Modern Streamline (2.x+)
 
-The injected DLL intercepts `slGetFeatureFunction`, either from a normal application IAT import or through the narrowly scoped application-`GetProcAddress` path described above. When the game asks for `slReflexSetOptions`, ReflexProbe keeps the genuine NVIDIA function pointer and returns a wrapper that observes requested/effective Reflex mode and frame-limit state. When **Count Reflex Sleep Calls** was selected for the target acquisition, the same resolver can also return a thin `slReflexSleep` wrapper used only for call counting. If counting was not selected, ReflexProbe returns the genuine sleep function pointer untouched. The wrapper can independently replace `frameLimitUs` and upgrade only `eLowLatency` (On) to `eLowLatencyWithBoost`; Off and an existing On + Boost request are left unchanged.
+The injected DLL intercepts `slGetFeatureFunction`, either from a normal loaded-module IAT import or through the narrowly scoped loaded-module `GetProcAddress` path described above. When the game asks for `slReflexSetOptions`, ReflexProbe keeps the genuine NVIDIA function pointer and returns a wrapper that observes requested/effective Reflex mode and frame-limit state. When **Count Reflex Sleep Calls** was selected for the target acquisition, the same resolver can also return a thin `slReflexSleep` wrapper used only for call counting. If counting was not selected, ReflexProbe returns the genuine sleep function pointer untouched. The wrapper can independently replace `frameLimitUs` and upgrade only `eLowLatency` (On) to `eLowLatencyWithBoost`; Off and an existing On + Boost request are left unchanged.
 
-Confirmed modern targets include Cyberpunk 2077, The Witcher 3 Remastered, GSyncProbe, Blood of the Dawnwalker, Indiana Jones and the Great Circle, No Man's Sky, DOOM: The Dark Ages, and Pragmata. The same modern Streamline resolver interception has now worked across D3D12 and Vulkan titles without a Vulkan-specific hook.
+Confirmed modern targets include Cyberpunk 2077, The Witcher 3 Remastered, GSyncProbe, Blood of the Dawnwalker, Indiana Jones and the Great Circle, No Man's Sky, DOOM: The Dark Ages, Pragmata, and Satisfactory. The same modern Streamline resolver interception has now worked across D3D12 and Vulkan titles without a Vulkan-specific hook.
 
 ### Native NVAPI D3D Reflex
 
@@ -288,6 +341,7 @@ Entering `0` while override is enabled forces literal `frameLimitUs=0`. Frame-li
 - **God of War (2018):** D3D11 + native NVAPI Reflex, independent of whether DLSS is enabled. Runtime-confirmed Off / On / On + Boost observation, with `NvAPI_D3D_SetSleepMode` called only when the menu setting changes. While Reflex was On, `NvAPI_D3D_Sleep` counts tracked approximately frame cadence; during the captured Reflex-Off interval the sleep count was **0**, yet the forced `minimumIntervalUs` limiter remained effective. This demonstrates that, in this shipped native-NVAPI integration on the tested driver, application-observed per-frame sleep calls are not required for the explicit limiter to remain active while low-latency mode is Off. Force Boost and `minimumIntervalUs` override both work.
 - **DOOM: The Dark Ages (Steam):** Vulkan + modern Streamline 2.11.1. Watch + Inject succeeds. `r_streamlineReflexMinFrameTimeUs` maps literally to Reflex `frameLimitUs`, and a fixed 6329 us override replaces arbitrary game requests with an effective ~158.003 FPS target. One process-lifetime capture observed **54,639 SetOptions calls and 54,638 Sleep calls**, essentially exact 1:1. Under Path Tracing, state changes and Sleep calls continue immediately even when the presentation cap takes several seconds or a map transition to become visibly effective. In one PT + 2X-FG interval, **2,720 sleeps over ~35 seconds (~77.7/s)** accompanied ~158 FPS displayed output, strongly indicating that Reflex Sleep tracks real rendered frames rather than generated output frames.
 - **Shadow Warrior 3 (GOG):** native NVAPI D3D Reflex. The outer `SW3.exe` is an Epic `BootstrapPackagedGame` wrapper, so Launch + Inject targets the wrong process and finds no Reflex path. Watch + Inject against the exact full path `SW3\Binaries\Win64\SW3.exe` catches the real game. SetSleepMode is submitted only on Reflex state changes; frame-limit override and Force Boost work. With Reflex Off, the captured Sleep count was **0** while the forced 6329 us (~158 FPS) limiter still worked. With Reflex On / On + Boost, Sleep counts were approximately frame-cadence. No Frame Generation path is present in the tested title.
+- **Satisfactory (Steam):** UE-derived modern Streamline integration acquired through Watch because the game requires its bootstrapper. The local interposer is 2.7.30.0, the loaded OTA Reflex plugin is 2.14.0.0, and the actual dynamic resolver call originates from `FactoryGameSteam-Core-Win64-Shipping.dll`. This title directly validated the broadened module resolver scan. With Frame Generation active on the main menu it requests `frameLimitUs=16666` (~60.002 FPS); ReflexProbe's 6329 us override replaced the otherwise hidden 60 FPS policy. Frame Generation Off produced Reflex Off / 0 us, while turning it back On produced Reflex On / 0 us in the observed gameplay transition. Active Reflex states produced Sleep counts around real-frame cadence; captured Off states produced zero Sleep calls.
 - **A Plague Tale: Requiem Force Boost caveat:** observing and frame-limit overriding through the SL1 plugin path works, but substituting plain On -> On + Boost causes severe progressive performance collapse in Requiem even though the game's native On + Boost mode is healthy. The capability remains exposed for diagnosis; the old SL1 Boost semantics need further investigation.
 - **Pragmata (Steam):** D3D12 + modern Streamline 2.8.0. Watch + Inject acquired the Steam-launched executable successfully on the tested Denuvo-protected build, the frame-limit override worked, and Reflex settings were submitted only on option changes while `slReflexSleep` continued at approximately rendered-frame cadence. The tested DRM configuration did not block ReflexProbe's injection/interception path; that observation is specific to this build and is not a claim about every Denuvo integration.
 
@@ -309,12 +363,13 @@ Do not use ReflexProbe with anti-cheat/protected multiplayer titles. The intende
 
 ## Planned next steps
 
-1. Regression-test the hardened **Launch + Inject** verification across fresh and repeated launches while confirming that Watch behavior remains unchanged.
-2. Continue **Watch + Inject** coverage beyond the successful GOG Galaxy / Dawnwalker case, especially Steam and other launcher-owned games.
-3. Runtime-test **Attach** and document which titles resubmit enough Reflex state for a late attach to be useful.
-4. Expand supported sleep-call comparisons to Dawnwalker and other integrations now that No Man's Sky, Indiana Jones, and God of War have produced sharply different patterns; add an SL1 sleep interception path before treating Requiem's displayed zero as a measurement.
-5. Use DOOM: The Dark Ages as a primary modern Vulkan/Frame-Generation validation target. Directly correlate FG state with the observed PT/menu/gameplay “grace window” so the presentation transition can be explained from telemetry rather than inferred from FPS.
-6. Add native `VK_NV_low_latency2` interception only if a Vulkan title bypasses the already-working modern Streamline resolver path.
-7. Extend the same Streamline resolver architecture to observe DLSS Frame Generation policy such as `slDLSSGSetOptions` / state queries, with capability-aware handling for both modern Streamline and legacy pre-MFG integrations.
+1. Extend the same modern Streamline resolver architecture to observe DLSS Frame Generation policy through `slDLSSGSetOptions` / `slDLSSGGetState`, keeping requested versus effective state explicit.
+2. Use **Satisfactory** as a primary modern FG specimen: distinguish its exposed Auto / 2X behavior, determine whether menu transitions are explicit application Off requests or runtime menu-detection suppression, and correlate FG state directly with its Reflex mode / hidden menu limiter.
+3. Use **DOOM: The Dark Ages** as the primary Vulkan/PT/FG correlation target so the observed presentation “grace window” can be tied to actual FG state rather than inferred from output FPS.
+4. Add capability-aware legacy FG handling for pre-public / fixed-2X integrations such as **A Plague Tale: Requiem** only after the actual shipped ABI is understood; do not fabricate MFG controls for an old integration.
+5. Runtime-test **Attach** after the modern FG observation path exists. Resolver interception can still miss pointers cached before injection; add a late direct-function fallback only if real Attach / late-Watch evidence requires it.
+6. Continue sleep-call comparisons across modern integrations now that Satisfactory joins Dawnwalker, DOOM, Indiana Jones, No Man's Sky, and God of War as distinct cadence specimens; add an SL1 sleep interception path before treating Requiem's displayed zero as a measurement.
+7. Add native `VK_NV_low_latency2` interception only if a Vulkan title bypasses the already-working Streamline paths.
+
 
 The architecture remains intentionally boring: a Win32 controller outside the game, one injected DLL inside it, Launch/Watch/Attach as interchangeable acquisition paths, fixed RAM transport, bounded capture policy, and a tiny requested/effective Reflex policy surface under the microscope.
