@@ -10,6 +10,7 @@
 #include <wchar.h>
 #include <string.h>
 #include <winver.h>
+#include <intrin.h>
 
 #include <sl.h>
 #include <sl_reflex.h>
@@ -90,6 +91,8 @@ PFunNvapiD3DSetSleepMode* g_realNvapiD3DSetSleepMode = nullptr;
 PFunNvapiD3DSleep* g_realNvapiD3DSleep = nullptr;
 volatile LONG g_modernReflexCaptured = 0;
 volatile LONG g_nativeNvapiCaptured = 0;
+volatile LONG g_legacyPluginGatewayArmed = 0;
+wchar_t g_modernInterceptionMethodStorage[256]{};
 const wchar_t* g_modernInterceptionMethod = L"modern slGetFeatureFunction";
 const wchar_t* g_nvapiQueryInterceptionMethod =
     L"native NVAPI D3D SetSleepMode via application nvapi_QueryInterface IAT";
@@ -209,6 +212,31 @@ bool GetModulePath(HMODULE module, wchar_t* out, size_t outCount)
         return false;
     }
     return true;
+}
+
+void SetModernInterceptionMethod(HMODULE callerModule, const wchar_t* route)
+{
+    wchar_t callerPath[ReflexProbeProtocol::kPathChars]{};
+    const wchar_t* callerName = L"unknown module";
+    if (callerModule && GetModulePath(callerModule, callerPath, _countof(callerPath)))
+        callerName = PathFileName(callerPath);
+
+    swprintf_s(g_modernInterceptionMethodStorage,
+        L"modern slGetFeatureFunction via %s %s", callerName, route);
+    g_modernInterceptionMethod = g_modernInterceptionMethodStorage;
+}
+
+void SetModernInterceptionMethodFromAddress(void* address, const wchar_t* route)
+{
+    HMODULE callerModule = nullptr;
+    if (address) {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(address), &callerModule);
+    }
+
+    SetModernInterceptionMethod(callerModule, route);
 }
 
 bool IsLegacyStreamlineInterposer(HMODULE interposer)
@@ -637,8 +665,7 @@ FARPROC WINAPI HookApplicationGetProcAddress(HMODULE module, LPCSTR procName)
     }
 
     g_realGetFeatureFunction = reinterpret_cast<PFun_slGetFeatureFunction*>(result);
-    g_modernInterceptionMethod =
-        L"modern slGetFeatureFunction via application GetProcAddress IAT";
+    SetModernInterceptionMethodFromAddress(_ReturnAddress(), L"GetProcAddress IAT");
     SetBackend(ReflexProbeProtocol::ReflexBackendModernSetOptions);
     PublishReflexModule(module, ReflexProbeProtocol::HookStateReflexFound,
         g_modernInterceptionMethod);
@@ -792,12 +819,51 @@ bool PatchApplicationNvapiResolver(bool& armedAny)
     return true;
 }
 
-bool PatchApplicationGetProcAddressResolver(bool& sawTarget)
+bool IsPathUnderWindowsDirectory(const wchar_t* path)
 {
-    sawTarget = false;
+    if (!path || !path[0])
+        return false;
 
-    HMODULE module = GetModuleHandleW(nullptr);
-    if (!module)
+    wchar_t windowsDirectory[MAX_PATH]{};
+    const UINT chars = GetWindowsDirectoryW(
+        windowsDirectory, static_cast<UINT>(_countof(windowsDirectory)));
+    if (!chars || chars >= _countof(windowsDirectory))
+        return false;
+
+    const size_t length = wcslen(windowsDirectory);
+    if (_wcsnicmp(path, windowsDirectory, length) != 0)
+        return false;
+
+    const wchar_t boundary = path[length];
+    return boundary == 0 || boundary == L'\\' || boundary == L'/';
+}
+
+bool ShouldPatchGetProcAddressResolver(HMODULE module)
+{
+    wchar_t modulePath[ReflexProbeProtocol::kPathChars]{};
+    if (!GetModulePath(module, modulePath, _countof(modulePath)))
+        return false;
+
+    const wchar_t* moduleName = PathFileName(modulePath);
+
+    // The SL1 interposer has its own plugin-gateway hook. Do not replace that
+    // GetProcAddress slot with the modern/application resolver hook.
+    if (_wcsicmp(moduleName, L"sl.interposer.dll") == 0 ||
+        _wcsicmp(moduleName, L"ReflexProbe64.dll") == 0) {
+        return false;
+    }
+
+    // System DLLs do not originate application Streamline feature lookups. Keeping
+    // their IATs untouched also limits this discovery hook to game/engine/plugin code.
+    if (IsPathUnderWindowsDirectory(modulePath))
+        return false;
+
+    return true;
+}
+
+bool PatchGetProcAddressResolverInModule(HMODULE module)
+{
+    if (!module || !ShouldPatchGetProcAddressResolver(module))
         return true;
 
     auto* base = reinterpret_cast<unsigned char*>(module);
@@ -806,8 +872,10 @@ bool PatchApplicationGetProcAddressResolver(bool& sawTarget)
         return true;
 
     auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+    if (nt->Signature != IMAGE_NT_SIGNATURE ||
+        nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
         return true;
+    }
 
     const IMAGE_DATA_DIRECTORY& imports =
         nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
@@ -818,8 +886,11 @@ bool PatchApplicationGetProcAddressResolver(bool& sawTarget)
     void* expectedGetProcAddress = kernel32
         ? reinterpret_cast<void*>(GetProcAddress(kernel32, "GetProcAddress"))
         : nullptr;
+    if (!expectedGetProcAddress)
+        return true;
 
-    auto* descriptor = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + imports.VirtualAddress);
+    auto* descriptor = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(
+        base + imports.VirtualAddress);
     for (; descriptor->Name; ++descriptor) {
         if (!descriptor->FirstThunk)
             continue;
@@ -830,32 +901,41 @@ bool PatchApplicationGetProcAddressResolver(bool& sawTarget)
             : nullptr;
 
         for (size_t index = 0; thunk[index].u1.Function; ++index) {
-            void* current = reinterpret_cast<void*>(static_cast<uintptr_t>(thunk[index].u1.Function));
+            void* current =
+                reinterpret_cast<void*>(static_cast<uintptr_t>(thunk[index].u1.Function));
             bool nameMatches = false;
 
             if (names && names[index].u1.AddressOfData &&
                 !IMAGE_SNAP_BY_ORDINAL64(names[index].u1.Ordinal)) {
                 auto* imported = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(
                     base + names[index].u1.AddressOfData);
-                nameMatches = strcmp(reinterpret_cast<const char*>(imported->Name), "GetProcAddress") == 0;
-            } else if (expectedGetProcAddress) {
-                nameMatches = current == expectedGetProcAddress;
+                nameMatches =
+                    strcmp(reinterpret_cast<const char*>(imported->Name), "GetProcAddress") == 0;
             }
 
-            if (!nameMatches)
+            if (!nameMatches && current != expectedGetProcAddress &&
+                current != reinterpret_cast<void*>(&HookApplicationGetProcAddress)) {
+                continue;
+            }
+
+            if (current == reinterpret_cast<void*>(&HookApplicationGetProcAddress))
                 continue;
 
-            sawTarget = true;
-            if (current == reinterpret_cast<void*>(&HookApplicationGetProcAddress))
-                return true;
+            // Do not trample another injector/overlay that already replaced this import.
+            // All slots we own should still contain the canonical Kernel32 resolver.
+            if (current != expectedGetProcAddress)
+                continue;
 
-            g_realGetProcAddress = reinterpret_cast<PFunGetProcAddress*>(current);
-            if (!PatchImportSlot(&thunk[index], reinterpret_cast<void*>(&HookApplicationGetProcAddress),
+            if (!g_realGetProcAddress) {
+                g_realGetProcAddress =
+                    reinterpret_cast<PFunGetProcAddress*>(expectedGetProcAddress);
+            }
+
+            if (!PatchImportSlot(&thunk[index],
+                    reinterpret_cast<void*>(&HookApplicationGetProcAddress),
                     L"GetProcAddress (Reflex resolver)")) {
                 return false;
             }
-
-            return true;
         }
     }
 
@@ -926,6 +1006,7 @@ bool PatchLegacyPluginGatewayResolver(HMODULE module, bool& sawTarget)
             }
 
             SetBackend(ReflexProbeProtocol::ReflexBackendLegacyPluginConstants);
+            InterlockedExchange(&g_legacyPluginGatewayArmed, 1);
             if (g_shared)
                 InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateInterceptArmed);
             return true;
@@ -993,7 +1074,7 @@ bool PatchStreamlineImportsInModule(HMODULE module, bool& sawTarget)
                 if (!g_realGetFeatureFunction)
                     g_realGetFeatureFunction = reinterpret_cast<PFun_slGetFeatureFunction*>(modernResolver);
 
-                g_modernInterceptionMethod = L"modern slGetFeatureFunction IAT";
+                SetModernInterceptionMethod(module, L"direct IAT");
                 if (!PatchImportSlot(thunk, reinterpret_cast<void*>(&HookGetFeatureFunction),
                         L"slGetFeatureFunction")) {
                     return false;
@@ -1055,7 +1136,9 @@ bool PatchLoadedStreamlineImports(bool& foundAny)
             }
 
             bool sawTarget = false;
-            const bool patched = PatchStreamlineImportsInModule(heldModule, sawTarget);
+            bool patched = PatchStreamlineImportsInModule(heldModule, sawTarget);
+            if (patched && !sawTarget)
+                patched = PatchGetProcAddressResolverInModule(heldModule);
             FreeLibrary(heldModule);
 
             if (!patched || (g_shared && InterlockedCompareExchange(&g_shared->hookState, 0, 0) ==
@@ -1082,16 +1165,16 @@ DWORD WINAPI WorkerThread(void*)
 
     InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateWaitingForDll);
 
-    // Prefer already-loaded/static Streamline boundaries. If the application loads the
-    // interposer dynamically, arm only the main executable's GetProcAddress IAT so we can
-    // substitute slGetFeatureFunction when Streamline is resolved later.
+    // Prefer already-loaded/static Streamline boundaries. Also arm GetProcAddress IATs
+    // across loaded non-system game/engine/plugin modules so dynamically resolved
+    // slGetFeatureFunction calls are visible even when they originate outside the EXE.
     for (uint32_t attempt = 0;; ++attempt) {
         bool foundStreamlineImport = false;
         if (!PatchLoadedStreamlineImports(foundStreamlineImport))
             return 1;
 
         if (foundStreamlineImport) {
-            if (g_realGetProcAddress) {
+            if (InterlockedCompareExchange(&g_legacyPluginGatewayArmed, 0, 0) != 0) {
                 OutputDebugStringW(
                     L"ReflexProbe64: armed Streamline 1.x sl.reflex plugin-gateway interception; worker exiting.\n");
             } else if (g_realLegacySetFeatureConstants) {
@@ -1108,21 +1191,15 @@ DWORD WINAPI WorkerThread(void*)
         if (!PatchApplicationNvapiResolver(armedNvapiResolver))
             return 1;
 
-        bool armedDynamicResolver = false;
-        if (!PatchApplicationGetProcAddressResolver(armedDynamicResolver))
-            return 1;
-
         if (InterlockedCompareExchange(&g_nativeNvapiCaptured, 0, 0) != 0) {
             OutputDebugStringW(
                 L"ReflexProbe64: captured native NVAPI D3D NvAPI_D3D_SetSleepMode; worker exiting.\n");
             return 0;
         }
 
-        // Arming either resolver is only a pending discovery path. Do not stop scanning
-        // merely because the main executable's IAT has been patched.
-        // Arming the application's GetProcAddress IAT is only a pending modern
-        // discovery path. Do not stop scanning loaded modules here: Streamline 1.x
-        // titles such as A Plague Tale: Requiem can load sl.interposer.dll later,
+        // Arming a GetProcAddress IAT is only a pending discovery path. Do not stop
+        // scanning merely because one or more loaded modules have been patched.
+        // Streamline 1.x titles such as A Plague Tale: Requiem can load sl.interposer.dll later,
         // and their Reflex path lives behind the interposer's own
         // slGetPluginFunction("slSetConstants") gateway.
         if (InterlockedCompareExchange(&g_modernReflexCaptured, 0, 0) != 0) {
