@@ -43,6 +43,7 @@ Evidence includes:
 - **DOOM: The Dark Ages / modern Streamline 2.11.1 + Vulkan:** `r_streamlineReflexMinFrameTimeUs` maps literally to `frameLimitUs`. Values such as 6050, 6329, 6330, 7000 and 0 were observed directly, and ReflexProbe's 6329 us override replaced every request. DOOM calls `slReflexSetOptions` and `slReflexSleep` essentially 1:1 in the active frame loop.
 - **Shadow Warrior 3 (GOG) / native NVAPI D3D Reflex:** the top-level `SW3.exe` is an Epic `BootstrapPackagedGame` wrapper which launches the real `SW3\Binaries\Win64\SW3.exe`. Launch + Inject therefore targets the wrong process, while Watch + Inject with the exact real-game path succeeds. The game submits SetSleepMode only on Reflex state changes; frame-limit override and Force Boost both work.
 - **Satisfactory / modern Streamline:** the game requires its bootstrapper and therefore needs Watch or Attach against the real `FactoryGameSteam-Win64-Shipping.exe` process. Its local `sl.interposer.dll` reports 2.7.30.0 while the loaded Reflex plugin is an NVIDIA NGX OTA copy reporting 2.14.0.0. Satisfactory resolves `slGetFeatureFunction` from `FactoryGameSteam-Core-Win64-Shipping.dll`, not from the main EXE. On the main menu with Frame Generation active, it was observed requesting `frameLimitUs=16666` (~60.002 FPS), implementing an otherwise non-user-configurable 60 FPS Reflex cap. A ReflexProbe override of 6329 us replaced that request and raised the effective Reflex target to ~158.003 FPS. In the observed gameplay transitions, turning Frame Generation Off submitted Reflex Off with a zero interval and turning it back On submitted Reflex On with a zero interval.
+- **Hogwarts Legacy / modern Streamline + D3D12:** a late-UE4 title originally shipped in the RTX 40-series era with ordinary 2X Frame Generation, then later received Multi Frame Generation support after the RTX 50-series launch. The current tested build resolves `slGetFeatureFunction` through the main `HogwartsLegacy.exe` rather than a UE plugin DLL. Its local `sl.interposer.dll` reports 2.6.10.0 while the loaded Reflex plugin is an NVIDIA NGX OTA copy reporting 2.14.0.0. Reflex requests observed in the tested build used `frameLimitUs=0`; the game's own independent frame limiter does not create a Reflex state change and can cap below ReflexProbe's forced Reflex ceiling.
 
 The commercial samples now show several distinct integration styles: constant setter resubmission, startup/policy-change-only setters, native NVAPI menu-change-only setters, engines that keep their own pre-FG limiter separate from Reflex, launcher/bootstrapper topologies that require exact-path Watch acquisition, and integrations where a nonzero Reflex limiter request is accepted but does not produce the expected pacing.
 
@@ -74,6 +75,8 @@ A nonzero Reflex interval is explicit application policy and is independent of w
 DOOM: The Dark Ages exposes `r_streamlineReflexMinFrameTimeUs`. ReflexProbe runtime capture now proves that this CVar is passed directly to Streamline as `frameLimitUs`: observed requests include `6050`, `6329`, `6330`, `7000`, and `0` microseconds. Setting about `6050 us` targets about 165.3 FPS and produces a rigid presentation cadence on its Vulkan path. A fixed ReflexProbe override at `6329 us` replaced every game request with an effective ~158.003 FPS target. The explicit limiter also remained meaningful with visible Reflex mode Off.
 
 ReflexProbe's own override has now been proven against GSyncProbe. Forcing 165, 60, and 30 FPS replaced GSyncProbe's requested limiter value, and **GSyncProbe's measured App Present Rate followed the forced value**. The same worked while GSyncProbe's Reflex mode was Off because the frame limiter remains independently usable.
+
+Commercial games now show that an application-visible per-frame Reflex Sleep call is not required for an already-configured explicit limiter to remain effective. God of War (native NVAPI D3D11) and Hogwarts Legacy (modern Streamline D3D12) both produced **zero captured Sleep calls while Reflex mode was Off**, yet ReflexProbe's forced nonzero interval still capped the game. The exact downstream enforcement mechanism is not exposed by the current probe, but this behavior is now confirmed across two different Reflex APIs and two D3D generations.
 
 ### DOOM: The Dark Ages runtime findings
 
@@ -148,6 +151,32 @@ Sleep-call counting was coherent but not yet a direct FG measurement. Long activ
 ```
 
 Captured Reflex-Off intervals produced **0 sleeps**. The active rates are consistent with the existing Dawnwalker / DOOM hypothesis that Reflex Sleep follows the real rendered-frame cadence rather than generated presentation frames under 2X FG, but direct DLSS-G state telemetry is still needed before treating the Satisfactory counts as proof.
+
+### Hogwarts Legacy runtime findings
+
+Hogwarts Legacy is a useful historical bridge specimen: it shipped as a **late Unreal Engine 4** title in February 2023 with the original RTX 40-series style of ordinary 2X Frame Generation, then later received modern Multi Frame Generation support after the RTX 50-series launch. The current tested build supports 2X / 3X / 4X Frame Generation once FG has been enabled; enabling FG from Off requires a restart, while changing between the active multipliers does not. Turning FG fully Off again also requires a restart.
+
+The current build uses D3D12 and resolves modern Streamline through the main executable:
+
+```text
+resolver caller:    HogwartsLegacy.exe
+sl.interposer.dll:  2.6.10.0
+sl.reflex.dll:      2.14.0.0 from NVIDIA NGX OTA cache
+```
+
+The observed interception method was:
+
+```text
+modern slGetFeatureFunction via HogwartsLegacy.exe GetProcAddress IAT
+```
+
+Hogwarts also has its own separate frame-rate limiter. Changing that limiter produced **no Reflex state change**. When configured below ReflexProbe's forced 6329 us (~158.003 FPS) Reflex ceiling, the game's own limiter capped the title further, confirming two independently effective limiting stages.
+
+The more important Reflex behavior is the Off state. During a long captured Reflex-Off interval, Hogwarts produced **0 `slReflexSleep` calls**. After Reflex was enabled, Sleep calls immediately appeared at high frequency; later Off states again produced 0, and re-enabling Reflex restored the calls. Because ReflexProbe had already intercepted and counted thousands of `slReflexSleep` calls before the Off transition, the zeros are not explained by missing the sleep-function resolution.
+
+Despite those zero Sleep calls while Reflex was Off, ReflexProbe's forced nonzero `frameLimitUs` remained effective. This independently reproduces the same key result already seen in God of War's native NVAPI D3D11 path: **application-observed per-frame Reflex Sleep calls are not required for an already-configured explicit Reflex limiter to keep governing frame cadence**. Hogwarts extends that result to modern Streamline on D3D12.
+
+Changing the exposed 2X / 3X / 4X Frame Generation multiplier did not itself produce a Reflex state change. That is expected if Reflex remains continuously enabled while only DLSS-G policy changes, and makes Hogwarts a particularly valuable target for direct `slDLSSGSetOptions` / `slDLSSGGetState` observation.
 
 ### Dynamic modern Streamline resolution is supported
 
@@ -261,7 +290,7 @@ The hashes make stale or mismatched local binaries obvious. Interception-method 
 
 The injected DLL intercepts `slGetFeatureFunction`, either from a normal loaded-module IAT import or through the narrowly scoped loaded-module `GetProcAddress` path described above. When the game asks for `slReflexSetOptions`, ReflexProbe keeps the genuine NVIDIA function pointer and returns a wrapper that observes requested/effective Reflex mode and frame-limit state. When **Count Reflex Sleep Calls** was selected for the target acquisition, the same resolver can also return a thin `slReflexSleep` wrapper used only for call counting. If counting was not selected, ReflexProbe returns the genuine sleep function pointer untouched. The wrapper can independently replace `frameLimitUs` and upgrade only `eLowLatency` (On) to `eLowLatencyWithBoost`; Off and an existing On + Boost request are left unchanged.
 
-Confirmed modern targets include Cyberpunk 2077, The Witcher 3 Remastered, GSyncProbe, Blood of the Dawnwalker, Indiana Jones and the Great Circle, No Man's Sky, DOOM: The Dark Ages, Pragmata, and Satisfactory. The same modern Streamline resolver interception has now worked across D3D12 and Vulkan titles without a Vulkan-specific hook.
+Confirmed modern targets include Cyberpunk 2077, The Witcher 3 Remastered, GSyncProbe, Blood of the Dawnwalker, Indiana Jones and the Great Circle, No Man's Sky, DOOM: The Dark Ages, Pragmata, Satisfactory, and Hogwarts Legacy. The same modern Streamline resolver interception has now worked across D3D12 and Vulkan titles without a Vulkan-specific hook.
 
 ### Native NVAPI D3D Reflex
 
@@ -342,6 +371,7 @@ Entering `0` while override is enabled forces literal `frameLimitUs=0`. Frame-li
 - **DOOM: The Dark Ages (Steam):** Vulkan + modern Streamline 2.11.1. Watch + Inject succeeds. `r_streamlineReflexMinFrameTimeUs` maps literally to Reflex `frameLimitUs`, and a fixed 6329 us override replaces arbitrary game requests with an effective ~158.003 FPS target. One process-lifetime capture observed **54,639 SetOptions calls and 54,638 Sleep calls**, essentially exact 1:1. Under Path Tracing, state changes and Sleep calls continue immediately even when the presentation cap takes several seconds or a map transition to become visibly effective. In one PT + 2X-FG interval, **2,720 sleeps over ~35 seconds (~77.7/s)** accompanied ~158 FPS displayed output, strongly indicating that Reflex Sleep tracks real rendered frames rather than generated output frames.
 - **Shadow Warrior 3 (GOG):** native NVAPI D3D Reflex. The outer `SW3.exe` is an Epic `BootstrapPackagedGame` wrapper, so Launch + Inject targets the wrong process and finds no Reflex path. Watch + Inject against the exact full path `SW3\Binaries\Win64\SW3.exe` catches the real game. SetSleepMode is submitted only on Reflex state changes; frame-limit override and Force Boost work. With Reflex Off, the captured Sleep count was **0** while the forced 6329 us (~158 FPS) limiter still worked. With Reflex On / On + Boost, Sleep counts were approximately frame-cadence. No Frame Generation path is present in the tested title.
 - **Satisfactory (Steam):** UE-derived modern Streamline integration acquired through Watch because the game requires its bootstrapper. The local interposer is 2.7.30.0, the loaded OTA Reflex plugin is 2.14.0.0, and the actual dynamic resolver call originates from `FactoryGameSteam-Core-Win64-Shipping.dll`. This title directly validated the broadened module resolver scan. With Frame Generation active on the main menu it requests `frameLimitUs=16666` (~60.002 FPS); ReflexProbe's 6329 us override replaced the otherwise hidden 60 FPS policy. Frame Generation Off produced Reflex Off / 0 us, while turning it back On produced Reflex On / 0 us in the observed gameplay transition. Active Reflex states produced Sleep counts around real-frame cadence; captured Off states produced zero Sleep calls.
+- **Hogwarts Legacy (Steam):** late UE4 + D3D12, originally a 2X Frame Generation title and later updated for 2X / 3X / 4X MFG after the RTX 50-series launch. The current build resolves Streamline through `HogwartsLegacy.exe`; its local interposer is 2.6.10.0 and its loaded OTA Reflex plugin is 2.14.0.0. Its independent game limiter does not change Reflex state and can cap below ReflexProbe's forced 6329 us ceiling. Reflex Off produced **0 `slReflexSleep` calls** while the forced Reflex limiter still worked; enabling Reflex restored high-frequency Sleep calls. This extends the God of War zero-Sleep / working-limiter result from native NVAPI D3D11 to modern Streamline D3D12. Enabling FG from Off requires restart, while switching among 2X / 3X / 4X does not and did not produce a Reflex state change.
 - **A Plague Tale: Requiem Force Boost caveat:** observing and frame-limit overriding through the SL1 plugin path works, but substituting plain On -> On + Boost causes severe progressive performance collapse in Requiem even though the game's native On + Boost mode is healthy. The capability remains exposed for diagnosis; the old SL1 Boost semantics need further investigation.
 - **Pragmata (Steam):** D3D12 + modern Streamline 2.8.0. Watch + Inject acquired the Steam-launched executable successfully on the tested Denuvo-protected build, the frame-limit override worked, and Reflex settings were submitted only on option changes while `slReflexSleep` continued at approximately rendered-frame cadence. The tested DRM configuration did not block ReflexProbe's injection/interception path; that observation is specific to this build and is not a claim about every Denuvo integration.
 
@@ -365,11 +395,12 @@ Do not use ReflexProbe with anti-cheat/protected multiplayer titles. The intende
 
 1. Extend the same modern Streamline resolver architecture to observe DLSS Frame Generation policy through `slDLSSGSetOptions` / `slDLSSGGetState`, keeping requested versus effective state explicit.
 2. Use **Satisfactory** as a primary modern FG specimen: distinguish its exposed Auto / 2X behavior, determine whether menu transitions are explicit application Off requests or runtime menu-detection suppression, and correlate FG state directly with its Reflex mode / hidden menu limiter.
-3. Use **DOOM: The Dark Ages** as the primary Vulkan/PT/FG correlation target so the observed presentation “grace window” can be tied to actual FG state rather than inferred from output FPS.
-4. Add capability-aware legacy FG handling for pre-public / fixed-2X integrations such as **A Plague Tale: Requiem** only after the actual shipped ABI is understood; do not fabricate MFG controls for an old integration.
-5. Runtime-test **Attach** after the modern FG observation path exists. Resolver interception can still miss pointers cached before injection; add a late direct-function fallback only if real Attach / late-Watch evidence requires it.
-6. Continue sleep-call comparisons across modern integrations now that Satisfactory joins Dawnwalker, DOOM, Indiana Jones, No Man's Sky, and God of War as distinct cadence specimens; add an SL1 sleep interception path before treating Requiem's displayed zero as a measurement.
-7. Add native `VK_NV_low_latency2` interception only if a Vulkan title bypasses the already-working Streamline paths.
+3. Use **Hogwarts Legacy** as the late-UE4 transition specimen: directly observe 2X / 3X / 4X DLSS-G option changes in a title that originally shipped with fixed 2X FG and was later retrofitted for MFG, while confirming that multiplier changes leave Reflex policy unchanged.
+4. Use **DOOM: The Dark Ages** as the primary Vulkan/PT/FG correlation target so the observed presentation “grace window” can be tied to actual FG state rather than inferred from output FPS.
+5. Add capability-aware legacy FG handling for pre-public / fixed-2X integrations such as **A Plague Tale: Requiem** only after the actual shipped ABI is understood; do not fabricate MFG controls for an old integration.
+6. Runtime-test **Attach** after the modern FG observation path exists. Resolver interception can still miss pointers cached before injection; add a late direct-function fallback only if real Attach / late-Watch evidence requires it.
+7. Continue sleep-call comparisons across modern integrations now that Hogwarts and Satisfactory join Dawnwalker, DOOM, Indiana Jones, No Man's Sky, and God of War as distinct cadence specimens; add an SL1 sleep interception path before treating Requiem's displayed zero as a measurement.
+8. Add native `VK_NV_low_latency2` interception only if a Vulkan title bypasses the already-working Streamline paths.
 
 
 The architecture remains intentionally boring: a Win32 controller outside the game, one injected DLL inside it, Launch/Watch/Attach as interchangeable acquisition paths, fixed RAM transport, bounded capture policy, and a tiny requested/effective Reflex policy surface under the microscope.
