@@ -41,12 +41,12 @@ constexpr int kPolicyRight = kCountSleepX + kCountSleepWidth;
 constexpr int kMinimumClientWidth = kPolicyRight + kMargin + 36;
 
 constexpr int kReflexGroupTop = 127;
-constexpr int kReflexGroupHeight = 75;
-constexpr int kFgGroupTop = 217;
-constexpr int kFgGroupHeight = 83;
-constexpr int kAcquisitionTop = 313;
-constexpr int kCurrentStateTop = 353;
-constexpr int kStatusHeadingTop = 383;
+constexpr int kReflexGroupHeight = 56;
+constexpr int kFgGroupTop = 198;
+constexpr int kFgGroupHeight = 56;
+constexpr int kAcquisitionTop = 267;
+constexpr int kCurrentStateTop = 307;
+constexpr int kStatusHeadingTop = 337;
 
 bool IsSelectedGameExecutableValid()
 {
@@ -527,6 +527,41 @@ void BrowseForGame()
     }
 }
 
+// A checkbox painted over a group-box caption interrupts its border for the entire
+// checkbox rectangle. Size the caption to its actual font/text instead of leaving
+// a long blank section of border hidden by a fixed-width checkbox.
+int MeasureGroupHeadingWidth(HWND checkbox)
+{
+    if (!checkbox)
+        return 0;
+
+    wchar_t label[128]{};
+    GetWindowTextW(checkbox, label, static_cast<int>(_countof(label)));
+
+    HDC dc = GetDC(checkbox);
+    if (!dc)
+        return 0;
+
+    HFONT font = reinterpret_cast<HFONT>(SendMessageW(checkbox, WM_GETFONT, 0, 0));
+    HGDIOBJ previous = nullptr;
+    if (font)
+        previous = SelectObject(dc, font);
+
+    SIZE extent{};
+    const BOOL measured = GetTextExtentPoint32W(
+        dc, label, static_cast<int>(wcslen(label)), &extent);
+
+    if (previous)
+        SelectObject(dc, previous);
+    ReleaseDC(checkbox, dc);
+
+    if (!measured)
+        return 0;
+
+    // Checkbox glyph + text gap + a little trailing breathing room.
+    return GetSystemMetrics(SM_CXMENUCHECK) + extent.cx + 12;
+}
+
 void LayoutControls(int clientWidth, int clientHeight)
 {
     if (clientWidth <= 0 || clientHeight <= 0)
@@ -553,33 +588,32 @@ void LayoutControls(int clientWidth, int clientHeight)
             usableWidth, kReflexGroupHeight, TRUE);
     if (g_app.reflexProbing)
         MoveWindow(g_app.reflexProbing, kMargin + 14, kReflexGroupTop - 9,
-            205, 22, TRUE);
+            MeasureGroupHeadingWidth(g_app.reflexProbing), 22, TRUE);
 
     if (g_app.overrideEnable)
-        MoveWindow(g_app.overrideEnable, kMargin + 18, 156, kOverrideWidth, 22, TRUE);
+        MoveWindow(g_app.overrideEnable, kMargin + 18, 149, kOverrideWidth, 22, TRUE);
     if (g_app.overrideFps)
-        MoveWindow(g_app.overrideFps, kFpsX, 155, kOverrideFpsWidth, 24, TRUE);
+        MoveWindow(g_app.overrideFps, kFpsX, 148, kOverrideFpsWidth, 24, TRUE);
     if (g_app.fpsLabel)
-        MoveWindow(g_app.fpsLabel, kFpsLabelX, 158, kFpsLabelWidth, 20, TRUE);
+        MoveWindow(g_app.fpsLabel, kFpsLabelX, 151, kFpsLabelWidth, 20, TRUE);
     if (g_app.forceBoost)
-        MoveWindow(g_app.forceBoost, kForceBoostX, 156, kForceBoostWidth, 22, TRUE);
+        MoveWindow(g_app.forceBoost, kForceBoostX, 149, kForceBoostWidth, 22, TRUE);
     if (g_app.countReflexSleep)
-        MoveWindow(g_app.countReflexSleep, kCountSleepX, 156, kCountSleepWidth, 22, TRUE);
+        MoveWindow(g_app.countReflexSleep, kCountSleepX, 149, kCountSleepWidth, 22, TRUE);
 
     if (g_app.fgGroup)
         MoveWindow(g_app.fgGroup, kMargin, kFgGroupTop,
             usableWidth, kFgGroupHeight, TRUE);
     if (g_app.fgProbing)
         MoveWindow(g_app.fgProbing, kMargin + 14, kFgGroupTop - 9,
-            262, 22, TRUE);
-    if (g_app.fgObservationPending)
-        MoveWindow(g_app.fgObservationPending, kMargin + 18, 248, 280, 22, TRUE);
+            MeasureGroupHeadingWidth(g_app.fgProbing), 22, TRUE);
+
     if (g_app.fgMultiplierOverride)
-        MoveWindow(g_app.fgMultiplierOverride, kMargin + 309, 248, 168, 22, TRUE);
-    if (g_app.fgMultiplierPending)
-        MoveWindow(g_app.fgMultiplierPending, kMargin + 479, 250, 127, 20, TRUE);
+        MoveWindow(g_app.fgMultiplierOverride, kMargin + 18, 220, 168, 22, TRUE);
+    if (g_app.fgMultiplierChoice)
+        MoveWindow(g_app.fgMultiplierChoice, kMargin + 192, 218, 84, 112, TRUE);
     if (g_app.fgMenuOverride)
-        MoveWindow(g_app.fgMenuOverride, kMargin + 18, 271, 240, 22, TRUE);
+        MoveWindow(g_app.fgMenuOverride, kMargin + 294, 220, 240, 22, TRUE);
 
     const int attachX = clientWidth - kMargin - kAttachWidth;
     const int watchX = attachX - kAcquisitionGap - kWatchWidth;
@@ -679,25 +713,28 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             g_app.instance, nullptr);
         SetChildFont(g_app.fgProbing, font);
 
-        // The feature selector is intentionally usable now. No DLSS-G wrappers exist yet;
-        // the future observation/override subcontrols must not imply working behavior.
-        g_app.fgObservationPending = CreateWindowExW(0, L"STATIC",
-            L"Observe SetOptions / GetState (pending)",
-            WS_CHILD | WS_VISIBLE | WS_DISABLED,
-            0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
-        SetChildFont(g_app.fgObservationPending, font);
-
+        // The FG selection is available even before observation is implemented.
+        // Only future override controls are disabled; enabling FG probing will
+        // eventually capture SetOptions / GetState through the shared capture mode.
         g_app.fgMultiplierOverride = CreateWindowExW(0, L"BUTTON",
             L"Override FG multiplier",
             WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_AUTOCHECKBOX,
             0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
         SetChildFont(g_app.fgMultiplierOverride, font);
 
-        g_app.fgMultiplierPending = CreateWindowExW(0, L"STATIC",
-            L"2X / 3X / 4X",
-            WS_CHILD | WS_VISIBLE | WS_DISABLED,
+        g_app.fgMultiplierChoice = CreateWindowExW(0, L"COMBOBOX", L"",
+            WS_CHILD | WS_VISIBLE | WS_DISABLED | WS_VSCROLL | CBS_DROPDOWNLIST,
             0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
-        SetChildFont(g_app.fgMultiplierPending, font);
+        SetChildFont(g_app.fgMultiplierChoice, font);
+        SendMessageW(g_app.fgMultiplierChoice, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(L"Auto"));
+        SendMessageW(g_app.fgMultiplierChoice, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(L"2X"));
+        SendMessageW(g_app.fgMultiplierChoice, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(L"3X"));
+        SendMessageW(g_app.fgMultiplierChoice, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(L"4X"));
+        SendMessageW(g_app.fgMultiplierChoice, CB_SETCURSEL, 0, 0);
 
         g_app.fgMenuOverride = CreateWindowExW(0, L"BUTTON",
             L"Override FG menu detection",
