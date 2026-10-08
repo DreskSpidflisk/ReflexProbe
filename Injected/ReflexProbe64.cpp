@@ -427,7 +427,7 @@ sl::Result HookFgSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
         return sl::Result::eErrorNotInitialized;
 
     ReflexProbeProtocol::FgEventData data{};
-    data.viewport = viewport.value;
+    data.viewport = static_cast<uint32_t>(viewport);
     CaptureFgOptions(options, data);
     const sl::Result result = real(viewport, options);
     PublishFgEvent(ReflexProbeProtocol::FgEventSetOptions, data, static_cast<LONG>(result));
@@ -442,7 +442,7 @@ sl::Result HookFgGetState(const sl::ViewportHandle& viewport, sl::DLSSGState& st
         return sl::Result::eErrorNotInitialized;
 
     ReflexProbeProtocol::FgEventData data{};
-    data.viewport = viewport.value;
+    data.viewport = static_cast<uint32_t>(viewport);
     // Record the version before forwarding; the game owns this output buffer.
     data.stateVersion = static_cast<uint32_t>(state.structVersion);
     if (options)
