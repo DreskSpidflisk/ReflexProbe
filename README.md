@@ -98,9 +98,11 @@ These are observed results from specific tested builds, not a universal compatib
 
 The project uses API-boundary pointer substitution rather than an active generic detour library. See **[Test findings: Resolver discovery and regression](docs/TestFindings.md#resolver-discovery-and-regression)** for the observed caller-module differences and regressions.
 
-## Limitations and next steps
+## Compatibility, limitations, and next steps
 
-ReflexProbe is **x64-only** and intended for offline, non-anti-cheat test software. It does not support anti-cheat/protected multiplayer environments, native Vulkan `VK_NV_low_latency2` interception, or Streamline 1.x Sleep counting. The visible Win32 log is bounded, Attach can miss already-cached pointers, and successful Reflex settings interception does not prove an effective presentation cap.
+ReflexProbe is **x64-only**. It makes no distinction between offline and online games, DRM-free and DRM-protected releases, or targets with and without anti-cheat. Whether injection and API interception work depends on the particular game's integration and protections; DRM and anti-cheat implementations vary, may interfere with these techniques, and may impose restrictions or consequences for using injected software. ReflexProbe is provided **as-is**, without any compatibility guarantee. Users decide where and how to use it.
+
+Native Vulkan `VK_NV_low_latency2` interception and Streamline 1.x Sleep counting are **not yet implemented**. The visible Win32 log is bounded, Attach can miss already-cached pointers, and successful Reflex settings interception does not prove an effective presentation cap.
 
 The two feature groups are present ahead of FG interception. Selecting only FG currently injects the observer infrastructure but produces no FG function events; this is **not** evidence that a game omitted FG calls.
 
