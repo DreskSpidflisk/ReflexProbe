@@ -60,14 +60,9 @@ void ClearCaptureHistory()
 
     if (g_app.status) {
         SetWindowTextW(g_app.status, L"");
+        // Restore only the initial program diagnostics, never later session history.
         if (g_app.startupDiagnostics.data)
             AppendStatus(g_app.startupDiagnostics.data);
-        if (g_app.sessionDiagnostics.data)
-            AppendStatus(g_app.sessionDiagnostics.data);
-
-        // Mark the new observation window, but do not retain the marker.
-        AppendDisplayLineAtQpc(
-            L"Capture cleared. Original session diagnostics restored from RAM.", 0);
     }
 }
 
