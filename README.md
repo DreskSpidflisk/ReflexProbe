@@ -45,7 +45,7 @@ Open `ReflexProbe.sln` and build **Debug x64** or **Release x64**. Both projects
 | Location | Purpose |
 | --- | --- |
 | `Controller/` | Win32 UI, process acquisition/injection, capture, and status reporting |
-| `Injected/ReflexProbe64.cpp` | In-process Reflex interception |
+| `Injected/ReflexProbe64.cpp` | In-process Reflex and DLSS FG interception |
 | `Common/Protocol.h` | Shared-memory event and policy protocol |
 | `ThirdParty/MinHook` | Pinned historical submodule; **not currently built or used** |
 
@@ -68,6 +68,14 @@ A positive FPS entry is converted as `frameLimitUs = round(1,000,000 / FPS)` (16
 - **Frame Generation complicates interpretation.** DOOM and Dawnwalker Reflex-only captures are consistent with Sleep calls tracking real rendered frames rather than generated output; FG probing is implemented but has not yet been validated against these games, so this remains an inference.
 - **Interception may occur outside the main EXE.** Satisfactory resolved Streamline through a game DLL, requiring module-wide resolver interception.
 
+### The Witcher 3 Remastered: initial SL2 FG observations (October 8, 2026)
+
+- **Two acquisition paths verified:** the GOG release launched directly without Galaxy using **Launch + Inject**, followed by **Watch + Inject** when started through GOG Galaxy with **only FG probing enabled**. The latter intercepted both FG functions without Reflex probing. The FG plugin reported Streamline **2.14.1.0**.
+- **Fixed MFG requests observed:** `slDLSSGSetOptions` returned success for **2X** (`numFramesToGenerate=1`), **3X** (`=2`), and **6X** (`=5`) with `mode=On`. `slDLSSGGetState` reported `numFramesToGenerateMax=5` (6X maximum) and Dynamic MFG support, but the game submitted no `mode=Dynamic` requests in these tests.
+- **Menus are explicitly controlled by the game:** transitions into and out of menus produced `mode=Off` / `mode=On` requests. The fullscreen-menu-detection flag remained **unset** (`flags=0x00000000`) in observed SetOptions calls. UI recomposition was **Yes** for captured FG-On configurations and **No** for FG-Off configurations. Changes to the selected multiplier became visible when the game submitted updated options after leaving the menus.
+- **Submission is frequent:** tens of thousands of otherwise identical FG SetOptions calls were reduced to repeated-state counts. FG SetOptions, FG GetState, and Reflex histories remained independent; per-call presented-frame counts were not treated as persistent GetState changes.
+- **Presentation-rate measurement remains separate:** 6X is a successfully submitted multiplier, not a measurement of original rendered FPS. A monitor indication around 225 is insufficient to establish either actual displayed FPS or base rendering cadence; the next comparison should use an overlay that distinguishes rendered FPS from DLSS-generated output (such as Steam's separate FPS / DLSS FPS readings).
+
 ## Tested games
 
 These are observed results from specific tested builds, not a universal compatibility guarantee. Detailed evidence and caveats are in **[Test findings](docs/TestFindings.md#per-game-results)**.
@@ -76,7 +84,7 @@ These are observed results from specific tested builds, not a universal compatib
 | --- | --- | --- |
 | GSyncProbe | D3D11 / D3D12 / Vulkan | Controlled 240 Hz baseline and 165/60/30 FPS override validation. |
 | Cyberpunk 2077 | D3D12 / Streamline 2.x+ | Frequent zero-interval Reflex settings submissions. |
-| The Witcher 3 Remastered | D3D12 / Streamline 2.x+ | Repeated zero-interval requests across Reflex modes. |
+| The Witcher 3 Remastered | D3D12 / Streamline 2.14.1 | Reflex probing plus validated standalone/GOG Galaxy FG-only acquisition; observed 2X, 3X, 6X and explicit menu Off/On requests with detector flag unset. |
 | A Plague Tale: Requiem | D3D12 / Streamline 1.x | Legacy plugin gateway; injected Force Boost has a performance caveat. |
 | Blood of the Dawnwalker | D3D12 / Streamline 2.x+ | Sparse startup states; dynamic resolution and GOG Watch verified. |
 | Indiana Jones and the Great Circle | Vulkan / Streamline 2.x+ | DLSS-gated Reflex/FG; setter and Sleep calls nearly 1:1. |
@@ -107,5 +115,7 @@ Native Vulkan `VK_NV_low_latency2` interception and Streamline 1.x Sleep countin
 Modern Streamline FG probing uses the existing module-wide resolver and may be selected without Reflex probing. State changes uses separate Reflex, FG SetOptions, and FG GetState histories, keyed by viewport for FG; per-call GetState presentation counts are visible in Raw debug but excluded from persistent-state comparisons. Fullscreen-menu detection is recorded from the game's options flag; the runtime does not expose a dedicated "detector triggered" status. FG interception depends on the game resolving the observed functions after the probe is armed, so absent calls are not proof of absent FG activity.
 
 Next: validate FG mode, multiplier and fullscreen-menu detection observations in Satisfactory, Hogwarts Legacy, and DOOM, then evaluate multiplier/menu overrides. Legacy/pre-MFG FG must remain capability-aware rather than assuming modern multipliers. Consider a direct late-attach fallback only if confirmed necessary.
+
+**Logging refinement under consideration (not implemented):** independent, live **Reflex detail** and **FG detail** display controls. Normal FG SetOptions lines would prioritize mode, `numFramesToGenerate` / multiplier, and the fullscreen-menu-detection flag; Dynamic target FPS could be included when relevant. Detailed FG output would retain the full flags, resource, version, and runtime fields currently shown. Toggling detail would affect subsequent log lines only, without rewriting earlier output or discarding collected fields.
 
 Technical experiments and implementation history live in **[docs/TestFindings.md](docs/TestFindings.md)**.
