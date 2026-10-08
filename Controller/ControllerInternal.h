@@ -19,8 +19,8 @@ constexpr UINT_PTR kPollTimer = 1;
 constexpr UINT_PTR kWatchTimer = 2;
 constexpr UINT kWatchPollIntervalMs = 10;
 constexpr int kMargin = 12;
-constexpr int kStatusTop = 212;
-constexpr int kMinimumWindowHeight = 506;
+constexpr int kStatusTop = 413;
+constexpr int kMinimumWindowHeight = 650;
 constexpr WPARAM kStatusTextLimit = 16u * 1024u * 1024u;
 constexpr size_t kInitialTextBufferCapacity = 8 * 1024;
 constexpr size_t kRawDebugCapacity = 131072;
@@ -41,7 +41,9 @@ enum ControlId : int {
     IDC_ATTACH,
     IDC_FORCE_BOOST,
     IDC_COUNT_REFLEX_SLEEP,
-    IDC_CLEAR_HISTORY
+    IDC_CLEAR_HISTORY,
+    IDC_REFLEX_PROBING,
+    IDC_FG_PROBING
 };
 
 enum CaptureMode : uint32_t {
@@ -77,6 +79,14 @@ struct AppState {
     HWND browse = nullptr;
     HWND argumentsLabel = nullptr;
     HWND arguments = nullptr;
+    HWND reflexGroup = nullptr;
+    HWND reflexProbing = nullptr;
+    HWND fgGroup = nullptr;
+    HWND fgProbing = nullptr;
+    HWND fgObservationPending = nullptr;
+    HWND fgMultiplierOverride = nullptr;
+    HWND fgMultiplierPending = nullptr;
+    HWND fgMenuOverride = nullptr;
     HWND overrideEnable = nullptr;
     HWND overrideFps = nullptr;
     HWND fpsLabel = nullptr;
@@ -115,6 +125,8 @@ struct AppState {
     uint32_t watchOverrideUs = 0;
     bool watchForceBoostWhenOn = false;
     bool watchCountReflexSleepCalls = false;
+    bool watchProbeReflex = true;
+    bool watchProbeDlssFg = false;
     LONGLONG watchStartQpc = 0;
 
     CaptureMode captureMode = CaptureModeStateChanges;
@@ -157,15 +169,16 @@ bool InjectDll(HANDLE process, DWORD processId, const wchar_t* dllPath,
                wchar_t* error, size_t errorCount);
 bool CreateSharedState(DWORD processId, const wchar_t* targetPath,
                        bool overrideEnabled, uint32_t overrideUs, bool forceBoostWhenOn,
-                       bool countReflexSleepCalls, wchar_t* error, size_t errorCount);
+                       bool countReflexSleepCalls, bool probeReflex, bool probeDlssFg,
+                       wchar_t* error, size_t errorCount);
 bool ArmProcessWatch(const wchar_t* targetPath, bool overrideEnabled, uint32_t overrideUs,
                      bool forceBoostWhenOn, bool countReflexSleepCalls,
-                     wchar_t* error, size_t errorCount);
+                     bool probeReflex, bool probeDlssFg, wchar_t* error, size_t errorCount);
 void CancelProcessWatch(bool logCancellation);
 void PollProcessWatch();
 bool AttachRunningProcess(const wchar_t* targetPath, bool overrideEnabled, uint32_t overrideUs,
                           bool forceBoostWhenOn, bool countReflexSleepCalls,
-                          wchar_t* error, size_t errorCount);
+                          bool probeReflex, bool probeDlssFg, wchar_t* error, size_t errorCount);
 
 void ResetLiveStateTracking();
 bool EnsureRawDebugBuffer();

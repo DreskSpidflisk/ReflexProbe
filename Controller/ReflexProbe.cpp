@@ -21,7 +21,6 @@ constexpr int kWatchWidth = 116;
 constexpr int kAttachWidth = 92;
 constexpr int kAcquisitionGap = 8;
 constexpr int kPolicyGap = 10;
-constexpr int kPolicyToAcquisitionGap = 16;
 constexpr int kOverrideWidth = 172;
 constexpr int kOverrideFpsWidth = 70;
 constexpr int kFpsLabelWidth = 34;
@@ -34,15 +33,20 @@ constexpr int kStateWidth = 108;
 constexpr int kCaptureLabelWidth = 92;
 constexpr int kCaptureGap = 8;
 
-constexpr int kFpsX = kMargin + kOverrideWidth;
+constexpr int kFpsX = kMargin + 18 + kOverrideWidth;
 constexpr int kFpsLabelX = kFpsX + kOverrideFpsWidth + 8;
 constexpr int kForceBoostX = kFpsLabelX + kFpsLabelWidth + kPolicyGap;
 constexpr int kCountSleepX = kForceBoostX + kForceBoostWidth + kPolicyGap;
 constexpr int kPolicyRight = kCountSleepX + kCountSleepWidth;
-constexpr int kAcquisitionWidth =
-    kLaunchWidth + kAcquisitionGap + kWatchWidth + kAcquisitionGap + kAttachWidth;
-constexpr int kMinimumClientWidth =
-    kPolicyRight + kPolicyToAcquisitionGap + kAcquisitionWidth + kMargin;
+constexpr int kMinimumClientWidth = kPolicyRight + kMargin + 36;
+
+constexpr int kReflexGroupTop = 127;
+constexpr int kReflexGroupHeight = 75;
+constexpr int kFgGroupTop = 217;
+constexpr int kFgGroupHeight = 83;
+constexpr int kAcquisitionTop = 313;
+constexpr int kCurrentStateTop = 353;
+constexpr int kStatusHeadingTop = 383;
 
 bool IsSelectedGameExecutableValid()
 {
@@ -116,6 +120,16 @@ bool ParseOverrideFromUi(bool& enabled, uint32_t& frameLimitUs, wchar_t* error, 
     return true;
 }
 
+bool ReflexProbingSelected()
+{
+    return g_app.reflexProbing && Button_GetCheck(g_app.reflexProbing) == BST_CHECKED;
+}
+
+bool FgProbingSelected()
+{
+    return g_app.fgProbing && Button_GetCheck(g_app.fgProbing) == BST_CHECKED;
+}
+
 void ApplyPolicyToShared(bool logFrameLimit, bool logBoost)
 {
     if (!g_app.shared)
@@ -161,13 +175,17 @@ void UpdateAcquisitionControls()
     const bool targetActive = g_app.process != nullptr;
     const bool watching = g_app.watchArmed;
     const bool validTarget = IsSelectedGameExecutableValid();
+    const bool reflexEnabled = ReflexProbingSelected();
+    const bool fgEnabled = FgProbingSelected();
+    const bool anyProbe = reflexEnabled || fgEnabled;
+    const bool probeSelectionLocked = targetActive || watching;
 
     if (g_app.launch)
-        EnableWindow(g_app.launch, validTarget && !targetActive && !watching);
+        EnableWindow(g_app.launch, validTarget && anyProbe && !targetActive && !watching);
     if (g_app.attach)
-        EnableWindow(g_app.attach, validTarget && !targetActive && !watching);
+        EnableWindow(g_app.attach, validTarget && anyProbe && !targetActive && !watching);
     if (g_app.watch) {
-        EnableWindow(g_app.watch, watching || (validTarget && !targetActive));
+        EnableWindow(g_app.watch, watching || (validTarget && anyProbe && !targetActive));
         SetWindowTextW(g_app.watch, watching ? L"Cancel Watch" : L"Watch + Inject");
     }
 
@@ -178,17 +196,22 @@ void UpdateAcquisitionControls()
     if (g_app.arguments)
         EnableWindow(g_app.arguments, !watching);
 
+    if (g_app.reflexProbing)
+        EnableWindow(g_app.reflexProbing, !probeSelectionLocked);
+    if (g_app.fgProbing)
+        EnableWindow(g_app.fgProbing, !probeSelectionLocked);
+
     if (g_app.overrideEnable)
-        EnableWindow(g_app.overrideEnable, !watching);
+        EnableWindow(g_app.overrideEnable, reflexEnabled && !watching);
     if (g_app.overrideFps) {
         const bool frameOverrideChecked =
             g_app.overrideEnable && Button_GetCheck(g_app.overrideEnable) == BST_CHECKED;
-        EnableWindow(g_app.overrideFps, !watching && frameOverrideChecked);
+        EnableWindow(g_app.overrideFps, reflexEnabled && !watching && frameOverrideChecked);
     }
     if (g_app.forceBoost)
-        EnableWindow(g_app.forceBoost, !watching);
+        EnableWindow(g_app.forceBoost, reflexEnabled && !watching);
     if (g_app.countReflexSleep)
-        EnableWindow(g_app.countReflexSleep, !targetActive && !watching);
+        EnableWindow(g_app.countReflexSleep, reflexEnabled && !targetActive && !watching);
     if (g_app.clearHistory)
         EnableWindow(g_app.clearHistory, !targetActive && !watching);
 }
@@ -247,8 +270,12 @@ bool LaunchAndInject()
     const bool forceBoostWhenOn = Button_GetCheck(g_app.forceBoost) == BST_CHECKED;
     const bool countReflexSleepCalls =
         Button_GetCheck(g_app.countReflexSleep) == BST_CHECKED;
+    const bool probeReflex = ReflexProbingSelected();
+    const bool probeDlssFg = FgProbingSelected();
+    if (!probeReflex && !probeDlssFg)
+        return false;
     wchar_t error[512]{};
-    if (!ParseOverrideFromUi(overrideEnabled, overrideUs, error, _countof(error))) {
+    if (probeReflex && !ParseOverrideFromUi(overrideEnabled, overrideUs, error, _countof(error))) {
         MessageBoxW(g_app.window, error, L"ReflexProbe", MB_ICONWARNING);
         return false;
     }
@@ -306,7 +333,7 @@ bool LaunchAndInject()
 
     if (!CreateSharedState(process.dwProcessId, gamePath,
             overrideEnabled, overrideUs, forceBoostWhenOn, countReflexSleepCalls,
-            error, _countof(error))) {
+            probeReflex, probeDlssFg, error, _countof(error))) {
         TerminateProcess(process.hProcess, 1);
         CloseHandle(process.hThread);
         MessageBoxW(g_app.window, error, L"ReflexProbe", MB_ICONERROR);
@@ -348,24 +375,31 @@ bool LaunchAndInject()
     wchar_t line[512]{};
     swprintf_s(line, L"Launched %s (PID %lu) and injected ReflexProbe64.dll.", PathFileName(gamePath), process.dwProcessId);
     AppendStatusLine(line);
-    if (overrideEnabled && overrideUs) {
+    AppendStatusLine(probeReflex
+        ? L"Reflex probing: enabled; supported Reflex functions can be wrapped."
+        : L"Reflex probing: disabled; Reflex functions are passed through untouched.");
+    AppendStatusLine(probeDlssFg
+        ? L"DLSS FG probing: selected; FG observation is NOT implemented in this build."
+        : L"DLSS FG probing: disabled; FG functions are passed through untouched.");
+    if (probeReflex && overrideEnabled && overrideUs) {
         swprintf_s(line, L"Initial override: %u us (%.3f FPS).", overrideUs,
             1000000.0 / static_cast<double>(overrideUs));
         AppendStatusLine(line);
-    } else if (overrideEnabled) {
+    } else if (probeReflex && overrideEnabled) {
         AppendStatusLine(L"Initial override: 0 us (no explicit Reflex frame limit).");
-    } else {
+    } else if (probeReflex) {
         AppendStatusLine(L"Initial frame-limit override: disabled.");
     }
 
-    if (forceBoostWhenOn)
+    if (probeReflex && forceBoostWhenOn)
         AppendStatusLine(L"Initial Force Boost policy: enabled; plain Reflex On requests will be forwarded as On + Boost.");
-    else
+    else if (probeReflex)
         AppendStatusLine(L"Initial Force Boost policy: disabled; Reflex mode requests pass through unchanged.");
 
-    AppendStatusLine(countReflexSleepCalls
-        ? L"Initial Reflex Sleep call counting: enabled; Reflex Sleep will be wrapped for this target."
-        : L"Initial Reflex Sleep call counting: disabled; Reflex Sleep will remain untouched for this target.");
+    if (probeReflex)
+        AppendStatusLine(countReflexSleepCalls
+            ? L"Initial Reflex Sleep call counting: enabled; Reflex Sleep will be wrapped for this target."
+            : L"Initial Reflex Sleep call counting: disabled; Reflex Sleep will remain untouched for this target.");
 
     if (g_app.captureMode == CaptureModeRawDebug)
         AppendStatusLine(L"Capture mode: Raw debug; bounded raw retention starts with this target.");
@@ -378,7 +412,8 @@ bool LaunchAndInject()
 bool ReadTargetAndPolicyForExternalAcquisition(
     wchar_t* gamePath, size_t gamePathCount,
     bool& overrideEnabled, uint32_t& overrideUs, bool& forceBoostWhenOn,
-    bool& countReflexSleepCalls, wchar_t* error, size_t errorCount)
+    bool& countReflexSleepCalls, bool& probeReflex, bool& probeDlssFg,
+    wchar_t* error, size_t errorCount)
 {
     if (!gamePath || !gamePathCount)
         return false;
@@ -395,9 +430,22 @@ bool ReadTargetAndPolicyForExternalAcquisition(
         return false;
     }
 
+    probeReflex = ReflexProbingSelected();
+    probeDlssFg = FgProbingSelected();
+    if (!probeReflex && !probeDlssFg) {
+        swprintf_s(error, errorCount, L"Enable at least one probe before acquisition.");
+        return false;
+    }
     forceBoostWhenOn = Button_GetCheck(g_app.forceBoost) == BST_CHECKED;
     countReflexSleepCalls =
         Button_GetCheck(g_app.countReflexSleep) == BST_CHECKED;
+    if (!probeReflex) {
+        overrideEnabled = false;
+        overrideUs = 0;
+        forceBoostWhenOn = false;
+        countReflexSleepCalls = false;
+        return true;
+    }
     return ParseOverrideFromUi(overrideEnabled, overrideUs, error, errorCount);
 }
 
@@ -413,17 +461,19 @@ bool ToggleWatchAndInject()
     uint32_t overrideUs = 0;
     bool forceBoostWhenOn = false;
     bool countReflexSleepCalls = false;
+    bool probeReflex = true;
+    bool probeDlssFg = false;
     wchar_t error[512]{};
 
     if (!ReadTargetAndPolicyForExternalAcquisition(
             gamePath, _countof(gamePath), overrideEnabled, overrideUs, forceBoostWhenOn,
-            countReflexSleepCalls, error, _countof(error))) {
+            countReflexSleepCalls, probeReflex, probeDlssFg, error, _countof(error))) {
         MessageBoxW(g_app.window, error, L"ReflexProbe", MB_ICONWARNING);
         return false;
     }
 
     if (!ArmProcessWatch(gamePath, overrideEnabled, overrideUs, forceBoostWhenOn,
-            countReflexSleepCalls, error, _countof(error))) {
+            countReflexSleepCalls, probeReflex, probeDlssFg, error, _countof(error))) {
         MessageBoxW(g_app.window, error, L"ReflexProbe Watch + Inject", MB_ICONERROR);
         return false;
     }
@@ -438,17 +488,19 @@ bool AttachToRunningTarget()
     uint32_t overrideUs = 0;
     bool forceBoostWhenOn = false;
     bool countReflexSleepCalls = false;
+    bool probeReflex = true;
+    bool probeDlssFg = false;
     wchar_t error[512]{};
 
     if (!ReadTargetAndPolicyForExternalAcquisition(
             gamePath, _countof(gamePath), overrideEnabled, overrideUs, forceBoostWhenOn,
-            countReflexSleepCalls, error, _countof(error))) {
+            countReflexSleepCalls, probeReflex, probeDlssFg, error, _countof(error))) {
         MessageBoxW(g_app.window, error, L"ReflexProbe", MB_ICONWARNING);
         return false;
     }
 
     if (!AttachRunningProcess(gamePath, overrideEnabled, overrideUs, forceBoostWhenOn,
-            countReflexSleepCalls, error, _countof(error))) {
+            countReflexSleepCalls, probeReflex, probeDlssFg, error, _countof(error))) {
         MessageBoxW(g_app.window, error, L"ReflexProbe Attach", MB_ICONERROR);
         return false;
     }
@@ -496,31 +548,54 @@ void LayoutControls(int clientWidth, int clientHeight)
     if (g_app.arguments)
         MoveWindow(g_app.arguments, kMargin, 90, usableWidth > 50 ? usableWidth : 50, 24, TRUE);
 
+    if (g_app.reflexGroup)
+        MoveWindow(g_app.reflexGroup, kMargin, kReflexGroupTop,
+            usableWidth, kReflexGroupHeight, TRUE);
+    if (g_app.reflexProbing)
+        MoveWindow(g_app.reflexProbing, kMargin + 14, kReflexGroupTop - 9,
+            205, 22, TRUE);
+
     if (g_app.overrideEnable)
-        MoveWindow(g_app.overrideEnable, kMargin, 128, kOverrideWidth, 22, TRUE);
+        MoveWindow(g_app.overrideEnable, kMargin + 18, 156, kOverrideWidth, 22, TRUE);
     if (g_app.overrideFps)
-        MoveWindow(g_app.overrideFps, kFpsX, 126, kOverrideFpsWidth, 24, TRUE);
+        MoveWindow(g_app.overrideFps, kFpsX, 155, kOverrideFpsWidth, 24, TRUE);
     if (g_app.fpsLabel)
-        MoveWindow(g_app.fpsLabel, kFpsLabelX, 130, kFpsLabelWidth, 20, TRUE);
+        MoveWindow(g_app.fpsLabel, kFpsLabelX, 158, kFpsLabelWidth, 20, TRUE);
     if (g_app.forceBoost)
-        MoveWindow(g_app.forceBoost, kForceBoostX, 128, kForceBoostWidth, 22, TRUE);
+        MoveWindow(g_app.forceBoost, kForceBoostX, 156, kForceBoostWidth, 22, TRUE);
     if (g_app.countReflexSleep)
-        MoveWindow(g_app.countReflexSleep, kCountSleepX, 128, kCountSleepWidth, 22, TRUE);
+        MoveWindow(g_app.countReflexSleep, kCountSleepX, 156, kCountSleepWidth, 22, TRUE);
+
+    if (g_app.fgGroup)
+        MoveWindow(g_app.fgGroup, kMargin, kFgGroupTop,
+            usableWidth, kFgGroupHeight, TRUE);
+    if (g_app.fgProbing)
+        MoveWindow(g_app.fgProbing, kMargin + 14, kFgGroupTop - 9,
+            262, 22, TRUE);
+    if (g_app.fgObservationPending)
+        MoveWindow(g_app.fgObservationPending, kMargin + 18, 248, 280, 22, TRUE);
+    if (g_app.fgMultiplierOverride)
+        MoveWindow(g_app.fgMultiplierOverride, kMargin + 309, 248, 168, 22, TRUE);
+    if (g_app.fgMultiplierPending)
+        MoveWindow(g_app.fgMultiplierPending, kMargin + 479, 250, 127, 20, TRUE);
+    if (g_app.fgMenuOverride)
+        MoveWindow(g_app.fgMenuOverride, kMargin + 18, 271, 240, 22, TRUE);
+
     const int attachX = clientWidth - kMargin - kAttachWidth;
     const int watchX = attachX - kAcquisitionGap - kWatchWidth;
     const int launchX = watchX - kAcquisitionGap - kLaunchWidth;
     if (g_app.launch)
-        MoveWindow(g_app.launch, launchX, 124, kLaunchWidth, 30, TRUE);
+        MoveWindow(g_app.launch, launchX, kAcquisitionTop, kLaunchWidth, 30, TRUE);
     if (g_app.watch)
-        MoveWindow(g_app.watch, watchX, 124, kWatchWidth, 30, TRUE);
+        MoveWindow(g_app.watch, watchX, kAcquisitionTop, kWatchWidth, 30, TRUE);
     if (g_app.attach)
-        MoveWindow(g_app.attach, attachX, 124, kAttachWidth, 30, TRUE);
+        MoveWindow(g_app.attach, attachX, kAcquisitionTop, kAttachWidth, 30, TRUE);
 
     if (g_app.currentState)
-        MoveWindow(g_app.currentState, kMargin, 164, usableWidth > 50 ? usableWidth : 50, 20, TRUE);
+        MoveWindow(g_app.currentState, kMargin, kCurrentStateTop, usableWidth > 50 ? usableWidth : 50, 20, TRUE);
 
     if (g_app.statusLabel)
-        MoveWindow(g_app.statusLabel, kMargin, 190, 180, 20, TRUE);
+        MoveWindow(g_app.statusLabel, kMargin, kStatusHeadingTop, 180, 20, TRUE);
 
     const int wrapX = clientWidth - kMargin - kWordWrapWidth;
     const int clearX = wrapX - kCaptureGap - kClearWidth;
@@ -528,15 +603,15 @@ void LayoutControls(int clientWidth, int clientHeight)
     const int stateX = rawX - kCaptureGap - kStateWidth;
     const int captureLabelX = stateX - kCaptureGap - kCaptureLabelWidth;
     if (g_app.captureModeLabel)
-        MoveWindow(g_app.captureModeLabel, captureLabelX, 190, kCaptureLabelWidth, 20, TRUE);
+        MoveWindow(g_app.captureModeLabel, captureLabelX, kStatusHeadingTop, kCaptureLabelWidth, 20, TRUE);
     if (g_app.captureState)
-        MoveWindow(g_app.captureState, stateX, 188, kStateWidth, 22, TRUE);
+        MoveWindow(g_app.captureState, stateX, kStatusHeadingTop - 2, kStateWidth, 22, TRUE);
     if (g_app.captureRaw)
-        MoveWindow(g_app.captureRaw, rawX, 188, kRawWidth, 22, TRUE);
+        MoveWindow(g_app.captureRaw, rawX, kStatusHeadingTop - 2, kRawWidth, 22, TRUE);
     if (g_app.clearHistory)
-        MoveWindow(g_app.clearHistory, clearX, 187, kClearWidth, 24, TRUE);
+        MoveWindow(g_app.clearHistory, clearX, kStatusHeadingTop - 3, kClearWidth, 24, TRUE);
     if (g_app.wordWrap)
-        MoveWindow(g_app.wordWrap, wrapX, 188, kWordWrapWidth, 22, TRUE);
+        MoveWindow(g_app.wordWrap, wrapX, kStatusHeadingTop - 2, kWordWrapWidth, 22, TRUE);
 
     if (g_app.status) {
         int statusHeight = clientHeight - kStatusTop - kMargin;
@@ -578,6 +653,57 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
             0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_ARGUMENTS), g_app.instance, nullptr);
         SetChildFont(g_app.arguments, font);
+
+        // Independent acquisition-time feature switches in stacked native group boxes.
+        // The checkbox sits over the upper border; the groups are created first for z-order.
+        g_app.reflexGroup = CreateWindowExW(0, L"BUTTON", L"",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
+        SetChildFont(g_app.reflexGroup, font);
+
+        g_app.reflexProbing = CreateWindowExW(0, L"BUTTON", L"Enable Reflex probing",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_REFLEX_PROBING),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.reflexProbing, font);
+        Button_SetCheck(g_app.reflexProbing, BST_CHECKED);
+
+        g_app.fgGroup = CreateWindowExW(0, L"BUTTON", L"",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
+        SetChildFont(g_app.fgGroup, font);
+
+        g_app.fgProbing = CreateWindowExW(0, L"BUTTON", L"Enable DLSS Frame Generation probing",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FG_PROBING),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.fgProbing, font);
+
+        // The feature selector is intentionally usable now. No DLSS-G wrappers exist yet;
+        // the future observation/override subcontrols must not imply working behavior.
+        g_app.fgObservationPending = CreateWindowExW(0, L"STATIC",
+            L"Observe SetOptions / GetState (pending)",
+            WS_CHILD | WS_VISIBLE | WS_DISABLED,
+            0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
+        SetChildFont(g_app.fgObservationPending, font);
+
+        g_app.fgMultiplierOverride = CreateWindowExW(0, L"BUTTON",
+            L"Override FG multiplier",
+            WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
+        SetChildFont(g_app.fgMultiplierOverride, font);
+
+        g_app.fgMultiplierPending = CreateWindowExW(0, L"STATIC",
+            L"2X / 3X / 4X",
+            WS_CHILD | WS_VISIBLE | WS_DISABLED,
+            0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
+        SetChildFont(g_app.fgMultiplierPending, font);
+
+        g_app.fgMenuOverride = CreateWindowExW(0, L"BUTTON",
+            L"Override FG menu detection",
+            WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
+        SetChildFont(g_app.fgMenuOverride, font);
 
         g_app.overrideEnable = CreateWindowExW(0, L"BUTTON", L"Override Reflex frame limit",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
@@ -625,7 +751,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
         SetChildFont(g_app.currentState, font);
 
-        g_app.statusLabel = CreateWindowExW(0, L"STATIC", L"Status / Reflex requests",
+        g_app.statusLabel = CreateWindowExW(0, L"STATIC", L"Status / API requests",
             WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
         SetChildFont(g_app.statusLabel, font);
 
@@ -663,7 +789,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         LayoutControls(client.right - client.left, client.bottom - client.top);
         UpdateAcquisitionControls();
 
-        AppendStatusLine(L"ReflexProbe bootstrap: Launch, Watch or Attach Reflex observer/override.");
+        AppendStatusLine(L"ReflexProbe bootstrap: Launch, Watch or Attach selected API probes.");
+        AppendStatusLine(L"Reflex probing is ON by default; DLSS FG probing is OFF. FG function observation is pending implementation.");
         AppendStatusLine(L"Frame-limit override is OFF by default. When checked, the FPS value replaces frameLimitUs on intercepted Reflex settings calls.");
         AppendStatusLine(L"Force Boost when Reflex On is independent: plain On requests become On + Boost; Off and existing On + Boost requests are unchanged.");
         AppendStatusLine(L"Reflex Sleep call counting is OFF by default. When disabled, ReflexProbe does not wrap the Reflex Sleep call.");
@@ -692,6 +819,14 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         case IDC_GAME_PATH:
             if (HIWORD(wParam) == EN_KILLFOCUS)
                 UpdateAcquisitionControls();
+            return 0;
+        case IDC_REFLEX_PROBING:
+        case IDC_FG_PROBING:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                UpdateAcquisitionControls();
+                if (!g_app.process && !g_app.watchArmed && !g_app.haveEffectiveState)
+                    ResetCurrentEffectiveState();
+            }
             return 0;
         case IDC_OVERRIDE_ENABLE:
             if (HIWORD(wParam) == BN_CLICKED) {
@@ -825,7 +960,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
 
     HWND window = CreateWindowExW(0, kWindowClass, L"ReflexProbe",
         WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 1100, 650,
+        CW_USEDEFAULT, CW_USEDEFAULT, 1100, 760,
         nullptr, nullptr, instance, nullptr);
     if (!window)
         return 1;

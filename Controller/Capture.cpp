@@ -140,11 +140,22 @@ void ResetCurrentEffectiveState()
     g_app.currentEffectiveUs = 0;
 
     if (g_app.currentState) {
+        const bool reflexEnabled = g_app.reflexProbing &&
+            Button_GetCheck(g_app.reflexProbing) == BST_CHECKED;
+        const bool fgEnabled = g_app.fgProbing &&
+            Button_GetCheck(g_app.fgProbing) == BST_CHECKED;
         SetWindowTextW(g_app.currentState,
-            L"Current effective state: Reflex Unknown | Reflex FPS limit: Unknown");
+            reflexEnabled ? L"Current effective state: Reflex Unknown | Reflex FPS limit: Unknown"
+            : fgEnabled ? L"Reflex probing disabled | DLSS FG observation pending"
+            : L"No API probes selected");
     }
-    if (g_app.window)
-        SetWindowTextW(g_app.window, L"ReflexProbe - Reflex Unknown | FPS Limit Unknown");
+    if (g_app.window) {
+        const bool reflexEnabled = g_app.reflexProbing &&
+            Button_GetCheck(g_app.reflexProbing) == BST_CHECKED;
+        SetWindowTextW(g_app.window, reflexEnabled
+            ? L"ReflexProbe - Reflex Unknown | FPS Limit Unknown"
+            : L"ReflexProbe - No Reflex probing");
+    }
 }
 
 void UpdateCurrentEffectiveState(const CapturedReflexEvent& event)
@@ -421,7 +432,9 @@ void PollSharedState()
         wchar_t line[2300]{};
         switch (hookState) {
         case ReflexProbeProtocol::HookStateWaitingForDll:
-            wcscpy_s(line, L"Waiting for a Reflex interception path...");
+            wcscpy_s(line, g_app.shared->probeReflexEnabled
+                ? L"Waiting for a Reflex interception path..."
+                : L"DLSS FG-only selection: observation pending; no API function hooks installed.");
             break;
         case ReflexProbeProtocol::HookStateInterceptArmed:
             swprintf_s(line, L"Interception armed: %s. Waiting for sl.reflex.dll to resolve its plugin gateway.",

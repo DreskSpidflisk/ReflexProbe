@@ -79,6 +79,14 @@ using PFunNvapiD3DSleep = int32_t (__cdecl)(void* device);
 
 HANDLE g_mapping = nullptr;
 ReflexProbeProtocol::SharedState* g_shared = nullptr;
+
+// The selected feature families are immutable for the acquired target.
+// Resolver interception is shared plumbing; disabled feature functions are untouched.
+bool IsReflexProbingEnabled()
+{
+    return g_shared && g_shared->probeReflexEnabled != 0;
+}
+
 PFun_slGetFeatureFunction* g_realGetFeatureFunction = nullptr;
 PFun_slReflexSetOptions* g_realReflexSetOptions = nullptr;
 PFun_slReflexSleep* g_realReflexSleep = nullptr;
@@ -453,7 +461,7 @@ void* __cdecl HookNvapiQueryInterface(uint32_t interfaceId)
     if (!function)
         return function;
 
-    if (interfaceId == kNvapiD3DSetSleepModeId) {
+    if (interfaceId == kNvapiD3DSetSleepModeId && IsReflexProbingEnabled()) {
         g_realNvapiD3DSetSleepMode =
             reinterpret_cast<PFunNvapiD3DSetSleepMode*>(function);
         SetBackend(ReflexProbeProtocol::ReflexBackendNativeNvapiD3D);
@@ -462,8 +470,8 @@ void* __cdecl HookNvapiQueryInterface(uint32_t interfaceId)
         return reinterpret_cast<void*>(&HookNvapiD3DSetSleepMode);
     }
 
-    if (interfaceId == kNvapiD3DSleepId &&
-        g_shared && g_shared->countReflexSleepCalls) {
+    if (interfaceId == kNvapiD3DSleepId && IsReflexProbingEnabled() &&
+        g_shared->countReflexSleepCalls) {
         g_realNvapiD3DSleep = reinterpret_cast<PFunNvapiD3DSleep*>(function);
         return reinterpret_cast<void*>(&HookNvapiD3DSleep);
     }
@@ -508,7 +516,7 @@ bool HookLegacySetFeatureConstants(uint32_t feature, const void* constants,
     if (!real)
         return false;
 
-    if (feature != kLegacyFeatureReflex || !constants)
+    if (!IsReflexProbingEnabled() || feature != kLegacyFeatureReflex || !constants)
         return real(feature, constants, frameIndex, id);
 
     const auto* requested = static_cast<const LegacyReflexConstants*>(constants);
@@ -558,7 +566,7 @@ void* HookLegacyPluginGetFunction(const char* functionName)
     if (!functionName || !function)
         return function;
 
-    if (strcmp(functionName, "slSetConstants") == 0) {
+    if (IsReflexProbingEnabled() && strcmp(functionName, "slSetConstants") == 0) {
         g_realLegacyPluginSetConstants =
             reinterpret_cast<PFunLegacyPluginSetConstants*>(function);
         SetBackend(ReflexProbeProtocol::ReflexBackendLegacyPluginConstants);
@@ -584,7 +592,7 @@ FARPROC WINAPI HookInterposerGetProcAddress(HMODULE module, LPCSTR procName)
     if (reinterpret_cast<uintptr_t>(procName) <= 0xFFFFu)
         return result;
 
-    if (strcmp(procName, "slGetPluginFunction") != 0)
+    if (!IsReflexProbingEnabled() || strcmp(procName, "slGetPluginFunction") != 0)
         return result;
 
     wchar_t modulePath[ReflexProbeProtocol::kPathChars]{};
@@ -610,14 +618,14 @@ sl::Result HookGetFeatureFunction(sl::Feature feature, const char* functionName,
     if (result != sl::Result::eOk || !functionName || !function)
         return result;
 
-    if (strcmp(functionName, "slReflexSetOptions") == 0) {
+    if (IsReflexProbingEnabled() && strcmp(functionName, "slReflexSetOptions") == 0) {
         g_realReflexSetOptions = reinterpret_cast<PFun_slReflexSetOptions*>(function);
         SetBackend(ReflexProbeProtocol::ReflexBackendModernSetOptions);
         PublishReflexFunction(function, g_modernInterceptionMethod);
         function = reinterpret_cast<void*>(&HookReflexSetOptions);
         InterlockedExchange(&g_modernReflexCaptured, 1);
-    } else if (strcmp(functionName, "slReflexSleep") == 0 &&
-               g_shared && g_shared->countReflexSleepCalls) {
+    } else if (IsReflexProbingEnabled() && strcmp(functionName, "slReflexSleep") == 0 &&
+               g_shared->countReflexSleepCalls) {
         g_realReflexSleep = reinterpret_cast<PFun_slReflexSleep*>(function);
         function = reinterpret_cast<void*>(&HookReflexSleep);
     }
@@ -644,7 +652,7 @@ FARPROC WINAPI HookApplicationGetProcAddress(HMODULE module, LPCSTR procName)
 
     const wchar_t* moduleName = PathFileName(modulePath);
 
-    if (strcmp(procName, "nvapi_QueryInterface") == 0 &&
+    if (IsReflexProbingEnabled() && strcmp(procName, "nvapi_QueryInterface") == 0 &&
         _wcsicmp(moduleName, L"nvapi64.dll") == 0) {
         g_realNvapiQueryInterface = reinterpret_cast<PFunNvapiQueryInterface*>(result);
         g_nvapiQueryInterceptionMethod =
@@ -652,9 +660,9 @@ FARPROC WINAPI HookApplicationGetProcAddress(HMODULE module, LPCSTR procName)
         return reinterpret_cast<FARPROC>(&HookNvapiQueryInterface);
     }
 
-    if (strcmp(procName, "NvAPI_D3D_Sleep") == 0 &&
+    if (IsReflexProbingEnabled() && strcmp(procName, "NvAPI_D3D_Sleep") == 0 &&
         _wcsicmp(moduleName, L"nvapi64.dll") == 0 &&
-        g_shared && g_shared->countReflexSleepCalls) {
+        g_shared->countReflexSleepCalls) {
         g_realNvapiD3DSleep = reinterpret_cast<PFunNvapiD3DSleep*>(result);
         return reinterpret_cast<FARPROC>(&HookNvapiD3DSleep);
     }
@@ -666,9 +674,11 @@ FARPROC WINAPI HookApplicationGetProcAddress(HMODULE module, LPCSTR procName)
 
     g_realGetFeatureFunction = reinterpret_cast<PFun_slGetFeatureFunction*>(result);
     SetModernInterceptionMethodFromAddress(_ReturnAddress(), L"GetProcAddress IAT");
-    SetBackend(ReflexProbeProtocol::ReflexBackendModernSetOptions);
-    PublishReflexModule(module, ReflexProbeProtocol::HookStateReflexFound,
-        g_modernInterceptionMethod);
+    if (IsReflexProbingEnabled()) {
+        SetBackend(ReflexProbeProtocol::ReflexBackendModernSetOptions);
+        PublishReflexModule(module, ReflexProbeProtocol::HookStateReflexFound,
+            g_modernInterceptionMethod);
+    }
     return reinterpret_cast<FARPROC>(&HookGetFeatureFunction);
 }
 
@@ -947,7 +957,8 @@ bool PatchLegacyPluginGatewayResolver(HMODULE module, bool& sawTarget)
     sawTarget = false;
 
     HMODULE interposer = GetModuleHandleW(L"sl.interposer.dll");
-    if (!interposer || module != interposer || !IsLegacyStreamlineInterposer(interposer))
+    if (!IsReflexProbingEnabled() || !interposer || module != interposer ||
+        !IsLegacyStreamlineInterposer(interposer))
         return true;
 
     auto* base = reinterpret_cast<unsigned char*>(module);
@@ -1050,7 +1061,8 @@ bool PatchStreamlineImportsInModule(HMODULE module, bool& sawTarget)
 
     void* modernResolver = reinterpret_cast<void*>(GetProcAddress(interposer, "slGetFeatureFunction"));
     void* legacySetConstants = reinterpret_cast<void*>(GetProcAddress(interposer, "slSetFeatureConstants"));
-    const bool useLegacyPublicPath = IsLegacyStreamlineInterposer(interposer) && legacySetConstants != nullptr;
+    const bool useLegacyPublicPath = IsReflexProbingEnabled() &&
+        IsLegacyStreamlineInterposer(interposer) && legacySetConstants != nullptr;
 
     auto* descriptor = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + imports.VirtualAddress);
     for (; descriptor->Name; ++descriptor) {
@@ -1080,8 +1092,10 @@ bool PatchStreamlineImportsInModule(HMODULE module, bool& sawTarget)
                     return false;
                 }
 
-                SetBackend(ReflexProbeProtocol::ReflexBackendModernSetOptions);
-                if (g_shared && InterlockedCompareExchange(&g_shared->hookState, 0, 0) ==
+                if (IsReflexProbingEnabled())
+                    SetBackend(ReflexProbeProtocol::ReflexBackendModernSetOptions);
+                if (IsReflexProbingEnabled() &&
+                    InterlockedCompareExchange(&g_shared->hookState, 0, 0) ==
                         ReflexProbeProtocol::HookStateWaitingForDll) {
                     InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateReflexFound);
                 }
@@ -1163,6 +1177,13 @@ DWORD WINAPI WorkerThread(void*)
     if (!ConnectSharedState())
         return 1;
 
+    // Until DLSS-G observation exists, FG-only acquisition must not install
+    // unrelated Reflex or resolver wrappers merely because a probe was selected.
+    if (!IsReflexProbingEnabled()) {
+        OutputDebugStringW(L"ReflexProbe64: FG-only selection; FG observation pending, no API hooks installed.\n");
+        return 0;
+    }
+
     InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateWaitingForDll);
 
     // Prefer already-loaded/static Streamline boundaries. Also arm GetProcAddress IATs
@@ -1188,7 +1209,7 @@ DWORD WINAPI WorkerThread(void*)
         }
 
         bool armedNvapiResolver = false;
-        if (!PatchApplicationNvapiResolver(armedNvapiResolver))
+        if (IsReflexProbingEnabled() && !PatchApplicationNvapiResolver(armedNvapiResolver))
             return 1;
 
         if (InterlockedCompareExchange(&g_nativeNvapiCaptured, 0, 0) != 0) {

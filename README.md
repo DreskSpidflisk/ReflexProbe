@@ -24,6 +24,7 @@ Full measurements, exceptions, and per-game evidence: **[Test findings](docs/Tes
 
 | Capability | Behavior |
 | --- | --- |
+| **Feature selection** | **Reflex probing** enabled by default; **DLSS Frame Generation probing** initially disabled. Both are selectable and locked per acquisition. In this UI-first revision, selecting FG does **not yet** wrap or observe FG functions; its observation/override controls are pending. Disabling Reflex probing leaves Reflex function pointers unwrapped. |
 | **Frame-limit override** | Replaces Streamline `frameLimitUs` or NVAPI `minimumIntervalUs`; `0` is a valid override meaning no explicit interval. Can remain effective with Reflex Low Latency Off. |
 | **Force Boost** | Changes a plain Reflex **On** request to **On + Boost**; does not change Off or an existing On + Boost request. |
 | **Sleep-call counting** | Optional at acquisition time. Wraps supported `slReflexSleep` / `NvAPI_D3D_Sleep` calls; leaves genuine pointers untouched when unchecked. Streamline 1.x Sleep counting is not implemented. |
@@ -51,7 +52,7 @@ Open `ReflexProbe.sln` and build **Debug x64** or **Release x64**. Both projects
 ## Usage
 
 1. Start `ReflexProbe.exe` and select the **actual x64 game executable**, not a launcher wrapper. Executable-path validation is required before acquisition.
-2. Select **State changes** (normal use) or **Raw debug** (short diagnostic capture). Choose the frame-limit override, optional Force Boost, and optional **Count Reflex Sleep Calls** before acquisition.
+2. Choose **Enable Reflex probing**, **Enable DLSS Frame Generation probing**, or both. Select **State changes** (normal use) or **Raw debug** (short diagnostic capture). Configure Reflex frame-limit override, Force Boost, and **Count Reflex Sleep Calls** if Reflex probing is selected. The feature checkboxes lock when Watch is armed or a target is acquired; the FG observer is not implemented yet.
 3. Choose **Launch + Inject** to start the executable suspended and inject before resuming it; **Watch + Inject** to arm a 10 ms exact-full-path process watch and start the game normally through its launcher; or **Attach** for an already-running executable.
 4. Observe requested/effective Reflex state and the **Current effective state** display. Frame-limit and Force Boost policies are live; optional Sleep counts are reported when a state ends. **Clear** is available while idle.
 
@@ -100,6 +101,8 @@ The project uses API-boundary pointer substitution rather than an active generic
 ## Limitations and next steps
 
 ReflexProbe is **x64-only** and intended for offline, non-anti-cheat test software. It does not support anti-cheat/protected multiplayer environments, native Vulkan `VK_NV_low_latency2` interception, or Streamline 1.x Sleep counting. The visible Win32 log is bounded, Attach can miss already-cached pointers, and successful Reflex settings interception does not prove an effective presentation cap.
+
+The two feature groups are present ahead of FG interception. Selecting only FG currently injects the observer infrastructure but produces no FG function events; this is **not** evidence that a game omitted FG calls.
 
 Next: extend the modern resolver architecture to observe **DLSS Frame Generation** through `slDLSSGSetOptions` / `slDLSSGGetState`, then investigate multiplier state and menu suppression in Satisfactory, Hogwarts Legacy, and DOOM. Legacy/pre-MFG FG must remain capability-aware rather than assuming modern multipliers. Consider a direct late-attach fallback only if confirmed necessary.
 

@@ -367,7 +367,8 @@ bool InjectDll(HANDLE process, DWORD processId, const wchar_t* dllPath,
 
 bool CreateSharedState(DWORD processId, const wchar_t* targetPath,
                        bool overrideEnabled, uint32_t overrideUs, bool forceBoostWhenOn,
-                       bool countReflexSleepCalls, wchar_t* error, size_t errorCount)
+                       bool countReflexSleepCalls, bool probeReflex, bool probeDlssFg,
+                       wchar_t* error, size_t errorCount)
 {
     wchar_t mappingName[128]{};
     BuildMappingName(processId, mappingName, _countof(mappingName));
@@ -398,7 +399,9 @@ bool CreateSharedState(DWORD processId, const wchar_t* targetPath,
     g_app.shared->overrideEnabled = overrideEnabled ? 1 : 0;
     g_app.shared->overrideUs = static_cast<LONG>(overrideUs);
     g_app.shared->forceBoostWhenOn = forceBoostWhenOn ? 1 : 0;
-    g_app.shared->countReflexSleepCalls = countReflexSleepCalls ? 1 : 0;
+    g_app.shared->countReflexSleepCalls = countReflexSleepCalls && probeReflex ? 1 : 0;
+    g_app.shared->probeReflexEnabled = probeReflex ? 1 : 0;
+    g_app.shared->probeDlssFgEnabled = probeDlssFg ? 1 : 0;
     wcsncpy_s(g_app.shared->targetPath, _countof(g_app.shared->targetPath), targetPath, _TRUNCATE);
     return true;
 }
@@ -494,27 +497,35 @@ bool FindMatchingProcess(const wchar_t* targetPath, ProcessMatch& match)
 }
 
 void LogInitialTargetPolicy(bool overrideEnabled, uint32_t overrideUs, bool forceBoostWhenOn,
-                            bool countReflexSleepCalls)
+                            bool countReflexSleepCalls, bool probeReflex, bool probeDlssFg)
 {
+    AppendStatusLine(probeReflex
+        ? L"Reflex probing: enabled; supported Reflex function pointers may be wrapped."
+        : L"Reflex probing: disabled; Reflex function pointers pass through untouched.");
+    AppendStatusLine(probeDlssFg
+        ? L"DLSS FG probing: selected; FG function observation is NOT implemented in this build."
+        : L"DLSS FG probing: disabled; FG function pointers pass through untouched.");
+
     wchar_t line[256]{};
-    if (overrideEnabled && overrideUs) {
+    if (probeReflex && overrideEnabled && overrideUs) {
         swprintf_s(line, L"Initial override: %u us (%.3f FPS).", overrideUs,
             1000000.0 / static_cast<double>(overrideUs));
         AppendStatusLine(line);
-    } else if (overrideEnabled) {
+    } else if (probeReflex && overrideEnabled) {
         AppendStatusLine(L"Initial override: 0 us (no explicit Reflex frame limit).");
-    } else {
+    } else if (probeReflex) {
         AppendStatusLine(L"Initial frame-limit override: disabled.");
     }
 
-    if (forceBoostWhenOn)
+    if (probeReflex && forceBoostWhenOn)
         AppendStatusLine(L"Initial Force Boost policy: enabled; plain Reflex On requests will be forwarded as On + Boost.");
-    else
+    else if (probeReflex)
         AppendStatusLine(L"Initial Force Boost policy: disabled; Reflex mode requests pass through unchanged.");
 
-    AppendStatusLine(countReflexSleepCalls
-        ? L"Initial Reflex Sleep call counting: enabled; Reflex Sleep will be wrapped for this target."
-        : L"Initial Reflex Sleep call counting: disabled; Reflex Sleep will remain untouched for this target.");
+    if (probeReflex)
+        AppendStatusLine(countReflexSleepCalls
+            ? L"Initial Reflex Sleep call counting: enabled; Reflex Sleep will be wrapped for this target."
+            : L"Initial Reflex Sleep call counting: disabled; Reflex Sleep will remain untouched for this target.");
 
     if (g_app.captureMode == CaptureModeRawDebug)
         AppendStatusLine(L"Capture mode: Raw debug; bounded raw retention starts with this target.");
@@ -538,7 +549,7 @@ bool PrepareCaptureForExternalTarget(wchar_t* error, size_t errorCount)
 
 bool InjectMatchedProcess(const ProcessMatch& match,
                           bool overrideEnabled, uint32_t overrideUs, bool forceBoostWhenOn,
-                          bool countReflexSleepCalls,
+                          bool countReflexSleepCalls, bool probeReflex, bool probeDlssFg,
                           LONGLONG detectedQpc, LONGLONG watchStartQpc,
                           const wchar_t* acquisitionName,
                           wchar_t* error, size_t errorCount)
@@ -607,7 +618,7 @@ bool InjectMatchedProcess(const ProcessMatch& match,
 
     if (!CreateSharedState(match.processId, match.imagePath,
             overrideEnabled, overrideUs, forceBoostWhenOn, countReflexSleepCalls,
-            error, errorCount)) {
+            probeReflex, probeDlssFg, error, errorCount)) {
         CleanupTarget();
         return false;
     }
@@ -646,12 +657,13 @@ bool InjectMatchedProcess(const ProcessMatch& match,
     AppendStatusLineAtQpc(line, injectedQpc.QuadPart);
 
     LogInitialTargetPolicy(overrideEnabled, overrideUs, forceBoostWhenOn,
-        countReflexSleepCalls);
+        countReflexSleepCalls, probeReflex, probeDlssFg);
     return true;
 }
 
 bool ArmProcessWatch(const wchar_t* targetPath, bool overrideEnabled, uint32_t overrideUs,
                      bool forceBoostWhenOn, bool countReflexSleepCalls,
+                     bool probeReflex, bool probeDlssFg,
                      wchar_t* error, size_t errorCount)
 {
     if (g_app.process) {
@@ -691,6 +703,8 @@ bool ArmProcessWatch(const wchar_t* targetPath, bool overrideEnabled, uint32_t o
     g_app.watchOverrideUs = overrideUs;
     g_app.watchForceBoostWhenOn = forceBoostWhenOn;
     g_app.watchCountReflexSleepCalls = countReflexSleepCalls;
+    g_app.watchProbeReflex = probeReflex;
+    g_app.watchProbeDlssFg = probeDlssFg;
     g_app.watchStartQpc = now.QuadPart;
     g_app.watchArmed = true;
 
@@ -724,6 +738,8 @@ void CancelProcessWatch(bool logCancellation)
     g_app.watchOverrideUs = 0;
     g_app.watchForceBoostWhenOn = false;
     g_app.watchCountReflexSleepCalls = false;
+    g_app.watchProbeReflex = true;
+    g_app.watchProbeDlssFg = false;
     g_app.watchStartQpc = 0;
     UpdateAcquisitionControls();
 
@@ -747,6 +763,8 @@ void PollProcessWatch()
     const uint32_t overrideUs = g_app.watchOverrideUs;
     const bool forceBoostWhenOn = g_app.watchForceBoostWhenOn;
     const bool countReflexSleepCalls = g_app.watchCountReflexSleepCalls;
+    const bool probeReflex = g_app.watchProbeReflex;
+    const bool probeDlssFg = g_app.watchProbeDlssFg;
     const LONGLONG watchStartQpc = g_app.watchStartQpc;
 
     KillTimer(g_app.window, kWatchTimer);
@@ -755,7 +773,8 @@ void PollProcessWatch()
 
     wchar_t error[512]{};
     if (!InjectMatchedProcess(match, overrideEnabled, overrideUs, forceBoostWhenOn,
-            countReflexSleepCalls, detectedQpc.QuadPart, watchStartQpc, L"Watch",
+            countReflexSleepCalls, probeReflex, probeDlssFg,
+            detectedQpc.QuadPart, watchStartQpc, L"Watch",
             error, _countof(error))) {
         wchar_t line[768]{};
         swprintf_s(line, L"Watch injection failed: %s", error);
@@ -769,11 +788,14 @@ void PollProcessWatch()
     g_app.watchOverrideUs = 0;
     g_app.watchForceBoostWhenOn = false;
     g_app.watchCountReflexSleepCalls = false;
+    g_app.watchProbeReflex = true;
+    g_app.watchProbeDlssFg = false;
     g_app.watchStartQpc = 0;
 }
 
 bool AttachRunningProcess(const wchar_t* targetPath, bool overrideEnabled, uint32_t overrideUs,
                           bool forceBoostWhenOn, bool countReflexSleepCalls,
+                          bool probeReflex, bool probeDlssFg,
                           wchar_t* error, size_t errorCount)
 {
     if (g_app.process) {
@@ -802,7 +824,8 @@ bool AttachRunningProcess(const wchar_t* targetPath, bool overrideEnabled, uint3
     QueryPerformanceCounter(&detectedQpc);
 
     return InjectMatchedProcess(match, overrideEnabled, overrideUs, forceBoostWhenOn,
-        countReflexSleepCalls, detectedQpc.QuadPart, 0, L"Attach", error, errorCount);
+        countReflexSleepCalls, probeReflex, probeDlssFg,
+        detectedQpc.QuadPart, 0, L"Attach", error, errorCount);
 }
 
 } // namespace ReflexProbeController
