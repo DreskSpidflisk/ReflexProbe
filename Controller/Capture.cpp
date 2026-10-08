@@ -146,6 +146,25 @@ const wchar_t* ReflexModeName(LONG mode)
     }
 }
 
+// Avoid needless Win32 STATIC/title changes even when different internal
+// values round to identical display text. Hot-path Reflex events are already
+// filtered by the effective mode/interval cache before reaching this helper.
+void SetWindowTextIfChanged(HWND window, const wchar_t* desired)
+{
+    if (!window || !desired)
+        return;
+
+    const size_t desiredLength = wcslen(desired);
+    if (desiredLength < 384 &&
+        GetWindowTextLengthW(window) == static_cast<int>(desiredLength)) {
+        wchar_t current[384]{};
+        GetWindowTextW(window, current, static_cast<int>(_countof(current)));
+        if (wcscmp(current, desired) == 0)
+            return;
+    }
+    SetWindowTextW(window, desired);
+}
+
 void ResetCurrentEffectiveState()
 {
     g_app.haveEffectiveState = false;
@@ -161,21 +180,15 @@ void ResetCurrentEffectiveState()
     const bool fgEnabled = g_app.fgProbing &&
         Button_GetCheck(g_app.fgProbing) == BST_CHECKED;
 
-    if (g_app.currentState) {
-        SetWindowTextW(g_app.currentState,
-            reflexEnabled ? L"Reflex: Unknown | Limit: Unknown"
-                : L"Reflex: Probing disabled");
-    }
-    if (g_app.fgState) {
-        SetWindowTextW(g_app.fgState,
-            fgEnabled ? L"DLSS FG: Waiting for SetOptions"
-                : L"DLSS FG: Probing disabled");
-    }
-    if (g_app.window) {
-        SetWindowTextW(g_app.window, reflexEnabled
-            ? L"ReflexProbe - Reflex Unknown | FPS Limit Unknown"
+    SetWindowTextIfChanged(g_app.currentState,
+        reflexEnabled ? L"Reflex: Unknown | Limit: Unknown"
+            : L"Reflex: Probing disabled");
+    SetWindowTextIfChanged(g_app.fgState,
+        fgEnabled ? L"DLSS FG: Waiting for SetOptions"
+            : L"DLSS FG: Probing disabled");
+    SetWindowTextIfChanged(g_app.window,
+        reflexEnabled ? L"ReflexProbe - Reflex Unknown | FPS Limit Unknown"
             : L"ReflexProbe - No Reflex probing");
-    }
 }
 
 void UpdateCurrentEffectiveState(const CapturedReflexEvent& event)
@@ -214,10 +227,8 @@ void UpdateCurrentEffectiveState(const CapturedReflexEvent& event)
             mode);
     }
 
-    if (g_app.currentState)
-        SetWindowTextW(g_app.currentState, label);
-    if (g_app.window)
-        SetWindowTextW(g_app.window, title);
+    SetWindowTextIfChanged(g_app.currentState, label);
+    SetWindowTextIfChanged(g_app.window, title);
 }
 
 void FormatReflexEvent(const CapturedReflexEvent& event, wchar_t* line, size_t lineCount)
@@ -303,12 +314,9 @@ void FormatFgDisplayLine(const CapturedReflexEvent& event, bool newState,
     if (event.kind == ReflexProbeProtocol::FgEventSetOptions) {
         float targetFps = 0;
         memcpy(&targetFps, &fg.targetFrameRateBits, sizeof(targetFps));
-        wchar_t forwarding[192]{};
-        swprintf_s(forwarding,
-            L", forwarded mode=%s (%u), flags=0x%08X%s",
-            FgModeName(fg.forwardedMode), fg.forwardedMode, fg.forwardedFlags,
+        const wchar_t* overrideMarker =
             (fg.mode != fg.forwardedMode || fg.flags != fg.forwardedFlags)
-                ? L" [OVERRIDE]" : L"");
+                ? L" [OVERRIDE]" : L"";
         wchar_t extras[256]{};
         if (fg.optionsVersion >= 3)
             swprintf_s(extras, L", queueParallelism=%u", fg.parallelism);
@@ -323,15 +331,22 @@ void FormatFgDisplayLine(const CapturedReflexEvent& event, bool newState,
             wcscat_s(extras, tail);
         }
         swprintf_s(line, lineCount,
-            L"%sslDLSSGSetOptions #%ld: viewport=%u, version=%u, mode=%s (%u), "
-            L"framesToGenerate=%u (%uX), flags=0x%08X [fullscreenMenuDetection=%s, "
+            L"%sslDLSSGSetOptions #%ld: viewport=%u, version=%u, "
+            L"requested mode=%s (%u), forwarded mode=%s (%u), "
+            L"framesToGenerate=%u (%uX), "
+            L"requested flags=0x%08X, forwarded flags=0x%08X%s "
+            L"[requested fullscreenMenuDetection=%s, forwarded fullscreenMenuDetection=%s, "
             L"retainResourcesOff=%s, dynamicResolution=%s, showOnlyInterpolated=%s, requestVRAM=%s], "
             L"dynamicRes=%ux%u, backBuffers=%u, inputSize=%ux%u, backbufferSize=%ux%u, "
             L"bufferFormats[color=%u mvec=%u depth=%u hudless=%u UI=%u], "
-            L"errorCallback=%s%s%s, result=%ld",
+            L"errorCallback=%s%s, result=%ld",
             prefix, event.sequence, fg.viewport, fg.optionsVersion,
-            FgModeName(fg.mode), fg.mode, fg.generatedFrames, fg.generatedFrames + 1,
-            fg.flags, (fg.flags & 0x10u) ? L"On" : L"Off",
+            FgModeName(fg.mode), fg.mode,
+            FgModeName(fg.forwardedMode), fg.forwardedMode,
+            fg.generatedFrames, fg.generatedFrames + 1,
+            fg.flags, fg.forwardedFlags, overrideMarker,
+            (fg.flags & 0x10u) ? L"On" : L"Off",
+            (fg.forwardedFlags & 0x10u) ? L"On" : L"Off",
             (fg.flags & 0x08u) ? L"On" : L"Off",
             (fg.flags & 0x02u) ? L"On" : L"Off",
             (fg.flags & 0x01u) ? L"On" : L"Off",
@@ -341,7 +356,7 @@ void FormatFgDisplayLine(const CapturedReflexEvent& event, bool newState,
             fg.colorBufferFormat, fg.motionBufferFormat, fg.depthBufferFormat,
             fg.hudlessBufferFormat, fg.uiBufferFormat,
             fg.errorCallbackPresent ? L"Present" : L"None",
-            extras, forwarding, event.result);
+            extras, event.result);
     } else {
         wchar_t options[240]{};
         // Query inputs belong in Raw debug; State changes describes returned
