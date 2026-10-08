@@ -239,12 +239,6 @@ void AppendStatusLine(const wchar_t* text)
     AppendStatusLineAtQpc(text, 0);
 }
 
-void BeginNewDiagnosticSession()
-{
-    // Restore only the latest acquisition, not every prior target's header.
-    FreeTextBuffer(g_app.sessionDiagnostics);
-}
-
 LRESULT CALLBACK StatusEditProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
 {
     if (message == WM_KEYDOWN && wParam == static_cast<WPARAM>('A') &&
