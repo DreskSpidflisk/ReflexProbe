@@ -60,9 +60,10 @@ void ClearCaptureHistory()
 
     if (g_app.status) {
         SetWindowTextW(g_app.status, L"");
-        // Restore only the initial program diagnostics, never later session history.
+        // Restore only the startup banner, applying fresh timestamps to each line.
+        // No captured events, session history or Clear marker are replayed.
         if (g_app.startupDiagnostics.data)
-            AppendStatus(g_app.startupDiagnostics.data);
+            AppendDisplayLineAtQpc(g_app.startupDiagnostics.data, 0);
     }
 }
 
