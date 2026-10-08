@@ -325,7 +325,9 @@ void FormatFgDisplayLine(const CapturedReflexEvent& event, bool newState,
             extras, event.result);
     } else {
         wchar_t options[240]{};
-        if (fg.optionsPresent) {
+        // Query inputs belong in Raw debug; State changes describes returned
+        // persistent state, never the arguments of the query that obtained it.
+        if (fg.optionsPresent && !newState) {
             swprintf_s(options,
                 L", inputOptions[v%u mode=%s (%u), framesToGenerate=%u, "
                 L"flags=0x%08X, fullscreenMenuDetection=%s]",
@@ -386,14 +388,39 @@ bool SameFgState(const CapturedReflexEvent& a, const CapturedReflexEvent& b)
     if (a.kind != b.kind || a.result != b.result)
         return false;
 
-    ReflexProbeProtocol::FgEventData left = a.fg;
-    ReflexProbeProtocol::FgEventData right = b.fg;
-    // Per-call presentation count, not persistent runtime state.
     if (a.kind == ReflexProbeProtocol::FgEventGetState) {
-        left.framesPresented = 0;
-        right.framesPresented = 0;
+        const ReflexProbeProtocol::FgEventData& left = a.fg;
+        const ReflexProbeProtocol::FgEventData& right = b.fg;
+        // GetState's optional DLSSGOptions are *query inputs*. Alternating
+        // calls with options and nullptr (as DOOM: The Dark Ages does) must
+        // not create a new runtime state. Compare only captured output fields.
+        // framesPresented is transient since the preceding GetState call.
+        if (left.viewport != right.viewport ||
+            left.stateVersion != right.stateVersion ||
+            left.stateValid != right.stateValid)
+            return false;
+
+        // An unsuccessful query has no valid output. The result code above
+        // still distinguishes errors; caller inputs never do.
+        if (!left.stateValid)
+            return true;
+
+        if (left.status != right.status ||
+            left.minDimension != right.minDimension)
+            return false;
+
+        if (left.stateVersion >= 2 &&
+            (left.maxGeneratedFrames != right.maxGeneratedFrames ||
+             left.vsyncAvailable != right.vsyncAvailable))
+            return false;
+
+        return left.stateVersion < 4 ||
+            left.dynamicMfgAvailable == right.dynamicMfgAvailable;
     }
-    return memcmp(&left, &right, sizeof(left)) == 0;
+
+    // SetOptions is a requested configuration, so all its input fields are
+    // meaningful for change detection. Keep that existing behavior.
+    return memcmp(&a.fg, &b.fg, sizeof(a.fg)) == 0;
 }
 
 void HandleCapturedFgEvent(const CapturedReflexEvent& event)
