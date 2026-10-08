@@ -155,8 +155,6 @@ void ResetCurrentEffectiveState()
                 : L"DLSS FG: Probing disabled");
     }
     if (g_app.window) {
-        const bool reflexEnabled = g_app.reflexProbing &&
-            Button_GetCheck(g_app.reflexProbing) == BST_CHECKED;
         SetWindowTextW(g_app.window, reflexEnabled
             ? L"ReflexProbe - Reflex Unknown | FPS Limit Unknown"
             : L"ReflexProbe - No Reflex probing");
