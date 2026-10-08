@@ -743,7 +743,6 @@ bool ArmProcessWatch(const wchar_t* targetPath, bool overrideEnabled, uint32_t o
         return false;
     }
 
-    BeginNewDiagnosticSession();
     UpdateAcquisitionControls();
 
     wchar_t line[1400]{};
@@ -852,7 +851,6 @@ bool AttachRunningProcess(const wchar_t* targetPath, bool overrideEnabled, uint3
     LARGE_INTEGER detectedQpc{};
     QueryPerformanceCounter(&detectedQpc);
 
-    BeginNewDiagnosticSession();
     return InjectMatchedProcess(match, overrideEnabled, overrideUs, forceBoostWhenOn,
         countReflexSleepCalls, probeReflex, probeDlssFg, fgPolicy,
         detectedQpc.QuadPart, 0, L"Attach", error, errorCount);
