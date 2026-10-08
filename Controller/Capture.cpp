@@ -139,15 +139,20 @@ void ResetCurrentEffectiveState()
     g_app.currentEffectiveMode = 0;
     g_app.currentEffectiveUs = 0;
 
+    const bool reflexEnabled = g_app.reflexProbing &&
+        Button_GetCheck(g_app.reflexProbing) == BST_CHECKED;
+    const bool fgEnabled = g_app.fgProbing &&
+        Button_GetCheck(g_app.fgProbing) == BST_CHECKED;
+
     if (g_app.currentState) {
-        const bool reflexEnabled = g_app.reflexProbing &&
-            Button_GetCheck(g_app.reflexProbing) == BST_CHECKED;
-        const bool fgEnabled = g_app.fgProbing &&
-            Button_GetCheck(g_app.fgProbing) == BST_CHECKED;
         SetWindowTextW(g_app.currentState,
-            reflexEnabled ? L"Current effective state: Reflex Unknown | Reflex FPS limit: Unknown"
-            : fgEnabled ? L"Reflex probing disabled | DLSS FG observation pending"
-            : L"No API probes selected");
+            reflexEnabled ? L"Reflex: Unknown | Limit: Unknown"
+                : L"Reflex: Probing disabled");
+    }
+    if (g_app.fgState) {
+        SetWindowTextW(g_app.fgState,
+            fgEnabled ? L"DLSS FG: Observation pending"
+                : L"DLSS FG: Probing disabled");
     }
     if (g_app.window) {
         const bool reflexEnabled = g_app.reflexProbing &&
@@ -180,14 +185,14 @@ void UpdateCurrentEffectiveState(const CapturedReflexEvent& event)
     if (event.effectiveUs) {
         const double fps = 1000000.0 / static_cast<double>(event.effectiveUs);
         swprintf_s(label,
-            L"Current effective state: Reflex %s | Reflex FPS limit: %.3f FPS",
+            L"Reflex: %s | Limit: %.3f FPS",
             mode, fps);
         swprintf_s(title,
             L"ReflexProbe - Reflex %s | FPS Limit %.3f",
             mode, fps);
     } else {
         swprintf_s(label,
-            L"Current effective state: Reflex %s | Reflex FPS limit: None (0 us)",
+            L"Reflex: %s | Limit: None (0 us)",
             mode);
         swprintf_s(title,
             L"ReflexProbe - Reflex %s | FPS Limit None (0 us)",

@@ -45,8 +45,10 @@ constexpr int kReflexGroupHeight = 56;
 constexpr int kFgGroupTop = 198;
 constexpr int kFgGroupHeight = 56;
 constexpr int kAcquisitionTop = 267;
-constexpr int kCurrentStateTop = 307;
-constexpr int kStatusHeadingTop = 337;
+constexpr int kReflexStateTop = kAcquisitionTop - 1;
+constexpr int kFgStateTop = kAcquisitionTop + 15;
+constexpr int kStatusHeadingTop = 310;
+constexpr int kAcquisitionStatusGap = 8;
 
 bool IsSelectedGameExecutableValid()
 {
@@ -625,8 +627,15 @@ void LayoutControls(int clientWidth, int clientHeight)
     if (g_app.attach)
         MoveWindow(g_app.attach, attachX, kAcquisitionTop, kAttachWidth, 30, TRUE);
 
+    // Both status lines share the acquisition-button height. The available label
+    // width is bounded by Launch's left edge even at minimum window width.
+    const int stateWidth = launchX - kMargin - kAcquisitionStatusGap;
     if (g_app.currentState)
-        MoveWindow(g_app.currentState, kMargin, kCurrentStateTop, usableWidth > 50 ? usableWidth : 50, 20, TRUE);
+        MoveWindow(g_app.currentState, kMargin, kReflexStateTop,
+            stateWidth > 50 ? stateWidth : 50, 16, TRUE);
+    if (g_app.fgState)
+        MoveWindow(g_app.fgState, kMargin, kFgStateTop,
+            stateWidth > 50 ? stateWidth : 50, 16, TRUE);
 
     if (g_app.statusLabel)
         MoveWindow(g_app.statusLabel, kMargin, kStatusHeadingTop, 180, 20, TRUE);
@@ -783,10 +792,16 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         SetChildFont(g_app.attach, font);
 
         g_app.currentState = CreateWindowExW(0, L"STATIC",
-            L"Current effective state: Reflex Unknown | Reflex FPS limit: Unknown",
+            L"Reflex: Unknown | Limit: Unknown",
             WS_CHILD | WS_VISIBLE,
             0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
         SetChildFont(g_app.currentState, font);
+
+        g_app.fgState = CreateWindowExW(0, L"STATIC",
+            L"DLSS FG: Probing disabled",
+            WS_CHILD | WS_VISIBLE,
+            0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
+        SetChildFont(g_app.fgState, font);
 
         g_app.statusLabel = CreateWindowExW(0, L"STATIC", L"Status / API requests",
             WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
