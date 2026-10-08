@@ -181,9 +181,8 @@ struct AppState {
     bool rawDebugWrapped = false;
     bool rawRingWrapNoticePending = false;
 
-    // RAM-only durable diagnostics, separate from disposable capture events.
+    // RAM-only startup banner, stored without timestamps for Clear replay.
     TextBuffer startupDiagnostics{};
-    TextBuffer sessionDiagnostics{};
     bool capturingStartupDiagnostics = false;
 
     bool haveStateEvent = false;
@@ -207,7 +206,6 @@ void FreeTextBuffer(TextBuffer& buffer);
 void AppendDisplayLineAtQpc(const wchar_t* text, LONGLONG eventQpc);
 void AppendStatusLineAtQpc(const wchar_t* text, LONGLONG eventQpc);
 void AppendStatusLine(const wchar_t* text);
-void BeginNewDiagnosticSession();
 void RecreateStatusControl(bool wordWrap);
 
 const wchar_t* PathFileName(const wchar_t* path);
