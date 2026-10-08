@@ -131,6 +131,13 @@ struct AppState {
     LONG currentEffectiveMode = 0;
     uint32_t currentEffectiveUs = 0;
 
+    // Cache only the configuration fields displayed by the FG status label.
+    // High-frequency identical SetOptions submissions require no Win32 text I/O.
+    bool haveFgLabelState = false;
+    uint32_t fgLabelMode = 0;
+    uint32_t fgLabelGeneratedFrames = 0;
+    bool fgLabelMenuDetection = false;
+
     bool watchArmed = false;
     wchar_t watchTargetPath[ReflexProbeProtocol::kPathChars]{};
     bool watchOverrideEnabled = false;

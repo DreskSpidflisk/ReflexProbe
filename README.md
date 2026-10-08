@@ -31,6 +31,7 @@ Full measurements, exceptions, and per-game evidence: **[Test findings](docs/Tes
 | **Capture modes** | **State changes** compresses identical settings calls into repeated-state counts; **Raw debug** retains the latest 131,072 raw events in a RAM ring. |
 | **Acquisition** | **Launch + Inject**, **Watch + Inject** (launcher-friendly exact executable path), and **Attach**. |
 | **Diagnostics** | Backend, loaded-module versions, interception method/caller, requested/effective state, optional Sleep counts, build timestamps, protocol tag, and controller/injected DLL hashes. |
+| **FG status label** | Displays only the latest `slDLSSGSetOptions` mode, requested multiplier, and fullscreen-menu-detection flag. `slDLSSGGetState` continues to be captured and logged separately, but never changes the label. Identical displayed values are cached to avoid redundant Win32 text updates. |
 
 There is no driver patch, Streamline DLL replacement, shader modification, or disk capture. Frame-limit and Force Boost policies can be changed while a target runs; the Sleep-counting choice is **locked for that acquisition**. The FPS field defaults to 158 when starting ReflexProbe, but override is **off by default**.
 

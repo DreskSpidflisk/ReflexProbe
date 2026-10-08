@@ -151,6 +151,10 @@ void ResetCurrentEffectiveState()
     g_app.haveEffectiveState = false;
     g_app.currentEffectiveMode = 0;
     g_app.currentEffectiveUs = 0;
+    g_app.haveFgLabelState = false;
+    g_app.fgLabelMode = 0;
+    g_app.fgLabelGeneratedFrames = 0;
+    g_app.fgLabelMenuDetection = false;
 
     const bool reflexEnabled = g_app.reflexProbing &&
         Button_GetCheck(g_app.reflexProbing) == BST_CHECKED;
@@ -164,7 +168,7 @@ void ResetCurrentEffectiveState()
     }
     if (g_app.fgState) {
         SetWindowTextW(g_app.fgState,
-            fgEnabled ? L"DLSS FG: Waiting for API calls"
+            fgEnabled ? L"DLSS FG: Waiting for SetOptions"
                 : L"DLSS FG: Probing disabled");
     }
     if (g_app.window) {
@@ -478,27 +482,29 @@ void HandleCapturedFgEvent(const CapturedReflexEvent& event)
 
 void UpdateCurrentFgState(const CapturedReflexEvent& event)
 {
-    if (!g_app.fgState)
+    // GetState reports query results, not the game's requested FG engagement.
+    // Keep the status label exclusively tied to SetOptions.
+    if (event.kind != ReflexProbeProtocol::FgEventSetOptions || !g_app.fgState)
+        return;
+
+    const ReflexProbeProtocol::FgEventData& fg = event.fg;
+    const bool menuDetection = (fg.flags & 0x10u) != 0;
+    if (g_app.haveFgLabelState &&
+        g_app.fgLabelMode == fg.mode &&
+        g_app.fgLabelGeneratedFrames == fg.generatedFrames &&
+        g_app.fgLabelMenuDetection == menuDetection)
         return;
 
     wchar_t label[320]{};
-    const ReflexProbeProtocol::FgEventData& fg = event.fg;
-    if (event.kind == ReflexProbeProtocol::FgEventSetOptions) {
-        swprintf_s(label, L"DLSS FG: %s | %uX | Menu detection: %s",
-            FgModeName(fg.mode), fg.generatedFrames + 1,
-            (fg.flags & 0x10u) ? L"On" : L"Off");
-    } else if (fg.stateValid) {
-        swprintf_s(label, L"DLSS FG: GetState %s | viewport %u",
-            fg.status == 0 ? L"OK" : L"status flags set", fg.viewport);
-    } else {
-        swprintf_s(label, L"DLSS FG: GetState returned %ld", event.result);
+    swprintf_s(label, L"DLSS FG: %s | %uX | Menu detection: %s",
+        FgModeName(fg.mode), fg.generatedFrames + 1,
+        menuDetection ? L"On" : L"Off");
+    if (SetWindowTextW(g_app.fgState, label)) {
+        g_app.haveFgLabelState = true;
+        g_app.fgLabelMode = fg.mode;
+        g_app.fgLabelGeneratedFrames = fg.generatedFrames;
+        g_app.fgLabelMenuDetection = menuDetection;
     }
-    // GetState may be called once per frame. Avoid sending WM_SETTEXT and
-    // repaints for a label whose meaningful content did not change.
-    wchar_t previous[320]{};
-    GetWindowTextW(g_app.fgState, previous, static_cast<int>(_countof(previous)));
-    if (wcscmp(previous, label) != 0)
-        SetWindowTextW(g_app.fgState, label);
 }
 
 bool AppendCapturedEventToBuffer(TextBuffer& buffer, const CapturedReflexEvent& event, bool newState)
@@ -787,7 +793,8 @@ void PollSharedState()
         if (captured.kind == ReflexProbeProtocol::FgEventSetOptions ||
             captured.kind == ReflexProbeProtocol::FgEventGetState) {
             captured.fg = event.fg;
-            UpdateCurrentFgState(captured);
+            if (captured.kind == ReflexProbeProtocol::FgEventSetOptions)
+                UpdateCurrentFgState(captured);
         }
         if (captured.kind == ReflexProbeProtocol::ReflexEventSettings)
             UpdateCurrentEffectiveState(captured);
