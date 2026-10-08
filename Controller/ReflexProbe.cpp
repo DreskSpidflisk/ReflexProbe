@@ -385,7 +385,6 @@ bool LaunchAndInject()
         return false;
     }
 
-    BeginNewDiagnosticSession();
     g_app.process = process.hProcess;
     g_app.processId = process.dwProcessId;
 
@@ -1153,7 +1152,6 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         CleanupTarget();
         FreeRawDebugBuffer();
         FreeTextBuffer(g_app.startupDiagnostics);
-        FreeTextBuffer(g_app.sessionDiagnostics);
         PostQuitMessage(0);
         return 0;
     }
