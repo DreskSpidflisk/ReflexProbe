@@ -303,6 +303,12 @@ void FormatFgDisplayLine(const CapturedReflexEvent& event, bool newState,
     if (event.kind == ReflexProbeProtocol::FgEventSetOptions) {
         float targetFps = 0;
         memcpy(&targetFps, &fg.targetFrameRateBits, sizeof(targetFps));
+        wchar_t forwarding[192]{};
+        swprintf_s(forwarding,
+            L", forwarded mode=%s (%u), flags=0x%08X%s",
+            FgModeName(fg.forwardedMode), fg.forwardedMode, fg.forwardedFlags,
+            (fg.mode != fg.forwardedMode || fg.flags != fg.forwardedFlags)
+                ? L" [OVERRIDE]" : L"");
         wchar_t extras[256]{};
         if (fg.optionsVersion >= 3)
             swprintf_s(extras, L", queueParallelism=%u", fg.parallelism);
@@ -322,7 +328,7 @@ void FormatFgDisplayLine(const CapturedReflexEvent& event, bool newState,
             L"retainResourcesOff=%s, dynamicResolution=%s, showOnlyInterpolated=%s, requestVRAM=%s], "
             L"dynamicRes=%ux%u, backBuffers=%u, inputSize=%ux%u, backbufferSize=%ux%u, "
             L"bufferFormats[color=%u mvec=%u depth=%u hudless=%u UI=%u], "
-            L"errorCallback=%s%s, result=%ld (forwarded unchanged)",
+            L"errorCallback=%s%s%s, result=%ld",
             prefix, event.sequence, fg.viewport, fg.optionsVersion,
             FgModeName(fg.mode), fg.mode, fg.generatedFrames, fg.generatedFrames + 1,
             fg.flags, (fg.flags & 0x10u) ? L"On" : L"Off",
@@ -335,7 +341,7 @@ void FormatFgDisplayLine(const CapturedReflexEvent& event, bool newState,
             fg.colorBufferFormat, fg.motionBufferFormat, fg.depthBufferFormat,
             fg.hudlessBufferFormat, fg.uiBufferFormat,
             fg.errorCallbackPresent ? L"Present" : L"None",
-            extras, event.result);
+            extras, forwarding, event.result);
     } else {
         wchar_t options[240]{};
         // Query inputs belong in Raw debug; State changes describes returned
@@ -488,20 +494,20 @@ void UpdateCurrentFgState(const CapturedReflexEvent& event)
         return;
 
     const ReflexProbeProtocol::FgEventData& fg = event.fg;
-    const bool menuDetection = (fg.flags & 0x10u) != 0;
+    const bool menuDetection = (fg.forwardedFlags & 0x10u) != 0;
     if (g_app.haveFgLabelState &&
-        g_app.fgLabelMode == fg.mode &&
+        g_app.fgLabelMode == fg.forwardedMode &&
         g_app.fgLabelGeneratedFrames == fg.generatedFrames &&
         g_app.fgLabelMenuDetection == menuDetection)
         return;
 
     wchar_t label[320]{};
     swprintf_s(label, L"DLSS FG: %s | %uX | Menu detection: %s",
-        FgModeName(fg.mode), fg.generatedFrames + 1,
+        FgModeName(fg.forwardedMode), fg.generatedFrames + 1,
         menuDetection ? L"On" : L"Off");
     if (SetWindowTextW(g_app.fgState, label)) {
         g_app.haveFgLabelState = true;
-        g_app.fgLabelMode = fg.mode;
+        g_app.fgLabelMode = fg.forwardedMode;
         g_app.fgLabelGeneratedFrames = fg.generatedFrames;
         g_app.fgLabelMenuDetection = menuDetection;
     }

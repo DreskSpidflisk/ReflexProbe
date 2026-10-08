@@ -10,7 +10,7 @@
 namespace ReflexProbeProtocol {
 
 constexpr uint32_t kMagic = 0x31505246; // "FRP1" little-endian.
-constexpr uint32_t kVersion = 9;
+constexpr uint32_t kVersion = 10;
 constexpr uint32_t kEventCapacity = 4096;
 constexpr uint32_t kPathChars = 1024;
 constexpr uint32_t kVersionChars = 64;
@@ -18,7 +18,7 @@ constexpr uint32_t kErrorChars = 512;
 
 // Human-readable source tag for rapid local rebuild/testing. The controller also hashes the
 // actual EXE and DLL on disk, so a stale or mismatched binary is obvious in copied logs.
-constexpr wchar_t kBuildTag[] = L"2026-10-08.24-sl2-fg-observation";
+constexpr wchar_t kBuildTag[] = L"2026-10-08.25-sl2-fg-overrides";
 
 constexpr wchar_t kMappingPrefix[] = L"Local\\ReflexProbe.";
 
@@ -54,6 +54,8 @@ struct FgEventData {
     uint32_t mode;
     uint32_t generatedFrames;
     uint32_t flags;
+    uint32_t forwardedMode; // forwarded FG SetOptions mode
+    uint32_t forwardedFlags;
     uint32_t dynamicWidth;
     uint32_t dynamicHeight;
     uint32_t numBackBuffers;
@@ -107,6 +109,10 @@ struct SharedState {
     // Feature selection is immutable for the lifetime of the acquired target.
     LONG probeReflexEnabled;
     LONG probeDlssFgEnabled;
+    LONG wrapFgGetState; // acquisition-time, original pointer when false
+    volatile LONG fgForceOnWhenAuto;
+    volatile LONG fgMenuOverrideEnabled;
+    volatile LONG fgMenuOverrideOn;
 
     volatile LONG hookState;
     volatile LONG backend;

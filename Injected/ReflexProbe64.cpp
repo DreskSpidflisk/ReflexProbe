@@ -358,8 +358,7 @@ void PublishSleepEvent(LONG result)
     InterlockedExchange(&event.sequence, serial);
 }
 
-// FG settings are observational only. This is deliberately independent of the
-// Reflex backend and its existing state machine.
+// FG events record both requested and forwarded options, independently of Reflex.
 void PublishFgEvent(LONG kind, const ReflexProbeProtocol::FgEventData& data, LONG result)
 {
     if (!g_shared)
@@ -429,7 +428,65 @@ sl::Result HookFgSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
     ReflexProbeProtocol::FgEventData data{};
     data.viewport = static_cast<uint32_t>(viewport);
     CaptureFgOptions(options, data);
-    const sl::Result result = real(viewport, options);
+
+    const uint32_t version = static_cast<uint32_t>(options.structVersion);
+    const bool knownVersion = version >= 1 && version <= 5;
+    const bool forceAuto = g_shared &&
+        InterlockedCompareExchange(&g_shared->fgForceOnWhenAuto, 0, 0) != 0;
+    const bool overrideMenu = g_shared &&
+        InterlockedCompareExchange(&g_shared->fgMenuOverrideEnabled, 0, 0) != 0;
+    const bool menuOn = g_shared &&
+        InterlockedCompareExchange(&g_shared->fgMenuOverrideOn, 0, 0) != 0;
+    uint32_t mode = data.mode;
+    uint32_t flags = data.flags;
+    if (knownVersion) {
+        if (forceAuto && options.mode == sl::DLSSGMode::eAuto)
+            mode = static_cast<uint32_t>(sl::DLSSGMode::eOn);
+        if (overrideMenu)
+            flags = menuOn ? (flags | 0x10u) : (flags & ~0x10u);
+    }
+    data.forwardedMode = mode;
+    data.forwardedFlags = flags;
+
+    if (mode == data.mode && flags == data.flags) {
+        // The ordinary observational path remains a direct pass-through.
+        const sl::Result result = real(viewport, options);
+        PublishFgEvent(ReflexProbeProtocol::FgEventSetOptions, data, static_cast<LONG>(result));
+        return result;
+    }
+
+    // Version-aware local copy. Do not read members appended after the
+    // caller's version; unknown future versions always pass through above.
+    sl::DLSSGOptions forwarded{};
+    forwarded.next = options.next;
+    forwarded.structType = options.structType;
+    forwarded.structVersion = options.structVersion;
+    forwarded.mode = static_cast<sl::DLSSGMode>(mode);
+    forwarded.numFramesToGenerate = options.numFramesToGenerate;
+    forwarded.flags = static_cast<sl::DLSSGFlags>(flags);
+    forwarded.dynamicResWidth = options.dynamicResWidth;
+    forwarded.dynamicResHeight = options.dynamicResHeight;
+    forwarded.numBackBuffers = options.numBackBuffers;
+    forwarded.mvecDepthWidth = options.mvecDepthWidth;
+    forwarded.mvecDepthHeight = options.mvecDepthHeight;
+    forwarded.colorWidth = options.colorWidth;
+    forwarded.colorHeight = options.colorHeight;
+    forwarded.colorBufferFormat = options.colorBufferFormat;
+    forwarded.mvecBufferFormat = options.mvecBufferFormat;
+    forwarded.depthBufferFormat = options.depthBufferFormat;
+    forwarded.hudLessBufferFormat = options.hudLessBufferFormat;
+    forwarded.uiBufferFormat = options.uiBufferFormat;
+    forwarded.onErrorCallback = options.onErrorCallback;
+    if (version >= 2)
+        forwarded.bReserved15 = options.bReserved15;
+    if (version >= 3)
+        forwarded.queueParallelismMode = options.queueParallelismMode;
+    if (version >= 4)
+        forwarded.enableUserInterfaceRecomposition = options.enableUserInterfaceRecomposition;
+    if (version >= 5)
+        forwarded.dynamicTargetFrameRate = options.dynamicTargetFrameRate;
+
+    const sl::Result result = real(viewport, forwarded);
     PublishFgEvent(ReflexProbeProtocol::FgEventSetOptions, data, static_cast<LONG>(result));
     return result;
 }
@@ -757,7 +814,8 @@ sl::Result HookGetFeatureFunction(sl::Feature feature, const char* functionName,
         g_realFgSetOptions = reinterpret_cast<PFun_slDLSSGSetOptions*>(function);
         PublishFgFunction(function, 1);
         function = reinterpret_cast<void*>(&HookFgSetOptions);
-    } else if (IsFgProbingEnabled() && feature == sl::kFeatureDLSS_G &&
+    } else if (IsFgProbingEnabled() && g_shared->wrapFgGetState &&
+               feature == sl::kFeatureDLSS_G &&
                strcmp(functionName, "slDLSSGGetState") == 0) {
         g_realFgGetState = reinterpret_cast<PFun_slDLSSGGetState*>(function);
         PublishFgFunction(function, 2);
