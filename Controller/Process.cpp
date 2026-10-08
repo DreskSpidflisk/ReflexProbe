@@ -503,7 +503,7 @@ void LogInitialTargetPolicy(bool overrideEnabled, uint32_t overrideUs, bool forc
         ? L"Reflex probing: enabled; supported Reflex function pointers may be wrapped."
         : L"Reflex probing: disabled; Reflex function pointers pass through untouched.");
     AppendStatusLine(probeDlssFg
-        ? L"DLSS FG probing: selected; FG function observation is NOT implemented in this build."
+        ? L"DLSS FG probing: enabled; modern SetOptions/GetState are observed when resolved."
         : L"DLSS FG probing: disabled; FG function pointers pass through untouched.");
 
     wchar_t line[256]{};
@@ -530,7 +530,7 @@ void LogInitialTargetPolicy(bool overrideEnabled, uint32_t overrideUs, bool forc
     if (g_app.captureMode == CaptureModeRawDebug)
         AppendStatusLine(L"Capture mode: Raw debug; bounded raw retention starts with this target.");
     else
-        AppendStatusLine(L"Capture mode: State changes; identical Reflex calls are counted but not retained individually.");
+        AppendStatusLine(L"Capture mode: State changes; identical Reflex and per-viewport FG calls are counted.");
 }
 
 bool PrepareCaptureForExternalTarget(wchar_t* error, size_t errorCount)
@@ -644,6 +644,7 @@ bool InjectMatchedProcess(const ProcessMatch& match,
     QueryPerformanceCounter(&injectedQpc);
 
     g_app.lastHookState = -1;
+    g_app.lastFgHookBits = 0;
     g_app.lastEventSerial = 0;
     g_app.loggedInjectedBuild = false;
     g_app.rawUiBatchWarningShown = false;

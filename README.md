@@ -24,7 +24,7 @@ Full measurements, exceptions, and per-game evidence: **[Test findings](docs/Tes
 
 | Capability | Behavior |
 | --- | --- |
-| **Feature selection** | **Reflex probing** enabled by default; **DLSS Frame Generation probing** initially disabled. Both are selectable and locked per acquisition. In this UI-first revision, selecting FG does **not yet** wrap or observe FG functions; its observation/override controls are pending. Disabling Reflex probing leaves Reflex function pointers unwrapped. |
+| **Feature selection** | **Reflex probing** enabled by default; **DLSS Frame Generation probing** initially disabled. Both are selectable and locked per acquisition. FG probing wraps modern Streamline `slDLSSGSetOptions` and `slDLSSGGetState` without modifying calls or results; FG override controls are disabled. Disabling Reflex probing leaves Reflex function pointers unwrapped. |
 | **Frame-limit override** | Replaces Streamline `frameLimitUs` or NVAPI `minimumIntervalUs`; `0` is a valid override meaning no explicit interval. Can remain effective with Reflex Low Latency Off. |
 | **Force Boost** | Changes a plain Reflex **On** request to **On + Boost**; does not change Off or an existing On + Boost request. |
 | **Sleep-call counting** | Optional at acquisition time. Wraps supported `slReflexSleep` / `NvAPI_D3D_Sleep` calls; leaves genuine pointers untouched when unchecked. Streamline 1.x Sleep counting is not implemented. |
@@ -38,7 +38,7 @@ There is no driver patch, Streamline DLL replacement, shader modification, or di
 
 - Visual Studio 2022 with the **v143** toolset and Windows 10 SDK
 - x64 Windows target
-- `STREAMLINE_SDK` environment variable pointing at an NVIDIA Streamline SDK root with `include\sl_reflex.h`
+- `STREAMLINE_SDK` environment variable pointing at an NVIDIA Streamline SDK root with `include\sl_reflex.h` and `include\sl_dlss_g.h` (this build uses the newer FG option/state fields through options v5 and state v4)
 
 Open `ReflexProbe.sln` and build **Debug x64** or **Release x64**. Both projects treat warning-level-4 compiler warnings as errors. Output is placed in `bin\x64\Debug\` or `bin\x64\Release\`.
 
@@ -52,7 +52,7 @@ Open `ReflexProbe.sln` and build **Debug x64** or **Release x64**. Both projects
 ## Usage
 
 1. Start `ReflexProbe.exe` and select the **actual x64 game executable**, not a launcher wrapper. Executable-path validation is required before acquisition.
-2. Choose **Enable Reflex probing**, **Enable DLSS Frame Generation probing**, or both. Select **State changes** (normal use) or **Raw debug** (short diagnostic capture). Configure Reflex frame-limit override, Force Boost, and **Count Reflex Sleep Calls** if Reflex probing is selected. The feature checkboxes lock when Watch is armed or a target is acquired; the FG observer is not implemented yet.
+2. Choose **Enable Reflex probing**, **Enable DLSS Frame Generation probing**, or both. Select **State changes** (normal use) or **Raw debug** (short diagnostic capture). Configure Reflex frame-limit override, Force Boost, and **Count Reflex Sleep Calls** if Reflex probing is selected. The feature checkboxes lock when Watch is armed or a target is acquired; FG overrides remain disabled.
 3. Choose **Launch + Inject** to start the executable suspended and inject before resuming it; **Watch + Inject** to arm a 10 ms exact-full-path process watch and start the game normally through its launcher; or **Attach** for an already-running executable.
 4. Observe requested/effective Reflex state and the **Current effective state** display. Frame-limit and Force Boost policies are live; optional Sleep counts are reported when a state ends. **Clear** is available while idle.
 
@@ -65,7 +65,7 @@ A positive FPS entry is converted as `frameLimitUs = round(1,000,000 / FPS)` (16
 - **An explicit limiter is independent of Low Latency mode.** God of War, Shadow Warrior 3, and Hogwarts Legacy showed effective forced limits with Reflex Off and **zero observed per-frame Sleep calls** in the relevant Off intervals. The downstream enforcement mechanism is not identified by the current probe.
 - **Zero and nonzero requests must be distinguished.** Most tested games submitted `0 us`; Satisfactory submitted **16,666 µs (~60 FPS)** in its main menu and ReflexProbe overrode that hidden policy.
 - **Sleep cadence varies by integration.** DOOM's settings and Sleep calls were virtually 1:1, while No Man's Sky accepted a limit with **no observed Streamline Sleep calls** and did not obey that limit.
-- **Frame Generation complicates interpretation.** DOOM and Dawnwalker captures are consistent with Sleep calls tracking real rendered frames rather than generated output; directly observing DLSS-G state is planned, so this remains an inference.
+- **Frame Generation complicates interpretation.** DOOM and Dawnwalker Reflex-only captures are consistent with Sleep calls tracking real rendered frames rather than generated output; FG probing is implemented but has not yet been validated against these games, so this remains an inference.
 - **Interception may occur outside the main EXE.** Satisfactory resolved Streamline through a game DLL, requiring module-wide resolver interception.
 
 ## Tested games
@@ -90,7 +90,7 @@ These are observed results from specific tested builds, not a universal compatib
 
 ## Interception architecture
 
-**Modern Streamline:** intercept normal `slGetFeatureFunction` imports and selected `GetProcAddress` IAT lookups in loaded non-system modules, then wrap `slReflexSetOptions` and optionally `slReflexSleep`. The scan preserves Streamline's legacy gateway and skips already-hooked resolver slots.
+**Modern Streamline:** intercept normal `slGetFeatureFunction` imports and selected `GetProcAddress` IAT lookups in loaded non-system modules, then wrap selected Reflex functions (`slReflexSetOptions`, optional `slReflexSleep`) and/or DLSS FG functions (`slDLSSGSetOptions` / `slDLSSGGetState`). FG wrappers forward every original call unchanged. The scan preserves Streamline's legacy gateway and skips already-hooked resolver slots.
 
 **Legacy Streamline 1.x:** intercept the `sl.reflex.dll` plugin gateway `slGetPluginFunction("slSetConstants")`, with an older `slSetFeatureConstants` fallback. Its Sleep path is not currently counted.
 
@@ -104,8 +104,8 @@ ReflexProbe is **x64-only**. It makes no distinction between offline and online 
 
 Native Vulkan `VK_NV_low_latency2` interception and Streamline 1.x Sleep counting are **not yet implemented**. The visible Win32 log is bounded, Attach can miss already-cached pointers, and successful Reflex settings interception does not prove an effective presentation cap.
 
-The two feature groups are present ahead of FG interception. Selecting only FG currently injects the observer infrastructure but produces no FG function events; this is **not** evidence that a game omitted FG calls.
+Modern Streamline FG probing uses the existing module-wide resolver and may be selected without Reflex probing. State changes uses separate Reflex, FG SetOptions, and FG GetState histories, keyed by viewport for FG; per-call GetState presentation counts are visible in Raw debug but excluded from persistent-state comparisons. Fullscreen-menu detection is recorded from the game's options flag; the runtime does not expose a dedicated "detector triggered" status. FG interception depends on the game resolving the observed functions after the probe is armed, so absent calls are not proof of absent FG activity.
 
-Next: extend the modern resolver architecture to observe **DLSS Frame Generation** through `slDLSSGSetOptions` / `slDLSSGGetState`, then investigate multiplier state and menu suppression in Satisfactory, Hogwarts Legacy, and DOOM. Legacy/pre-MFG FG must remain capability-aware rather than assuming modern multipliers. Consider a direct late-attach fallback only if confirmed necessary.
+Next: validate FG mode, multiplier and fullscreen-menu detection observations in Satisfactory, Hogwarts Legacy, and DOOM, then evaluate multiplier/menu overrides. Legacy/pre-MFG FG must remain capability-aware rather than assuming modern multipliers. Consider a direct late-attach fallback only if confirmed necessary.
 
 Technical experiments and implementation history live in **[docs/TestFindings.md](docs/TestFindings.md)**.

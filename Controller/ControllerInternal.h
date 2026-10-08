@@ -61,7 +61,18 @@ struct CapturedReflexEvent {
     LONG backend;
     uint32_t requestedUs;
     uint32_t effectiveUs;
+    ReflexProbeProtocol::FgEventData fg{};
 };
+
+struct FgStateRun {
+    bool used = false;
+    LONG kind = 0;
+    uint32_t viewport = 0;
+    CapturedReflexEvent previous{};
+    uint64_t repeats = 0;
+};
+
+constexpr size_t kFgTrackedStreams = 32;
 
 struct TextBuffer {
     wchar_t* data = nullptr;
@@ -111,6 +122,7 @@ struct AppState {
     ReflexProbeProtocol::SharedState* shared = nullptr;
 
     LONG lastHookState = -1;
+    LONG lastFgHookBits = 0;
     LONG lastEventSerial = 0;
     bool loggedInjectedBuild = false;
     bool rawUiBatchWarningShown = false;
@@ -141,6 +153,8 @@ struct AppState {
     CapturedReflexEvent stateEvent{};
     uint64_t stateRepeatCount = 0;
     uint64_t stateSleepCount = 0;
+    FgStateRun fgRuns[kFgTrackedStreams]{};
+    bool fgTrackingOverflowWarned = false;
 };
 
 extern AppState g_app;

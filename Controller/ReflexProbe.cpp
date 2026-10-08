@@ -238,6 +238,7 @@ void CleanupTarget()
 
     g_app.processId = 0;
     g_app.lastHookState = -1;
+    g_app.lastFgHookBits = 0;
     g_app.lastEventSerial = 0;
     g_app.loggedInjectedBuild = false;
     g_app.rawUiBatchWarningShown = false;
@@ -369,6 +370,7 @@ bool LaunchAndInject()
     CloseHandle(process.hThread);
 
     g_app.lastHookState = -1;
+    g_app.lastFgHookBits = 0;
     g_app.lastEventSerial = 0;
     g_app.loggedInjectedBuild = false;
     g_app.rawUiBatchWarningShown = false;
@@ -381,7 +383,7 @@ bool LaunchAndInject()
         ? L"Reflex probing: enabled; supported Reflex functions can be wrapped."
         : L"Reflex probing: disabled; Reflex functions are passed through untouched.");
     AppendStatusLine(probeDlssFg
-        ? L"DLSS FG probing: selected; FG observation is NOT implemented in this build."
+        ? L"DLSS FG probing: enabled; modern SetOptions/GetState observation is active when resolved."
         : L"DLSS FG probing: disabled; FG functions are passed through untouched.");
     if (probeReflex && overrideEnabled && overrideUs) {
         swprintf_s(line, L"Initial override: %u us (%.3f FPS).", overrideUs,
@@ -406,7 +408,7 @@ bool LaunchAndInject()
     if (g_app.captureMode == CaptureModeRawDebug)
         AppendStatusLine(L"Capture mode: Raw debug; bounded raw retention starts with this target.");
     else
-        AppendStatusLine(L"Capture mode: State changes; identical Reflex calls are counted but not retained individually.");
+        AppendStatusLine(L"Capture mode: State changes; identical Reflex and per-viewport FG calls are counted.");
 
     return true;
 }
@@ -722,9 +724,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             g_app.instance, nullptr);
         SetChildFont(g_app.fgProbing, font);
 
-        // The FG selection is available even before observation is implemented.
-        // Only future override controls are disabled; enabling FG probing will
-        // eventually capture SetOptions / GetState through the shared capture mode.
+        // FG observation is active when selected; only future override controls
+        // remain disabled until the overrides have been implemented.
         g_app.fgMultiplierOverride = CreateWindowExW(0, L"BUTTON",
             L"Override FG multiplier",
             WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_AUTOCHECKBOX,
@@ -842,7 +843,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         UpdateAcquisitionControls();
 
         AppendStatusLine(L"ReflexProbe bootstrap: Launch, Watch or Attach selected API probes.");
-        AppendStatusLine(L"Reflex probing is ON by default; DLSS FG probing is OFF. FG function observation is pending implementation.");
+        AppendStatusLine(L"Reflex probing is ON by default; DLSS FG probing is OFF. Selecting FG observes SL2 SetOptions/GetState and menu-detection configuration.");
         AppendStatusLine(L"Frame-limit override is OFF by default. When checked, the FPS value replaces frameLimitUs on intercepted Reflex settings calls.");
         AppendStatusLine(L"Force Boost when Reflex On is independent: plain On requests become On + Boost; Off and existing On + Boost requests are unchanged.");
         AppendStatusLine(L"Reflex Sleep call counting is OFF by default. When disabled, ReflexProbe does not wrap the Reflex Sleep call.");
