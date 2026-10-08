@@ -1293,12 +1293,18 @@ bool PatchLoadedStreamlineImports(bool& foundAny)
                 continue;
             }
 
+            // During combined/FG probing, prioritize dynamic resolution before
+            // the slower Streamline import inspection. Satisfactory resolves
+            // slGetFeatureFunction through a game DLL's GetProcAddress IAT;
+            // the earliest resolver calls cannot be recovered after caching.
+            // Reflex-only retains its previously validated discovery order.
+            const bool probeFg = IsFgProbingEnabled();
+            bool patched = !probeFg ||
+                PatchGetProcAddressResolverInModule(heldModule);
             bool sawTarget = false;
-            bool patched = PatchStreamlineImportsInModule(heldModule, sawTarget);
-            // A module can mix direct imports and dynamic lookups. In an FG
-            // acquisition, cover both, rather than letting a Reflex IAT import
-            // suppress discovery of that module's FG GetProcAddress path.
-            if (patched && (!sawTarget || IsFgProbingEnabled()))
+            if (patched)
+                patched = PatchStreamlineImportsInModule(heldModule, sawTarget);
+            if (patched && !probeFg && !sawTarget)
                 patched = PatchGetProcAddressResolverInModule(heldModule);
             FreeLibrary(heldModule);
 
