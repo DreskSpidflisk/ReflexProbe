@@ -322,6 +322,7 @@ bool LaunchAndInject()
         return false;
     }
 
+    BeginNewDiagnosticSession();
     g_app.process = process.hProcess;
     g_app.processId = process.dwProcessId;
 
@@ -842,6 +843,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         LayoutControls(client.right - client.left, client.bottom - client.top);
         UpdateAcquisitionControls();
 
+        g_app.capturingStartupDiagnostics = true;
         AppendStatusLine(L"ReflexProbe bootstrap: Launch, Watch or Attach selected API probes.");
         AppendStatusLine(L"Reflex probing is ON by default; DLSS FG probing is OFF. Selecting FG observes SL2 SetOptions/GetState and menu-detection configuration.");
         AppendStatusLine(L"Frame-limit override is OFF by default. When checked, the FPS value replaces frameLimitUs on intercepted Reflex settings calls.");
@@ -849,6 +851,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         AppendStatusLine(L"Reflex Sleep call counting is OFF by default. When disabled, ReflexProbe does not wrap the Reflex Sleep call.");
         AppendStatusLine(L"Capture mode defaults to State changes. Raw debug retains at most 131072 calls in RAM. ReflexProbe never writes capture data to disk.");
         LogBinaryIdentity();
+        g_app.capturingStartupDiagnostics = false;
         SetTimer(window, kPollTimer, kPollIntervalMs, nullptr);
         return 0;
     }
@@ -954,6 +957,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         }
         CleanupTarget();
         FreeRawDebugBuffer();
+        FreeTextBuffer(g_app.startupDiagnostics);
+        FreeTextBuffer(g_app.sessionDiagnostics);
         PostQuitMessage(0);
         return 0;
     }

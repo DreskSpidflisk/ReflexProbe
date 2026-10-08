@@ -149,6 +149,11 @@ struct AppState {
     bool rawDebugWrapped = false;
     bool rawRingWrapNoticePending = false;
 
+    // RAM-only durable diagnostics, separate from disposable capture events.
+    TextBuffer startupDiagnostics{};
+    TextBuffer sessionDiagnostics{};
+    bool capturingStartupDiagnostics = false;
+
     bool haveStateEvent = false;
     CapturedReflexEvent stateEvent{};
     uint64_t stateRepeatCount = 0;
@@ -170,6 +175,7 @@ void FreeTextBuffer(TextBuffer& buffer);
 void AppendDisplayLineAtQpc(const wchar_t* text, LONGLONG eventQpc);
 void AppendStatusLineAtQpc(const wchar_t* text, LONGLONG eventQpc);
 void AppendStatusLine(const wchar_t* text);
+void BeginNewDiagnosticSession();
 void RecreateStatusControl(bool wordWrap);
 
 const wchar_t* PathFileName(const wchar_t* path);

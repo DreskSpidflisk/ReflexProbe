@@ -224,12 +224,25 @@ void AppendDisplayLine(const wchar_t* text)
 
 void AppendStatusLineAtQpc(const wchar_t* text, LONGLONG eventQpc)
 {
+    // Only diagnostic lines enter these RAM-only buffers. API/capture events
+    // use AppendDisplayLineAtQpc directly, never the persistent history.
+    if (text) {
+        TextBuffer& diagnostics = g_app.capturingStartupDiagnostics
+            ? g_app.startupDiagnostics : g_app.sessionDiagnostics;
+        AppendTextBufferLineAtQpc(diagnostics, text, eventQpc);
+    }
     AppendDisplayLineAtQpc(text, eventQpc);
 }
 
 void AppendStatusLine(const wchar_t* text)
 {
     AppendStatusLineAtQpc(text, 0);
+}
+
+void BeginNewDiagnosticSession()
+{
+    // Restore only the latest acquisition, not every prior target's header.
+    FreeTextBuffer(g_app.sessionDiagnostics);
 }
 
 LRESULT CALLBACK StatusEditProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
