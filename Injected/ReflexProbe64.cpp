@@ -437,6 +437,10 @@ sl::Result HookFgSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
         InterlockedCompareExchange(&g_shared->fgMenuOverrideEnabled, 0, 0) != 0;
     const bool menuOn = g_shared &&
         InterlockedCompareExchange(&g_shared->fgMenuOverrideOn, 0, 0) != 0;
+    const bool overrideRetention = g_shared &&
+        InterlockedCompareExchange(&g_shared->fgRetentionOverrideEnabled, 0, 0) != 0;
+    const bool retainResources = g_shared &&
+        InterlockedCompareExchange(&g_shared->fgRetentionOverrideOn, 0, 0) != 0;
     uint32_t mode = data.mode;
     uint32_t flags = data.flags;
     if (knownVersion) {
@@ -444,6 +448,8 @@ sl::Result HookFgSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
             mode = static_cast<uint32_t>(sl::DLSSGMode::eOn);
         if (overrideMenu)
             flags = menuOn ? (flags | 0x10u) : (flags & ~0x10u);
+        if (overrideRetention)
+            flags = retainResources ? (flags | 0x08u) : (flags & ~0x08u);
     }
     data.forwardedMode = mode;
     data.forwardedFlags = flags;

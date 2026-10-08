@@ -139,6 +139,8 @@ FgPolicy ReadFgPolicyFromUi()
         policy.forceOnWhenAuto = Button_GetCheck(g_app.fgForceAutoOn) == BST_CHECKED;
         policy.overrideMenu = Button_GetCheck(g_app.fgMenuOverride) == BST_CHECKED;
         policy.menuDetectionOn = Button_GetCheck(g_app.fgMenuOn) == BST_CHECKED;
+        policy.overrideRetention = Button_GetCheck(g_app.fgRetentionOverride) == BST_CHECKED;
+        policy.retainResourcesWhenOff = Button_GetCheck(g_app.fgRetentionOn) == BST_CHECKED;
         policy.wrapGetState = Button_GetCheck(g_app.fgGetState) == BST_CHECKED;
     }
     return policy;
@@ -152,6 +154,10 @@ void ApplyFgPolicyToShared()
     InterlockedExchange(&g_app.shared->fgForceOnWhenAuto, policy.forceOnWhenAuto ? 1 : 0);
     InterlockedExchange(&g_app.shared->fgMenuOverrideEnabled, policy.overrideMenu ? 1 : 0);
     InterlockedExchange(&g_app.shared->fgMenuOverrideOn, policy.menuDetectionOn ? 1 : 0);
+    InterlockedExchange(&g_app.shared->fgRetentionOverrideEnabled,
+        policy.overrideRetention ? 1 : 0);
+    InterlockedExchange(&g_app.shared->fgRetentionOverrideOn,
+        policy.retainResourcesWhenOff ? 1 : 0);
     InterlockedIncrement(&g_app.shared->configSequence);
     AppendStatusLine(policy.forceOnWhenAuto
         ? L"FG policy: Force Auto to On enabled; applies to next SetOptions call."
@@ -161,6 +167,11 @@ void ApplyFgPolicyToShared()
         : (policy.menuDetectionOn
             ? L"FG policy: fullscreen-menu-detection override forced On."
             : L"FG policy: fullscreen-menu-detection override forced Off."));
+    AppendStatusLine(!policy.overrideRetention
+        ? L"FG policy: resource-retention override disabled."
+        : (policy.retainResourcesWhenOff
+            ? L"FG policy: resource-retention override forced On (retained VRAM possible while Off)."
+            : L"FG policy: resource-retention override forced Off."));
 }
 
 void ApplyPolicyToShared(bool logFrameLimit, bool logBoost)
@@ -243,6 +254,14 @@ void UpdateAcquisitionControls()
         EnableWindow(g_app.fgMenuOff, fgEnabled && !watching && menuOverrideChecked);
     if (g_app.fgMenuOn)
         EnableWindow(g_app.fgMenuOn, fgEnabled && !watching && menuOverrideChecked);
+    if (g_app.fgRetentionOverride)
+        EnableWindow(g_app.fgRetentionOverride, fgEnabled && !watching);
+    const bool retentionChecked = g_app.fgRetentionOverride &&
+        Button_GetCheck(g_app.fgRetentionOverride) == BST_CHECKED;
+    if (g_app.fgRetentionOff)
+        EnableWindow(g_app.fgRetentionOff, fgEnabled && !watching && retentionChecked);
+    if (g_app.fgRetentionOn)
+        EnableWindow(g_app.fgRetentionOn, fgEnabled && !watching && retentionChecked);
     if (g_app.fgGetState)
         EnableWindow(g_app.fgGetState, fgEnabled && !probeSelectionLocked);
 
@@ -441,6 +460,11 @@ bool LaunchAndInject()
             : (fgPolicy.menuDetectionOn
                 ? L"Initial FG menu-detection override: On."
                 : L"Initial FG menu-detection override: Off."));
+        AppendStatusLine(!fgPolicy.overrideRetention
+            ? L"Initial FG resource-retention override: disabled."
+            : (fgPolicy.retainResourcesWhenOff
+                ? L"Initial FG resource-retention override: On (VRAM retained while FG Off)."
+                : L"Initial FG resource-retention override: Off."));
     }
     if (probeReflex && overrideEnabled && overrideUs) {
         swprintf_s(line, L"Initial override: %u us (%.3f FPS).", overrideUs,
@@ -626,6 +650,14 @@ int MeasureGroupHeadingWidth(HWND checkbox)
     return GetSystemMetrics(SM_CXMENUCHECK) + extent.cx + 12;
 }
 
+// The radio glyph is already accounted for by MeasureGroupHeadingWidth.
+// Its heading-specific extra trailing gap is unnecessary in a packed row.
+int MeasureCompactRadioWidth(HWND radio)
+{
+    const int width = MeasureGroupHeadingWidth(radio);
+    return width > 8 ? width - 6 : 40;
+}
+
 void LayoutControls(int clientWidth, int clientHeight)
 {
     if (clientWidth <= 0 || clientHeight <= 0)
@@ -672,14 +704,48 @@ void LayoutControls(int clientWidth, int clientHeight)
         MoveWindow(g_app.fgProbing, kMargin + 14, kFgGroupTop - 9,
             MeasureGroupHeadingWidth(g_app.fgProbing), 22, TRUE);
 
-    if (g_app.fgForceAutoOn)
-        MoveWindow(g_app.fgForceAutoOn, kMargin + 18, 220, 200, 22, TRUE);
-    if (g_app.fgMenuOverride)
-        MoveWindow(g_app.fgMenuOverride, kMargin + 225, 220, 207, 22, TRUE);
-    if (g_app.fgMenuOff)
-        MoveWindow(g_app.fgMenuOff, kMargin + 440, 220, 65, 22, TRUE);
-    if (g_app.fgMenuOn)
-        MoveWindow(g_app.fgMenuOn, kMargin + 508, 220, 65, 22, TRUE);
+    // Compact one-line FG override layout, including both independent Off/On
+    // radio groups. Text-derived widths reclaim the blank areas of fixed slots
+    // at the minimum window size while still using the actual UI font.
+    int fgX = kMargin + 18;
+    const int fgRowY = 220;
+    const int fgControlHeight = 22;
+    const int fgGroupGap = 5;
+    const int fgRadioGap = 1;
+    if (g_app.fgForceAutoOn) {
+        const int width = MeasureGroupHeadingWidth(g_app.fgForceAutoOn);
+        MoveWindow(g_app.fgForceAutoOn, fgX, fgRowY, width, fgControlHeight, TRUE);
+        fgX += width + fgGroupGap;
+    }
+    if (g_app.fgMenuOverride) {
+        const int width = MeasureGroupHeadingWidth(g_app.fgMenuOverride);
+        MoveWindow(g_app.fgMenuOverride, fgX, fgRowY, width, fgControlHeight, TRUE);
+        fgX += width + fgRadioGap;
+    }
+    if (g_app.fgMenuOff) {
+        const int width = MeasureCompactRadioWidth(g_app.fgMenuOff);
+        MoveWindow(g_app.fgMenuOff, fgX, fgRowY, width, fgControlHeight, TRUE);
+        fgX += width;
+    }
+    if (g_app.fgMenuOn) {
+        const int width = MeasureCompactRadioWidth(g_app.fgMenuOn);
+        MoveWindow(g_app.fgMenuOn, fgX, fgRowY, width, fgControlHeight, TRUE);
+        fgX += width + fgGroupGap;
+    }
+    if (g_app.fgRetentionOverride) {
+        const int width = MeasureGroupHeadingWidth(g_app.fgRetentionOverride);
+        MoveWindow(g_app.fgRetentionOverride, fgX, fgRowY, width, fgControlHeight, TRUE);
+        fgX += width + fgRadioGap;
+    }
+    if (g_app.fgRetentionOff) {
+        const int width = MeasureCompactRadioWidth(g_app.fgRetentionOff);
+        MoveWindow(g_app.fgRetentionOff, fgX, fgRowY, width, fgControlHeight, TRUE);
+        fgX += width;
+    }
+    if (g_app.fgRetentionOn) {
+        const int width = MeasureCompactRadioWidth(g_app.fgRetentionOn);
+        MoveWindow(g_app.fgRetentionOn, fgX, fgRowY, width, fgControlHeight, TRUE);
+    }
     if (g_app.fgMultiplierOverride)
         MoveWindow(g_app.fgMultiplierOverride, kMargin + 18, 250, 168, 22, TRUE);
     if (g_app.fgMultiplierChoice)
@@ -793,7 +859,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         SetChildFont(g_app.fgProbing, font);
 
         g_app.fgForceAutoOn = CreateWindowExW(0, L"BUTTON",
-            L"Force FG On when Auto",
+            L"Force Auto to On",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
             0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FG_FORCE_AUTO_ON),
             g_app.instance, nullptr);
@@ -821,7 +887,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         SendMessageW(g_app.fgMultiplierChoice, CB_SETCURSEL, 0, 0);
 
         g_app.fgMenuOverride = CreateWindowExW(0, L"BUTTON",
-            L"Override FG menu detection",
+            L"Override menu detection",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
             0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FG_MENU_OVERRIDE),
             g_app.instance, nullptr);
@@ -839,6 +905,28 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FG_MENU_ON),
             g_app.instance, nullptr);
         SetChildFont(g_app.fgMenuOn, font);
+
+        g_app.fgRetentionOverride = CreateWindowExW(0, L"BUTTON",
+            L"Override FG resource retention",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FG_RETENTION_OVERRIDE),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.fgRetentionOverride, font);
+
+        // Independent radio group: On is the default *selection*, but the
+        // override checkbox itself starts unchecked (no intervention).
+        g_app.fgRetentionOff = CreateWindowExW(0, L"BUTTON", L"Off",
+            WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FG_RETENTION_OFF),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.fgRetentionOff, font);
+
+        g_app.fgRetentionOn = CreateWindowExW(0, L"BUTTON", L"On",
+            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FG_RETENTION_ON),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.fgRetentionOn, font);
+        Button_SetCheck(g_app.fgRetentionOn, BST_CHECKED);
 
         g_app.fgGetState = CreateWindowExW(0, L"BUTTON",
             L"Intercept FG GetState calls",
@@ -1001,6 +1089,9 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         case IDC_FG_MENU_OVERRIDE:
         case IDC_FG_MENU_OFF:
         case IDC_FG_MENU_ON:
+        case IDC_FG_RETENTION_OVERRIDE:
+        case IDC_FG_RETENTION_OFF:
+        case IDC_FG_RETENTION_ON:
             if (HIWORD(wParam) == BN_CLICKED) {
                 UpdateAcquisitionControls();
                 ApplyFgPolicyToShared();

@@ -406,6 +406,9 @@ bool CreateSharedState(DWORD processId, const wchar_t* targetPath,
     g_app.shared->fgForceOnWhenAuto = probeDlssFg && fgPolicy.forceOnWhenAuto ? 1 : 0;
     g_app.shared->fgMenuOverrideEnabled = probeDlssFg && fgPolicy.overrideMenu ? 1 : 0;
     g_app.shared->fgMenuOverrideOn = fgPolicy.menuDetectionOn ? 1 : 0;
+    g_app.shared->fgRetentionOverrideEnabled =
+        probeDlssFg && fgPolicy.overrideRetention ? 1 : 0;
+    g_app.shared->fgRetentionOverrideOn = fgPolicy.retainResourcesWhenOff ? 1 : 0;
     wcsncpy_s(g_app.shared->targetPath, _countof(g_app.shared->targetPath), targetPath, _TRUNCATE);
     return true;
 }
@@ -521,6 +524,11 @@ void LogInitialTargetPolicy(bool overrideEnabled, uint32_t overrideUs, bool forc
             : (fgPolicy.menuDetectionOn
                 ? L"Initial FG menu-detection override: On."
                 : L"Initial FG menu-detection override: Off."));
+        AppendStatusLine(!fgPolicy.overrideRetention
+            ? L"Initial FG resource-retention override: disabled."
+            : (fgPolicy.retainResourcesWhenOff
+                ? L"Initial FG resource-retention override: On (VRAM retained while FG Off)."
+                : L"Initial FG resource-retention override: Off."));
     }
 
     wchar_t line[256]{};

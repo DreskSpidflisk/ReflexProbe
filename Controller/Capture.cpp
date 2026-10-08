@@ -336,7 +336,8 @@ void FormatFgDisplayLine(const CapturedReflexEvent& event, bool newState,
             L"framesToGenerate=%u (%uX), "
             L"requested flags=0x%08X, forwarded flags=0x%08X%s "
             L"[requested fullscreenMenuDetection=%s, forwarded fullscreenMenuDetection=%s, "
-            L"retainResourcesOff=%s, dynamicResolution=%s, showOnlyInterpolated=%s, requestVRAM=%s], "
+            L"requested retainResourcesOff=%s, forwarded retainResourcesOff=%s, "
+            L"dynamicResolution=%s, showOnlyInterpolated=%s, requestVRAM=%s], "
             L"dynamicRes=%ux%u, backBuffers=%u, inputSize=%ux%u, backbufferSize=%ux%u, "
             L"bufferFormats[color=%u mvec=%u depth=%u hudless=%u UI=%u], "
             L"errorCallback=%s%s, result=%ld",
@@ -348,6 +349,7 @@ void FormatFgDisplayLine(const CapturedReflexEvent& event, bool newState,
             (fg.flags & 0x10u) ? L"On" : L"Off",
             (fg.forwardedFlags & 0x10u) ? L"On" : L"Off",
             (fg.flags & 0x08u) ? L"On" : L"Off",
+            (fg.forwardedFlags & 0x08u) ? L"On" : L"Off",
             (fg.flags & 0x02u) ? L"On" : L"Off",
             (fg.flags & 0x01u) ? L"On" : L"Off",
             (fg.flags & 0x04u) ? L"On" : L"Off",

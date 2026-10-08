@@ -48,6 +48,9 @@ enum ControlId : int {
     IDC_FG_MENU_OVERRIDE,
     IDC_FG_MENU_OFF,
     IDC_FG_MENU_ON,
+    IDC_FG_RETENTION_OVERRIDE,
+    IDC_FG_RETENTION_OFF,
+    IDC_FG_RETENTION_ON,
     IDC_FG_WRAP_GET_STATE
 };
 
@@ -55,6 +58,8 @@ struct FgPolicy {
     bool forceOnWhenAuto = false;
     bool overrideMenu = false;
     bool menuDetectionOn = false;
+    bool overrideRetention = false;
+    bool retainResourcesWhenOff = true; // when checked, default radio is On
     bool wrapGetState = false;
 };
 
@@ -111,6 +116,9 @@ struct AppState {
     HWND fgMenuOverride = nullptr;
     HWND fgMenuOff = nullptr;
     HWND fgMenuOn = nullptr;
+    HWND fgRetentionOverride = nullptr;
+    HWND fgRetentionOff = nullptr;
+    HWND fgRetentionOn = nullptr;
     HWND fgForceAutoOn = nullptr;
     HWND fgGetState = nullptr;
     HWND overrideEnable = nullptr;
