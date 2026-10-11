@@ -782,19 +782,34 @@ void LayoutControls(int clientWidth, int clientHeight)
         const int width = MeasureCompactRadioWidth(g_app.fgRetentionOn);
         MoveWindow(g_app.fgRetentionOn, fgX, fgRowY, width, fgControlHeight, TRUE);
     }
-    if (g_app.fgMultiplierOverride)
-        MoveWindow(g_app.fgMultiplierOverride, kMargin + 18, 250, 168, 22, TRUE);
-    if (g_app.fgMultiplierChoice)
-        MoveWindow(g_app.fgMultiplierChoice, kMargin + 192, 248, 84, 112, TRUE);
-    const int fgGetX = kMargin + 294;
-    const int fgGetWidth = g_app.fgGetState
-        ? MeasureGroupHeadingWidth(g_app.fgGetState) : 0;
-    if (g_app.fgGetState)
-        MoveWindow(g_app.fgGetState, fgGetX, 250, fgGetWidth, 22, TRUE);
+    // Pack the second FG row by actual caption widths, just like the first.
+    // The multiplier combo only contains 2X-6X; do not reserve room for
+    // longer placeholder labels or stretch the row to align with the one above.
+    int fgLowerX = kMargin + 18;
+    const int fgLowerY = 250;
+    const int fgMultiplierComboWidth = 62;
+    if (g_app.fgMultiplierOverride) {
+        const int width = MeasureGroupHeadingWidth(g_app.fgMultiplierOverride);
+        MoveWindow(g_app.fgMultiplierOverride, fgLowerX, fgLowerY,
+            width, fgControlHeight, TRUE);
+        fgLowerX += width + fgGroupGap;
+    }
+    if (g_app.fgMultiplierChoice) {
+        MoveWindow(g_app.fgMultiplierChoice, fgLowerX, fgLowerY - 2,
+            fgMultiplierComboWidth, 112, TRUE);
+        fgLowerX += fgMultiplierComboWidth + fgGroupGap + 5;
+    }
+    if (g_app.fgGetState) {
+        const int width = MeasureGroupHeadingWidth(g_app.fgGetState);
+        MoveWindow(g_app.fgGetState, fgLowerX, fgLowerY,
+            width, fgControlHeight, TRUE);
+        fgLowerX += width + fgGroupGap + 5;
+    }
     if (g_app.fgDetailedDiagnosticsControl)
         MoveWindow(g_app.fgDetailedDiagnosticsControl,
-            fgGetX + fgGetWidth + 10, 250,
-            MeasureGroupHeadingWidth(g_app.fgDetailedDiagnosticsControl), 22, TRUE);
+            fgLowerX, fgLowerY,
+            MeasureGroupHeadingWidth(g_app.fgDetailedDiagnosticsControl),
+            fgControlHeight, TRUE);
 
     const int attachX = clientWidth - kMargin - kAttachWidth;
     const int watchX = attachX - kAcquisitionGap - kWatchWidth;
