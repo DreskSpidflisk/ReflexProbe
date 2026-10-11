@@ -394,6 +394,7 @@ void CaptureFgOptions(const sl::DLSSGOptions& options, ReflexProbeProtocol::FgEv
     out.optionsVersion = static_cast<uint32_t>(options.structVersion);
     out.mode = static_cast<uint32_t>(options.mode);
     out.generatedFrames = options.numFramesToGenerate;
+    out.forwardedGeneratedFrames = options.numFramesToGenerate;
     out.flags = static_cast<uint32_t>(options.flags);
     out.dynamicWidth = options.dynamicResWidth;
     out.dynamicHeight = options.dynamicResHeight;
@@ -433,6 +434,8 @@ sl::Result HookFgSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
     const bool knownVersion = version >= 1 && version <= 5;
     const bool forceAuto = g_shared &&
         InterlockedCompareExchange(&g_shared->fgForceOnWhenAuto, 0, 0) != 0;
+    const bool overrideMultiplier = g_shared &&
+        InterlockedCompareExchange(&g_shared->fgMultiplierOverrideEnabled, 0, 0) != 0;
     const bool overrideMenu = g_shared &&
         InterlockedCompareExchange(&g_shared->fgMenuOverrideEnabled, 0, 0) != 0;
     const bool menuOn = g_shared &&
@@ -443,9 +446,21 @@ sl::Result HookFgSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
         InterlockedCompareExchange(&g_shared->fgRetentionOverrideOn, 0, 0) != 0;
     uint32_t mode = data.mode;
     uint32_t flags = data.flags;
+    uint32_t frames = data.generatedFrames;
     if (knownVersion) {
         if (forceAuto && options.mode == sl::DLSSGMode::eAuto)
             mode = static_cast<uint32_t>(sl::DLSSGMode::eOn);
+        // Only change the numeric count for fixed modes. Preserve eOff as
+        // eOff, and never apply a fixed count to Dynamic MFG or unknown modes.
+        if (overrideMultiplier &&
+            (options.mode == sl::DLSSGMode::eOff ||
+             options.mode == sl::DLSSGMode::eOn ||
+             options.mode == sl::DLSSGMode::eAuto)) {
+            const LONG selected = InterlockedCompareExchange(
+                &g_shared->fgMultiplierFrames, 0, 0);
+            if (selected >= 1 && selected <= 5)
+                frames = static_cast<uint32_t>(selected);
+        }
         if (overrideMenu)
             flags = menuOn ? (flags | 0x10u) : (flags & ~0x10u);
         if (overrideRetention)
@@ -453,8 +468,10 @@ sl::Result HookFgSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
     }
     data.forwardedMode = mode;
     data.forwardedFlags = flags;
+    data.forwardedGeneratedFrames = frames;
 
-    if (mode == data.mode && flags == data.flags) {
+    if (mode == data.mode && frames == data.generatedFrames &&
+        flags == data.flags) {
         // The ordinary observational path remains a direct pass-through.
         const sl::Result result = real(viewport, options);
         PublishFgEvent(ReflexProbeProtocol::FgEventSetOptions, data, static_cast<LONG>(result));
@@ -468,7 +485,7 @@ sl::Result HookFgSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
     forwarded.structType = options.structType;
     forwarded.structVersion = options.structVersion;
     forwarded.mode = static_cast<sl::DLSSGMode>(mode);
-    forwarded.numFramesToGenerate = options.numFramesToGenerate;
+    forwarded.numFramesToGenerate = frames;
     forwarded.flags = static_cast<sl::DLSSGFlags>(flags);
     forwarded.dynamicResWidth = options.dynamicResWidth;
     forwarded.dynamicResHeight = options.dynamicResHeight;
