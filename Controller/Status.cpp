@@ -224,6 +224,13 @@ void AppendDisplayLine(const wchar_t* text)
 
 void AppendStatusLineAtQpc(const wchar_t* text, LONGLONG eventQpc)
 {
+    // Retain only startup text, without its original timestamps. Later diagnostics
+    // remain visible during the session but are not stored for Clear.
+    if (text && g_app.capturingStartupDiagnostics) {
+        if (g_app.startupDiagnostics.length)
+            AppendTextBuffer(g_app.startupDiagnostics, L"\r\n");
+        AppendTextBuffer(g_app.startupDiagnostics, text);
+    }
     AppendDisplayLineAtQpc(text, eventQpc);
 }
 

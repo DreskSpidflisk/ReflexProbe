@@ -3,6 +3,7 @@
 #include <windowsx.h>
 #include <wchar.h>
 #include <stdio.h>
+#include <string.h>
 
 namespace ReflexProbeController {
 
@@ -12,6 +13,9 @@ void ResetLiveStateTracking()
     g_app.stateEvent = {};
     g_app.stateRepeatCount = 0;
     g_app.stateSleepCount = 0;
+    for (size_t i = 0; i < kFgTrackedStreams; ++i)
+        g_app.fgRuns[i] = {};
+    g_app.fgTrackingOverflowWarned = false;
 }
 
 bool EnsureRawDebugBuffer()
@@ -54,8 +58,13 @@ void ClearCaptureHistory()
     ResetLiveStateTracking();
     ResetCurrentEffectiveState();
 
-    if (g_app.status)
+    if (g_app.status) {
         SetWindowTextW(g_app.status, L"");
+        // Restore only the startup banner, applying fresh timestamps to each line.
+        // No captured events, session history or Clear marker are replayed.
+        if (g_app.startupDiagnostics.data)
+            AppendDisplayLineAtQpc(g_app.startupDiagnostics.data, 0);
+    }
 }
 
 bool CaptureRawDebugEvent(const CapturedReflexEvent& event)
@@ -133,18 +142,49 @@ const wchar_t* ReflexModeName(LONG mode)
     }
 }
 
+// Avoid needless Win32 STATIC/title changes even when different internal
+// values round to identical display text. Hot-path Reflex events are already
+// filtered by the effective mode/interval cache before reaching this helper.
+void SetWindowTextIfChanged(HWND window, const wchar_t* desired)
+{
+    if (!window || !desired)
+        return;
+
+    const size_t desiredLength = wcslen(desired);
+    if (desiredLength < 384 &&
+        GetWindowTextLengthW(window) == static_cast<int>(desiredLength)) {
+        wchar_t current[384]{};
+        GetWindowTextW(window, current, static_cast<int>(_countof(current)));
+        if (wcscmp(current, desired) == 0)
+            return;
+    }
+    SetWindowTextW(window, desired);
+}
+
 void ResetCurrentEffectiveState()
 {
     g_app.haveEffectiveState = false;
     g_app.currentEffectiveMode = 0;
     g_app.currentEffectiveUs = 0;
+    g_app.haveFgLabelState = false;
+    g_app.fgLabelMode = 0;
+    g_app.fgLabelGeneratedFrames = 0;
+    g_app.fgLabelMenuDetection = false;
 
-    if (g_app.currentState) {
-        SetWindowTextW(g_app.currentState,
-            L"Current effective state: Reflex Unknown | Reflex FPS limit: Unknown");
-    }
-    if (g_app.window)
-        SetWindowTextW(g_app.window, L"ReflexProbe - Reflex Unknown | FPS Limit Unknown");
+    const bool reflexEnabled = g_app.reflexProbing &&
+        Button_GetCheck(g_app.reflexProbing) == BST_CHECKED;
+    const bool fgEnabled = g_app.fgProbing &&
+        Button_GetCheck(g_app.fgProbing) == BST_CHECKED;
+
+    SetWindowTextIfChanged(g_app.currentState,
+        reflexEnabled ? L"Reflex: Unknown | Limit: Unknown"
+            : L"Reflex: Probing disabled");
+    SetWindowTextIfChanged(g_app.fgState,
+        fgEnabled ? L"DLSS FG: Waiting for SetOptions"
+            : L"DLSS FG: Probing disabled");
+    SetWindowTextIfChanged(g_app.window,
+        reflexEnabled ? L"ReflexProbe - Reflex Unknown | FPS Limit Unknown"
+            : L"ReflexProbe - No Reflex probing");
 }
 
 void UpdateCurrentEffectiveState(const CapturedReflexEvent& event)
@@ -169,24 +209,22 @@ void UpdateCurrentEffectiveState(const CapturedReflexEvent& event)
     if (event.effectiveUs) {
         const double fps = 1000000.0 / static_cast<double>(event.effectiveUs);
         swprintf_s(label,
-            L"Current effective state: Reflex %s | Reflex FPS limit: %.3f FPS",
+            L"Reflex: %s | Limit: %.3f FPS",
             mode, fps);
         swprintf_s(title,
             L"ReflexProbe - Reflex %s | FPS Limit %.3f",
             mode, fps);
     } else {
         swprintf_s(label,
-            L"Current effective state: Reflex %s | Reflex FPS limit: None (0 us)",
+            L"Reflex: %s | Limit: None (0 us)",
             mode);
         swprintf_s(title,
             L"ReflexProbe - Reflex %s | FPS Limit None (0 us)",
             mode);
     }
 
-    if (g_app.currentState)
-        SetWindowTextW(g_app.currentState, label);
-    if (g_app.window)
-        SetWindowTextW(g_app.window, title);
+    SetWindowTextIfChanged(g_app.currentState, label);
+    SetWindowTextIfChanged(g_app.window, title);
 }
 
 void FormatReflexEvent(const CapturedReflexEvent& event, wchar_t* line, size_t lineCount)
@@ -243,9 +281,380 @@ void AppendReflexEvent(const CapturedReflexEvent& event, bool newState)
     AppendDisplayLineAtQpc(line, event.qpc);
 }
 
+
+const wchar_t* FgModeName(uint32_t mode)
+{
+    switch (mode) {
+    case 0: return L"Off";
+    case 1: return L"On";
+    case 2: return L"Auto";
+    case 3: return L"Dynamic";
+    default: return L"Unknown";
+    }
+}
+
+const wchar_t* FgBooleanName(uint32_t value)
+{
+    if (value == 0)
+        return L"No";
+    if (value == 1)
+        return L"Yes";
+    return L"Unknown";
+}
+
+void FormatFgDisplayLine(const CapturedReflexEvent& event, bool newState,
+                         wchar_t* line, size_t lineCount, bool detailed = true)
+{
+    const ReflexProbeProtocol::FgEventData& fg = event.fg;
+    const wchar_t* prefix = newState ? L"NEW FG State: " : L"";
+    if (event.kind == ReflexProbeProtocol::FgEventSetOptions) {
+        // Normal view: no detailed-format construction for hidden fields.
+        if (!detailed) {
+            swprintf_s(line, lineCount,
+                L"%sslDLSSGSetOptions #%ld: requested mode=%s (%u), "
+                L"forwarded mode=%s (%u), "
+                L"requested framesToGenerate=%u (%uX), forwarded framesToGenerate=%u (%uX), "
+                L"requested fullscreenMenuDetection=%s, forwarded fullscreenMenuDetection=%s, "
+                L"requested retainResourcesWhenOff=%s, forwarded retainResourcesWhenOff=%s, result=%ld",
+                prefix, event.sequence,
+                FgModeName(fg.mode), fg.mode,
+                FgModeName(fg.forwardedMode), fg.forwardedMode,
+                fg.generatedFrames, fg.generatedFrames + 1,
+                fg.forwardedGeneratedFrames, fg.forwardedGeneratedFrames + 1,
+                (fg.flags & 0x10u) ? L"On" : L"Off",
+                (fg.forwardedFlags & 0x10u) ? L"On" : L"Off",
+                (fg.flags & 0x08u) ? L"On" : L"Off",
+                (fg.forwardedFlags & 0x08u) ? L"On" : L"Off",
+                event.result);
+            return;
+        }
+        float targetFps = 0;
+        memcpy(&targetFps, &fg.targetFrameRateBits, sizeof(targetFps));
+        const wchar_t* overrideMarker =
+            (fg.mode != fg.forwardedMode ||
+             fg.generatedFrames != fg.forwardedGeneratedFrames ||
+             fg.flags != fg.forwardedFlags)
+                ? L" [OVERRIDE]" : L"";
+        wchar_t extras[256]{};
+        if (fg.optionsVersion >= 3)
+            swprintf_s(extras, L", queueParallelism=%u", fg.parallelism);
+        if (fg.optionsVersion >= 4) {
+            wchar_t tail[100]{};
+            swprintf_s(tail, L", UIRecomposition=%s", FgBooleanName(fg.uiRecomposition));
+            wcscat_s(extras, tail);
+        }
+        if (fg.optionsVersion >= 5) {
+            wchar_t tail[100]{};
+            swprintf_s(tail, L", dynamicTargetFPS=%.3f", targetFps);
+            wcscat_s(extras, tail);
+        }
+        swprintf_s(line, lineCount,
+            L"%sslDLSSGSetOptions #%ld: viewport=%u, version=%u, "
+            L"requested mode=%s (%u), forwarded mode=%s (%u), "
+            L"requested framesToGenerate=%u (%uX), "
+            L"forwarded framesToGenerate=%u (%uX), "
+            L"requested flags=0x%08X, forwarded flags=0x%08X%s "
+            L"[requested fullscreenMenuDetection=%s, forwarded fullscreenMenuDetection=%s, "
+            L"requested retainResourcesWhenOff=%s, forwarded retainResourcesWhenOff=%s, "
+            L"dynamicResolution=%s, showOnlyInterpolated=%s, requestVRAM=%s], "
+            L"dynamicRes=%ux%u, backBuffers=%u, inputSize=%ux%u, backbufferSize=%ux%u, "
+            L"bufferFormats[color=%u mvec=%u depth=%u hudless=%u UI=%u], "
+            L"errorCallback=%s%s, result=%ld",
+            prefix, event.sequence, fg.viewport, fg.optionsVersion,
+            FgModeName(fg.mode), fg.mode,
+            FgModeName(fg.forwardedMode), fg.forwardedMode,
+            fg.generatedFrames, fg.generatedFrames + 1,
+            fg.forwardedGeneratedFrames, fg.forwardedGeneratedFrames + 1,
+            fg.flags, fg.forwardedFlags, overrideMarker,
+            (fg.flags & 0x10u) ? L"On" : L"Off",
+            (fg.forwardedFlags & 0x10u) ? L"On" : L"Off",
+            (fg.flags & 0x08u) ? L"On" : L"Off",
+            (fg.forwardedFlags & 0x08u) ? L"On" : L"Off",
+            (fg.flags & 0x02u) ? L"On" : L"Off",
+            (fg.flags & 0x01u) ? L"On" : L"Off",
+            (fg.flags & 0x04u) ? L"On" : L"Off",
+            fg.dynamicWidth, fg.dynamicHeight, fg.numBackBuffers,
+            fg.motionDepthWidth, fg.motionDepthHeight, fg.colorWidth, fg.colorHeight,
+            fg.colorBufferFormat, fg.motionBufferFormat, fg.depthBufferFormat,
+            fg.hudlessBufferFormat, fg.uiBufferFormat,
+            fg.errorCallbackPresent ? L"Present" : L"None",
+            extras, event.result);
+    } else {
+        wchar_t options[240]{};
+        // Query inputs belong in Raw debug; State changes describes returned
+        // persistent state, never the arguments of the query that obtained it.
+        if (fg.optionsPresent && !newState) {
+            swprintf_s(options,
+                L", inputOptions[v%u mode=%s (%u), framesToGenerate=%u, "
+                L"flags=0x%08X, fullscreenMenuDetection=%s]",
+                fg.optionsVersion, FgModeName(fg.mode), fg.mode,
+                fg.generatedFrames, fg.flags,
+                (fg.flags & 0x10u) ? L"On" : L"Off");
+        }
+        if (!fg.stateValid) {
+            swprintf_s(line, lineCount,
+                L"%sslDLSSGGetState #%ld: viewport=%u, stateVersion=%u%s, result=%ld "
+                L"(state unavailable; output not interpreted)",
+                prefix, event.sequence, fg.viewport, fg.stateVersion, options, event.result);
+        } else {
+            wchar_t stateExtras[240]{};
+            if (fg.stateVersion >= 2)
+                swprintf_s(stateExtras,
+                    L", maxFramesToGenerate=%u (%uX max), VSyncAvailable=%s",
+                    fg.maxGeneratedFrames, fg.maxGeneratedFrames + 1,
+                    FgBooleanName(fg.vsyncAvailable));
+            if (fg.stateVersion >= 4) {
+                wchar_t tail[80]{};
+                swprintf_s(tail, L", dynamicMFGSupported=%s",
+                    FgBooleanName(fg.dynamicMfgAvailable));
+                wcscat_s(stateExtras, tail);
+            }
+            swprintf_s(line, lineCount,
+                L"%sslDLSSGGetState #%ld: viewport=%u, stateVersion=%u, "
+                L"status=0x%08X (%s), minDimension=%u%s, "
+                L"framesPresentedSincePreviousGetState=%u [transient]%s, result=%ld",
+                prefix, event.sequence, fg.viewport, fg.stateVersion,
+                fg.status, fg.status ? L"status flags set" : L"OK",
+                fg.minDimension, stateExtras, fg.framesPresented, options, event.result);
+        }
+    }
+}
+
+void AppendFgEvent(const CapturedReflexEvent& event, bool newState, bool detailed = true)
+{
+    wchar_t line[1024]{};
+    FormatFgDisplayLine(event, newState, line, _countof(line), detailed);
+    AppendDisplayLineAtQpc(line, event.qpc);
+}
+
+void AppendFgRepeatCount(const FgStateRun& run, LONGLONG eventQpc)
+{
+    const bool normalSetOptions =
+        run.kind == ReflexProbeProtocol::FgEventSetOptions &&
+        !g_app.fgDetailedDiagnostics;
+    const uint64_t count = normalSetOptions ? run.pendingDisplayRepeats : run.repeats;
+    if (!count)
+        return;
+
+    wchar_t line[180]{};
+    if (normalSetOptions) {
+        // Exact complete-state repetitions, potentially across multiple
+        // hidden state transitions; do not claim a single state persisted.
+        swprintf_s(line, L"FG SetOptions: %llu repeated calls since last displayed state.",
+            static_cast<unsigned long long>(count));
+    } else {
+        swprintf_s(line, L"Previous FG %s state (viewport=%u) repeated %llu more times.",
+            run.kind == ReflexProbeProtocol::FgEventSetOptions ? L"SetOptions" : L"GetState",
+            run.viewport, static_cast<unsigned long long>(count));
+    }
+    AppendDisplayLineAtQpc(line, eventQpc);
+}
+
+void AppendFgSnapshot(const FgStateRun& run, LONGLONG eventQpc)
+{
+    if (run.kind != ReflexProbeProtocol::FgEventSetOptions)
+        return;
+    wchar_t state[1024]{};
+    wchar_t line[1152]{};
+    FormatFgDisplayLine(run.previous, false, state, _countof(state),
+        g_app.fgDetailedDiagnostics);
+    swprintf_s(line, L"FG State snapshot: %s", state);
+    AppendDisplayLineAtQpc(line, eventQpc);
+}
+
+void FinishFgDisplayIntervals(LONGLONG eventQpc, bool includeGetState)
+{
+    for (size_t i = 0; i < kFgTrackedStreams; ++i) {
+        FgStateRun& run = g_app.fgRuns[i];
+        if (!run.used || (!includeGetState &&
+            run.kind != ReflexProbeProtocol::FgEventSetOptions))
+            continue;
+        AppendFgRepeatCount(run, eventQpc);
+        run.repeats = 0;
+        run.pendingDisplayRepeats = 0;
+        run.displayed = run.previous;
+    }
+}
+
+void SetFgDetailedDiagnostics(bool detailed)
+{
+    if (g_app.fgDetailedDiagnostics == detailed)
+        return;
+    LARGE_INTEGER qpc{};
+    QueryPerformanceCounter(&qpc);
+    if (g_app.captureMode == CaptureModeStateChanges)
+        FinishFgDisplayIntervals(qpc.QuadPart, false);
+    g_app.fgDetailedDiagnostics = detailed;
+    AppendStatusLineAtQpc(detailed
+        ? L"Detailed FG diagnostics enabled."
+        : L"Detailed FG diagnostics disabled; normal FG SetOptions view active.",
+        qpc.QuadPart);
+    if (g_app.captureMode == CaptureModeStateChanges) {
+        for (size_t i = 0; i < kFgTrackedStreams; ++i) {
+            if (g_app.fgRuns[i].used)
+                AppendFgSnapshot(g_app.fgRuns[i], qpc.QuadPart);
+        }
+    }
+}
+
+bool SameVisibleFgSetOptions(const CapturedReflexEvent& a, const CapturedReflexEvent& b)
+{
+    constexpr uint32_t kVisibleFlags = 0x10u | 0x08u;
+    return a.result == b.result &&
+           a.fg.mode == b.fg.mode &&
+           a.fg.forwardedMode == b.fg.forwardedMode &&
+           a.fg.generatedFrames == b.fg.generatedFrames &&
+           a.fg.forwardedGeneratedFrames == b.fg.forwardedGeneratedFrames &&
+           (a.fg.flags & kVisibleFlags) == (b.fg.flags & kVisibleFlags) &&
+           (a.fg.forwardedFlags & kVisibleFlags) ==
+               (b.fg.forwardedFlags & kVisibleFlags);
+}
+
+bool SameFgState(const CapturedReflexEvent& a, const CapturedReflexEvent& b)
+{
+    if (a.kind != b.kind || a.result != b.result)
+        return false;
+
+    if (a.kind == ReflexProbeProtocol::FgEventGetState) {
+        const ReflexProbeProtocol::FgEventData& left = a.fg;
+        const ReflexProbeProtocol::FgEventData& right = b.fg;
+        // GetState's optional DLSSGOptions are *query inputs*. Alternating
+        // calls with options and nullptr (as DOOM: The Dark Ages does) must
+        // not create a new runtime state. Compare only captured output fields.
+        // framesPresented is transient since the preceding GetState call.
+        if (left.viewport != right.viewport ||
+            left.stateVersion != right.stateVersion ||
+            left.stateValid != right.stateValid)
+            return false;
+
+        // An unsuccessful query has no valid output. The result code above
+        // still distinguishes errors; caller inputs never do.
+        if (!left.stateValid)
+            return true;
+
+        if (left.status != right.status ||
+            left.minDimension != right.minDimension)
+            return false;
+
+        if (left.stateVersion >= 2 &&
+            (left.maxGeneratedFrames != right.maxGeneratedFrames ||
+             left.vsyncAvailable != right.vsyncAvailable))
+            return false;
+
+        return left.stateVersion < 4 ||
+            left.dynamicMfgAvailable == right.dynamicMfgAvailable;
+    }
+
+    // SetOptions is a requested configuration, so all its input fields are
+    // meaningful for change detection. Keep that existing behavior.
+    return memcmp(&a.fg, &b.fg, sizeof(a.fg)) == 0;
+}
+
+void HandleCapturedFgEvent(const CapturedReflexEvent& event)
+{
+    const bool raw = CurrentCaptureMode() == CaptureModeRawDebug;
+    if (raw)
+        CaptureRawDebugEvent(event);
+
+    FgStateRun* available = nullptr;
+    for (size_t i = 0; i < kFgTrackedStreams; ++i) {
+        FgStateRun& run = g_app.fgRuns[i];
+        if (run.used && run.kind == event.kind &&
+            run.viewport == event.fg.viewport) {
+            if (raw) {
+                // Preserve latest complete state through Raw without
+                // incurring any formatting or state-change reporting cost.
+                run.previous = event;
+                run.displayed = event;
+                return;
+            }
+
+            if (SameFgState(run.previous, event)) {
+                ++run.repeats;
+                // Keep snapshots' call ordinal current without copying the
+                // entire event or changing the full-state comparison.
+                run.previous.sequence = event.sequence;
+                if (run.kind == ReflexProbeProtocol::FgEventSetOptions)
+                    ++run.pendingDisplayRepeats;
+            } else {
+                const bool showState =
+                    run.kind != ReflexProbeProtocol::FgEventSetOptions ||
+                    g_app.fgDetailedDiagnostics ||
+                    !SameVisibleFgSetOptions(run.displayed, event);
+                if (showState) {
+                    AppendFgRepeatCount(run, event.qpc);
+                    AppendFgEvent(event, true, g_app.fgDetailedDiagnostics);
+                    run.displayed = event;
+                    run.pendingDisplayRepeats = 0;
+                }
+                // Hidden changes still update the true full-state baseline.
+                run.previous = event;
+                run.repeats = 0;
+            }
+            return;
+        }
+        if (!run.used && !available)
+            available = &run;
+    }
+
+    if (!available) {
+        if (!raw && !g_app.fgTrackingOverflowWarned) {
+            g_app.fgTrackingOverflowWarned = true;
+            AppendStatusLine(L"WARNING: FG tracker exceeded 32 viewport/function streams; "
+                L"excess streams are logged uncompressed.");
+        }
+        if (!raw)
+            AppendFgEvent(event, true, g_app.fgDetailedDiagnostics);
+        return;
+    }
+
+    available->used = true;
+    available->kind = event.kind;
+    available->viewport = event.fg.viewport;
+    available->previous = event;
+    available->displayed = event;
+    available->repeats = 0;
+    available->pendingDisplayRepeats = 0;
+    if (!raw)
+        AppendFgEvent(event, true, g_app.fgDetailedDiagnostics);
+}
+
+void UpdateCurrentFgState(const CapturedReflexEvent& event)
+{
+    // GetState reports query results, not the game's requested FG engagement.
+    // Keep the status label exclusively tied to SetOptions.
+    if (event.kind != ReflexProbeProtocol::FgEventSetOptions || !g_app.fgState)
+        return;
+
+    const ReflexProbeProtocol::FgEventData& fg = event.fg;
+    const bool menuDetection = (fg.forwardedFlags & 0x10u) != 0;
+    if (g_app.haveFgLabelState &&
+        g_app.fgLabelMode == fg.forwardedMode &&
+        g_app.fgLabelGeneratedFrames == fg.forwardedGeneratedFrames &&
+        g_app.fgLabelMenuDetection == menuDetection)
+        return;
+
+    wchar_t label[320]{};
+    swprintf_s(label, L"DLSS FG: %s | %uX | Menu detection: %s",
+        FgModeName(fg.forwardedMode), fg.forwardedGeneratedFrames + 1,
+        menuDetection ? L"On" : L"Off");
+    if (SetWindowTextW(g_app.fgState, label)) {
+        g_app.haveFgLabelState = true;
+        g_app.fgLabelMode = fg.forwardedMode;
+        g_app.fgLabelGeneratedFrames = fg.forwardedGeneratedFrames;
+        g_app.fgLabelMenuDetection = menuDetection;
+    }
+}
+
 bool AppendCapturedEventToBuffer(TextBuffer& buffer, const CapturedReflexEvent& event, bool newState)
 {
     wchar_t line[512]{};
+    if (event.kind == ReflexProbeProtocol::FgEventSetOptions ||
+        event.kind == ReflexProbeProtocol::FgEventGetState) {
+        wchar_t fgLine[1024]{};
+        FormatFgDisplayLine(event, newState, fgLine, _countof(fgLine));
+        return AppendTextBufferLineAtQpc(buffer, fgLine, event.qpc);
+    }
     if (event.kind == ReflexProbeProtocol::ReflexEventSleep)
         FormatSleepDisplayLine(event, line, _countof(line));
     else
@@ -302,6 +711,10 @@ void FinalizeStateRun(LONGLONG eventQpc)
         AppendRepeatCount(g_app.stateRepeatCount, eventQpc);
         AppendSleepCount(g_app.stateSleepCount, eventQpc);
     }
+    for (size_t i = 0; i < kFgTrackedStreams; ++i) {
+        if (g_app.fgRuns[i].used)
+            AppendFgRepeatCount(g_app.fgRuns[i], eventQpc);
+    }
     ResetLiveStateTracking();
 }
 
@@ -320,29 +733,38 @@ bool SetCaptureMode(CaptureMode mode)
         return true;
     }
 
+    // Consume already-published events under the old capture policy.
+    PollSharedState();
+    if (mode == CaptureModeRawDebug && !EnsureRawDebugBuffer()) {
+        MessageBoxW(g_app.window,
+            L"Could not allocate the bounded Raw debug capture buffer.",
+            L"ReflexProbe", MB_ICONERROR);
+        SetCaptureButtons(g_app.captureMode);
+        return false;
+    }
+
     LARGE_INTEGER qpc{};
     QueryPerformanceCounter(&qpc);
-
     const CaptureMode previous = g_app.captureMode;
-    if (previous == CaptureModeStateChanges)
-        FinalizeStateRun(qpc.QuadPart);
-    else
-        ResetLiveStateTracking();
-
-    if (mode == CaptureModeRawDebug) {
-        if (!EnsureRawDebugBuffer()) {
-            MessageBoxW(g_app.window,
-                L"Could not allocate the bounded Raw debug capture buffer.",
-                L"ReflexProbe", MB_ICONERROR);
-            g_app.captureMode = previous;
-            SetCaptureButtons(previous);
-            return false;
+    if (previous == CaptureModeStateChanges) {
+        if (g_app.haveStateEvent) {
+            AppendRepeatCount(g_app.stateRepeatCount, qpc.QuadPart);
+            AppendSleepCount(g_app.stateSleepCount, qpc.QuadPart);
         }
-        ResetRawDebugCapture();
+        FinishFgDisplayIntervals(qpc.QuadPart, true);
     }
+
+    // Reset Reflex presentation, not the last observed complete FG state.
+    // Raw mode continues updating that FG state as calls arrive.
+    g_app.haveStateEvent = false;
+    g_app.stateRepeatCount = 0;
+    g_app.stateSleepCount = 0;
+    if (mode == CaptureModeRawDebug)
+        ResetRawDebugCapture();
 
     g_app.captureMode = mode;
     SetCaptureButtons(mode);
+    UpdateAcquisitionControls();
 
     if (mode == CaptureModeRawDebug) {
         AppendStatusLineAtQpc(
@@ -351,16 +773,30 @@ bool SetCaptureMode(CaptureMode mode)
     } else {
         wchar_t line[224]{};
         swprintf_s(line,
-            L"Capture mode changed to State changes. Raw debug stopped after %llu captured call(s); state tracking resumes with the next Reflex call.",
+            L"Capture mode changed to State changes. Raw debug stopped after %llu captured call(s); current FG states shown as snapshots.",
             static_cast<unsigned long long>(g_app.rawDebugTotalCaptured));
         AppendStatusLineAtQpc(line, qpc.QuadPart);
+        for (size_t i = 0; i < kFgTrackedStreams; ++i) {
+            FgStateRun& run = g_app.fgRuns[i];
+            if (!run.used)
+                continue;
+            run.repeats = 0;
+            run.pendingDisplayRepeats = 0;
+            run.displayed = run.previous;
+            AppendFgSnapshot(run, qpc.QuadPart);
+        }
     }
 
     return true;
 }
-
 void HandleCapturedReflexEvent(const CapturedReflexEvent& event)
 {
+    if (event.kind == ReflexProbeProtocol::FgEventSetOptions ||
+        event.kind == ReflexProbeProtocol::FgEventGetState) {
+        HandleCapturedFgEvent(event);
+        return;
+    }
+
     if (CurrentCaptureMode() == CaptureModeRawDebug) {
         CaptureRawDebugEvent(event);
         return;
@@ -421,7 +857,9 @@ void PollSharedState()
         wchar_t line[2300]{};
         switch (hookState) {
         case ReflexProbeProtocol::HookStateWaitingForDll:
-            wcscpy_s(line, L"Waiting for a Reflex interception path...");
+            wcscpy_s(line, g_app.shared->probeReflexEnabled
+                ? L"Waiting for a Reflex interception path..."
+                : L"Waiting for a Streamline 2.x DLSS FG interception path.");
             break;
         case ReflexProbeProtocol::HookStateInterceptArmed:
             swprintf_s(line, L"Interception armed: %s. Waiting for sl.reflex.dll to resolve its plugin gateway.",
@@ -450,6 +888,23 @@ void PollSharedState()
         AppendStatusLine(line);
     }
 
+    const LONG fgHookBits = InterlockedCompareExchange(&g_app.shared->fgHookBits, 0, 0);
+    const LONG newFgHooks = fgHookBits & ~g_app.lastFgHookBits;
+    if (newFgHooks) {
+        if (newFgHooks & 1) {
+            wchar_t line[1500]{};
+            swprintf_s(line, L"FG hook active: slDLSSGSetOptions\r\nModule: %s\r\nVersion: %s\r\nMethod: %s",
+                g_app.shared->fgPath[0] ? g_app.shared->fgPath : L"(unknown)",
+                g_app.shared->fgVersion[0] ? g_app.shared->fgVersion : L"(unknown)",
+                g_app.shared->fgMethod[0] ? g_app.shared->fgMethod : L"(unknown)");
+            AppendStatusLine(line);
+        }
+        if (newFgHooks & 2) {
+            AppendStatusLine(L"FG hook active: slDLSSGGetState (runtime-reported state now observable).");
+        }
+        g_app.lastFgHookBits = fgHookBits;
+    }
+
     const LONG currentSerial = InterlockedCompareExchange(&g_app.shared->eventSerial, 0, 0);
     LONG first = g_app.lastEventSerial + 1;
     const LONG available = currentSerial - first + 1;
@@ -461,7 +916,7 @@ void PollSharedState()
 
         wchar_t line[256]{};
         swprintf_s(line,
-            L"WARNING: Reflex transport ring overrun; %ld call(s) were lost before the controller drained them. Capture continuity is broken at this point.",
+            L"WARNING: Probe transport ring overrun; %ld call(s) were lost before the controller drained them. Capture continuity is broken at this point.",
             lost);
         AppendStatusLineAtQpc(line, qpc.QuadPart);
 
@@ -491,6 +946,12 @@ void PollSharedState()
         captured.backend = backend;
         captured.requestedUs = event.requestedUs;
         captured.effectiveUs = event.effectiveUs;
+        if (captured.kind == ReflexProbeProtocol::FgEventSetOptions ||
+            captured.kind == ReflexProbeProtocol::FgEventGetState) {
+            captured.fg = event.fg;
+            if (captured.kind == ReflexProbeProtocol::FgEventSetOptions)
+                UpdateCurrentFgState(captured);
+        }
         if (captured.kind == ReflexProbeProtocol::ReflexEventSettings)
             UpdateCurrentEffectiveState(captured);
         HandleCapturedReflexEvent(captured);

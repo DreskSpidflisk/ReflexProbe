@@ -14,6 +14,7 @@
 
 #include <sl.h>
 #include <sl_reflex.h>
+#include <sl_dlss_g.h>
 
 #include "../Common/Protocol.h"
 
@@ -79,9 +80,24 @@ using PFunNvapiD3DSleep = int32_t (__cdecl)(void* device);
 
 HANDLE g_mapping = nullptr;
 ReflexProbeProtocol::SharedState* g_shared = nullptr;
+
+// The selected feature families are immutable for the acquired target.
+// Resolver interception is shared plumbing; disabled feature functions are untouched.
+bool IsReflexProbingEnabled()
+{
+    return g_shared && g_shared->probeReflexEnabled != 0;
+}
+
+bool IsFgProbingEnabled()
+{
+    return g_shared && g_shared->probeDlssFgEnabled != 0;
+}
+
 PFun_slGetFeatureFunction* g_realGetFeatureFunction = nullptr;
 PFun_slReflexSetOptions* g_realReflexSetOptions = nullptr;
 PFun_slReflexSleep* g_realReflexSleep = nullptr;
+PFun_slDLSSGSetOptions* g_realFgSetOptions = nullptr;
+PFun_slDLSSGGetState* g_realFgGetState = nullptr;
 PFunLegacySetFeatureConstants* g_realLegacySetFeatureConstants = nullptr;
 PFunLegacyPluginGetFunction* g_realLegacyPluginGetFunction = nullptr;
 PFunLegacyPluginSetConstants* g_realLegacyPluginSetConstants = nullptr;
@@ -342,6 +358,212 @@ void PublishSleepEvent(LONG result)
     InterlockedExchange(&event.sequence, serial);
 }
 
+// FG events record both requested and forwarded options, independently of Reflex.
+void PublishFgEvent(LONG kind, const ReflexProbeProtocol::FgEventData& data, LONG result)
+{
+    if (!g_shared)
+        return;
+
+    const LONG callSequence = kind == ReflexProbeProtocol::FgEventSetOptions
+        ? InterlockedIncrement(&g_shared->fgSetCallSerial)
+        : InterlockedIncrement(&g_shared->fgGetCallSerial);
+    const LONG serial = InterlockedIncrement(&g_shared->eventSerial);
+    const uint32_t index = static_cast<uint32_t>(serial - 1) % ReflexProbeProtocol::kEventCapacity;
+    ReflexProbeProtocol::ReflexEvent& event = g_shared->events[index];
+    InterlockedExchange(&event.sequence, 0);
+
+    LARGE_INTEGER qpc{};
+    QueryPerformanceCounter(&qpc);
+    event.qpc = qpc.QuadPart;
+    event.kind = kind;
+    event.callSequence = callSequence;
+    event.requestedMode = 0;
+    event.effectiveMode = 0;
+    event.requestedUs = 0;
+    event.effectiveUs = 0;
+    event.result = result;
+    event.fg = data;
+
+    MemoryBarrier();
+    InterlockedExchange(&event.sequence, serial);
+}
+
+void CaptureFgOptions(const sl::DLSSGOptions& options, ReflexProbeProtocol::FgEventData& out)
+{
+    out.optionsPresent = 1;
+    out.optionsVersion = static_cast<uint32_t>(options.structVersion);
+    out.mode = static_cast<uint32_t>(options.mode);
+    out.generatedFrames = options.numFramesToGenerate;
+    out.forwardedGeneratedFrames = options.numFramesToGenerate;
+    out.flags = static_cast<uint32_t>(options.flags);
+    out.dynamicWidth = options.dynamicResWidth;
+    out.dynamicHeight = options.dynamicResHeight;
+    out.numBackBuffers = options.numBackBuffers;
+    out.motionDepthWidth = options.mvecDepthWidth;
+    out.motionDepthHeight = options.mvecDepthHeight;
+    out.colorWidth = options.colorWidth;
+    out.colorHeight = options.colorHeight;
+    out.colorBufferFormat = options.colorBufferFormat;
+    out.motionBufferFormat = options.mvecBufferFormat;
+    out.depthBufferFormat = options.depthBufferFormat;
+    out.hudlessBufferFormat = options.hudLessBufferFormat;
+    out.uiBufferFormat = options.uiBufferFormat;
+    out.errorCallbackPresent = options.onErrorCallback ? 1u : 0u;
+    // Members are appended by version. Never read newer fields from an older
+    // caller allocation, even though this observer was compiled with a newer SDK.
+    if (options.structVersion >= 3)
+        out.parallelism = static_cast<uint32_t>(options.queueParallelismMode);
+    if (options.structVersion >= 4)
+        out.uiRecomposition = static_cast<uint32_t>(options.enableUserInterfaceRecomposition);
+    if (options.structVersion >= 5)
+        memcpy(&out.targetFrameRateBits, &options.dynamicTargetFrameRate,
+            sizeof(out.targetFrameRateBits));
+}
+
+sl::Result HookFgSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOptions& options)
+{
+    PFun_slDLSSGSetOptions* real = g_realFgSetOptions;
+    if (!real)
+        return sl::Result::eErrorNotInitialized;
+
+    ReflexProbeProtocol::FgEventData data{};
+    data.viewport = static_cast<uint32_t>(viewport);
+    CaptureFgOptions(options, data);
+
+    const uint32_t version = static_cast<uint32_t>(options.structVersion);
+    const bool knownVersion = version >= 1 && version <= 5;
+    const bool forceAuto = g_shared &&
+        InterlockedCompareExchange(&g_shared->fgForceOnWhenAuto, 0, 0) != 0;
+    const bool overrideMultiplier = g_shared &&
+        InterlockedCompareExchange(&g_shared->fgMultiplierOverrideEnabled, 0, 0) != 0;
+    const bool overrideMenu = g_shared &&
+        InterlockedCompareExchange(&g_shared->fgMenuOverrideEnabled, 0, 0) != 0;
+    const bool menuOn = g_shared &&
+        InterlockedCompareExchange(&g_shared->fgMenuOverrideOn, 0, 0) != 0;
+    const bool overrideRetention = g_shared &&
+        InterlockedCompareExchange(&g_shared->fgRetentionOverrideEnabled, 0, 0) != 0;
+    const bool retainResources = g_shared &&
+        InterlockedCompareExchange(&g_shared->fgRetentionOverrideOn, 0, 0) != 0;
+    uint32_t mode = data.mode;
+    uint32_t flags = data.flags;
+    uint32_t frames = data.generatedFrames;
+    if (knownVersion) {
+        if (forceAuto && options.mode == sl::DLSSGMode::eAuto)
+            mode = static_cast<uint32_t>(sl::DLSSGMode::eOn);
+        // Only change the numeric count for fixed modes. Preserve eOff as
+        // eOff, and never apply a fixed count to Dynamic MFG or unknown modes.
+        if (overrideMultiplier &&
+            (options.mode == sl::DLSSGMode::eOff ||
+             options.mode == sl::DLSSGMode::eOn ||
+             options.mode == sl::DLSSGMode::eAuto)) {
+            const LONG selected = InterlockedCompareExchange(
+                &g_shared->fgMultiplierFrames, 0, 0);
+            if (selected >= 1 && selected <= 5)
+                frames = static_cast<uint32_t>(selected);
+        }
+        if (overrideMenu)
+            flags = menuOn ? (flags | 0x10u) : (flags & ~0x10u);
+        if (overrideRetention)
+            flags = retainResources ? (flags | 0x08u) : (flags & ~0x08u);
+    }
+    data.forwardedMode = mode;
+    data.forwardedFlags = flags;
+    data.forwardedGeneratedFrames = frames;
+
+    if (mode == data.mode && frames == data.generatedFrames &&
+        flags == data.flags) {
+        // The ordinary observational path remains a direct pass-through.
+        const sl::Result result = real(viewport, options);
+        PublishFgEvent(ReflexProbeProtocol::FgEventSetOptions, data, static_cast<LONG>(result));
+        return result;
+    }
+
+    // Version-aware local copy. Do not read members appended after the
+    // caller's version; unknown future versions always pass through above.
+    sl::DLSSGOptions forwarded{};
+    forwarded.next = options.next;
+    forwarded.structType = options.structType;
+    forwarded.structVersion = options.structVersion;
+    forwarded.mode = static_cast<sl::DLSSGMode>(mode);
+    forwarded.numFramesToGenerate = frames;
+    forwarded.flags = static_cast<sl::DLSSGFlags>(flags);
+    forwarded.dynamicResWidth = options.dynamicResWidth;
+    forwarded.dynamicResHeight = options.dynamicResHeight;
+    forwarded.numBackBuffers = options.numBackBuffers;
+    forwarded.mvecDepthWidth = options.mvecDepthWidth;
+    forwarded.mvecDepthHeight = options.mvecDepthHeight;
+    forwarded.colorWidth = options.colorWidth;
+    forwarded.colorHeight = options.colorHeight;
+    forwarded.colorBufferFormat = options.colorBufferFormat;
+    forwarded.mvecBufferFormat = options.mvecBufferFormat;
+    forwarded.depthBufferFormat = options.depthBufferFormat;
+    forwarded.hudLessBufferFormat = options.hudLessBufferFormat;
+    forwarded.uiBufferFormat = options.uiBufferFormat;
+    forwarded.onErrorCallback = options.onErrorCallback;
+    if (version >= 2)
+        forwarded.bReserved15 = options.bReserved15;
+    if (version >= 3)
+        forwarded.queueParallelismMode = options.queueParallelismMode;
+    if (version >= 4)
+        forwarded.enableUserInterfaceRecomposition = options.enableUserInterfaceRecomposition;
+    if (version >= 5)
+        forwarded.dynamicTargetFrameRate = options.dynamicTargetFrameRate;
+
+    const sl::Result result = real(viewport, forwarded);
+    PublishFgEvent(ReflexProbeProtocol::FgEventSetOptions, data, static_cast<LONG>(result));
+    return result;
+}
+
+sl::Result HookFgGetState(const sl::ViewportHandle& viewport, sl::DLSSGState& state,
+                          const sl::DLSSGOptions* options)
+{
+    PFun_slDLSSGGetState* real = g_realFgGetState;
+    if (!real)
+        return sl::Result::eErrorNotInitialized;
+
+    ReflexProbeProtocol::FgEventData data{};
+    data.viewport = static_cast<uint32_t>(viewport);
+    // Record the version before forwarding; the game owns this output buffer.
+    data.stateVersion = static_cast<uint32_t>(state.structVersion);
+    if (options)
+        CaptureFgOptions(*options, data);
+
+    const sl::Result result = real(viewport, state, options);
+    if (result == sl::Result::eOk) {
+        data.stateValid = 1;
+        data.status = static_cast<uint32_t>(state.status);
+        data.minDimension = state.minWidthOrHeight;
+        data.framesPresented = state.numFramesActuallyPresented;
+        if (data.stateVersion >= 2) {
+            data.maxGeneratedFrames = state.numFramesToGenerateMax;
+            data.vsyncAvailable = static_cast<uint32_t>(state.bIsVsyncSupportAvailable);
+        }
+        if (data.stateVersion >= 4)
+            data.dynamicMfgAvailable = static_cast<uint32_t>(state.bIsDynamicMFGSupported);
+    }
+    PublishFgEvent(ReflexProbeProtocol::FgEventGetState, data, static_cast<LONG>(result));
+    return result;
+}
+
+void PublishFgFunction(void* function, LONG bit)
+{
+    if (!g_shared || !function)
+        return;
+
+    MEMORY_BASIC_INFORMATION memory{};
+    wchar_t modulePath[ReflexProbeProtocol::kPathChars]{};
+    if (VirtualQuery(function, &memory, sizeof(memory)) &&
+        GetModulePath(reinterpret_cast<HMODULE>(memory.AllocationBase),
+            modulePath, _countof(modulePath))) {
+        wcsncpy_s(g_shared->fgPath, _countof(g_shared->fgPath), modulePath, _TRUNCATE);
+        GetFileVersionString(modulePath, g_shared->fgVersion, _countof(g_shared->fgVersion));
+    }
+    wcsncpy_s(g_shared->fgMethod, _countof(g_shared->fgMethod),
+        g_modernInterceptionMethod, _TRUNCATE);
+    MemoryBarrier();
+    InterlockedOr(&g_shared->fgHookBits, bit);
+}
+
 void PublishReflexModule(HMODULE module, ReflexProbeProtocol::HookState state,
                          const wchar_t* interceptionMethod)
 {
@@ -453,7 +675,7 @@ void* __cdecl HookNvapiQueryInterface(uint32_t interfaceId)
     if (!function)
         return function;
 
-    if (interfaceId == kNvapiD3DSetSleepModeId) {
+    if (interfaceId == kNvapiD3DSetSleepModeId && IsReflexProbingEnabled()) {
         g_realNvapiD3DSetSleepMode =
             reinterpret_cast<PFunNvapiD3DSetSleepMode*>(function);
         SetBackend(ReflexProbeProtocol::ReflexBackendNativeNvapiD3D);
@@ -462,8 +684,8 @@ void* __cdecl HookNvapiQueryInterface(uint32_t interfaceId)
         return reinterpret_cast<void*>(&HookNvapiD3DSetSleepMode);
     }
 
-    if (interfaceId == kNvapiD3DSleepId &&
-        g_shared && g_shared->countReflexSleepCalls) {
+    if (interfaceId == kNvapiD3DSleepId && IsReflexProbingEnabled() &&
+        g_shared->countReflexSleepCalls) {
         g_realNvapiD3DSleep = reinterpret_cast<PFunNvapiD3DSleep*>(function);
         return reinterpret_cast<void*>(&HookNvapiD3DSleep);
     }
@@ -508,7 +730,7 @@ bool HookLegacySetFeatureConstants(uint32_t feature, const void* constants,
     if (!real)
         return false;
 
-    if (feature != kLegacyFeatureReflex || !constants)
+    if (!IsReflexProbingEnabled() || feature != kLegacyFeatureReflex || !constants)
         return real(feature, constants, frameIndex, id);
 
     const auto* requested = static_cast<const LegacyReflexConstants*>(constants);
@@ -558,7 +780,7 @@ void* HookLegacyPluginGetFunction(const char* functionName)
     if (!functionName || !function)
         return function;
 
-    if (strcmp(functionName, "slSetConstants") == 0) {
+    if (IsReflexProbingEnabled() && strcmp(functionName, "slSetConstants") == 0) {
         g_realLegacyPluginSetConstants =
             reinterpret_cast<PFunLegacyPluginSetConstants*>(function);
         SetBackend(ReflexProbeProtocol::ReflexBackendLegacyPluginConstants);
@@ -584,7 +806,7 @@ FARPROC WINAPI HookInterposerGetProcAddress(HMODULE module, LPCSTR procName)
     if (reinterpret_cast<uintptr_t>(procName) <= 0xFFFFu)
         return result;
 
-    if (strcmp(procName, "slGetPluginFunction") != 0)
+    if (!IsReflexProbingEnabled() || strcmp(procName, "slGetPluginFunction") != 0)
         return result;
 
     wchar_t modulePath[ReflexProbeProtocol::kPathChars]{};
@@ -610,14 +832,25 @@ sl::Result HookGetFeatureFunction(sl::Feature feature, const char* functionName,
     if (result != sl::Result::eOk || !functionName || !function)
         return result;
 
-    if (strcmp(functionName, "slReflexSetOptions") == 0) {
+    if (IsFgProbingEnabled() && feature == sl::kFeatureDLSS_G &&
+        strcmp(functionName, "slDLSSGSetOptions") == 0) {
+        g_realFgSetOptions = reinterpret_cast<PFun_slDLSSGSetOptions*>(function);
+        PublishFgFunction(function, 1);
+        function = reinterpret_cast<void*>(&HookFgSetOptions);
+    } else if (IsFgProbingEnabled() && g_shared->wrapFgGetState &&
+               feature == sl::kFeatureDLSS_G &&
+               strcmp(functionName, "slDLSSGGetState") == 0) {
+        g_realFgGetState = reinterpret_cast<PFun_slDLSSGGetState*>(function);
+        PublishFgFunction(function, 2);
+        function = reinterpret_cast<void*>(&HookFgGetState);
+    } else if (IsReflexProbingEnabled() && strcmp(functionName, "slReflexSetOptions") == 0) {
         g_realReflexSetOptions = reinterpret_cast<PFun_slReflexSetOptions*>(function);
         SetBackend(ReflexProbeProtocol::ReflexBackendModernSetOptions);
         PublishReflexFunction(function, g_modernInterceptionMethod);
         function = reinterpret_cast<void*>(&HookReflexSetOptions);
         InterlockedExchange(&g_modernReflexCaptured, 1);
-    } else if (strcmp(functionName, "slReflexSleep") == 0 &&
-               g_shared && g_shared->countReflexSleepCalls) {
+    } else if (IsReflexProbingEnabled() && strcmp(functionName, "slReflexSleep") == 0 &&
+               g_shared->countReflexSleepCalls) {
         g_realReflexSleep = reinterpret_cast<PFun_slReflexSleep*>(function);
         function = reinterpret_cast<void*>(&HookReflexSleep);
     }
@@ -644,7 +877,7 @@ FARPROC WINAPI HookApplicationGetProcAddress(HMODULE module, LPCSTR procName)
 
     const wchar_t* moduleName = PathFileName(modulePath);
 
-    if (strcmp(procName, "nvapi_QueryInterface") == 0 &&
+    if (IsReflexProbingEnabled() && strcmp(procName, "nvapi_QueryInterface") == 0 &&
         _wcsicmp(moduleName, L"nvapi64.dll") == 0) {
         g_realNvapiQueryInterface = reinterpret_cast<PFunNvapiQueryInterface*>(result);
         g_nvapiQueryInterceptionMethod =
@@ -652,9 +885,9 @@ FARPROC WINAPI HookApplicationGetProcAddress(HMODULE module, LPCSTR procName)
         return reinterpret_cast<FARPROC>(&HookNvapiQueryInterface);
     }
 
-    if (strcmp(procName, "NvAPI_D3D_Sleep") == 0 &&
+    if (IsReflexProbingEnabled() && strcmp(procName, "NvAPI_D3D_Sleep") == 0 &&
         _wcsicmp(moduleName, L"nvapi64.dll") == 0 &&
-        g_shared && g_shared->countReflexSleepCalls) {
+        g_shared->countReflexSleepCalls) {
         g_realNvapiD3DSleep = reinterpret_cast<PFunNvapiD3DSleep*>(result);
         return reinterpret_cast<FARPROC>(&HookNvapiD3DSleep);
     }
@@ -666,9 +899,11 @@ FARPROC WINAPI HookApplicationGetProcAddress(HMODULE module, LPCSTR procName)
 
     g_realGetFeatureFunction = reinterpret_cast<PFun_slGetFeatureFunction*>(result);
     SetModernInterceptionMethodFromAddress(_ReturnAddress(), L"GetProcAddress IAT");
-    SetBackend(ReflexProbeProtocol::ReflexBackendModernSetOptions);
-    PublishReflexModule(module, ReflexProbeProtocol::HookStateReflexFound,
-        g_modernInterceptionMethod);
+    if (IsReflexProbingEnabled()) {
+        SetBackend(ReflexProbeProtocol::ReflexBackendModernSetOptions);
+        PublishReflexModule(module, ReflexProbeProtocol::HookStateReflexFound,
+            g_modernInterceptionMethod);
+    }
     return reinterpret_cast<FARPROC>(&HookGetFeatureFunction);
 }
 
@@ -947,7 +1182,8 @@ bool PatchLegacyPluginGatewayResolver(HMODULE module, bool& sawTarget)
     sawTarget = false;
 
     HMODULE interposer = GetModuleHandleW(L"sl.interposer.dll");
-    if (!interposer || module != interposer || !IsLegacyStreamlineInterposer(interposer))
+    if (!IsReflexProbingEnabled() || !interposer || module != interposer ||
+        !IsLegacyStreamlineInterposer(interposer))
         return true;
 
     auto* base = reinterpret_cast<unsigned char*>(module);
@@ -1050,7 +1286,8 @@ bool PatchStreamlineImportsInModule(HMODULE module, bool& sawTarget)
 
     void* modernResolver = reinterpret_cast<void*>(GetProcAddress(interposer, "slGetFeatureFunction"));
     void* legacySetConstants = reinterpret_cast<void*>(GetProcAddress(interposer, "slSetFeatureConstants"));
-    const bool useLegacyPublicPath = IsLegacyStreamlineInterposer(interposer) && legacySetConstants != nullptr;
+    const bool useLegacyPublicPath = IsReflexProbingEnabled() &&
+        IsLegacyStreamlineInterposer(interposer) && legacySetConstants != nullptr;
 
     auto* descriptor = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + imports.VirtualAddress);
     for (; descriptor->Name; ++descriptor) {
@@ -1080,8 +1317,10 @@ bool PatchStreamlineImportsInModule(HMODULE module, bool& sawTarget)
                     return false;
                 }
 
-                SetBackend(ReflexProbeProtocol::ReflexBackendModernSetOptions);
-                if (g_shared && InterlockedCompareExchange(&g_shared->hookState, 0, 0) ==
+                if (IsReflexProbingEnabled())
+                    SetBackend(ReflexProbeProtocol::ReflexBackendModernSetOptions);
+                if (IsReflexProbingEnabled() &&
+                    InterlockedCompareExchange(&g_shared->hookState, 0, 0) ==
                         ReflexProbeProtocol::HookStateWaitingForDll) {
                     InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateReflexFound);
                 }
@@ -1135,9 +1374,18 @@ bool PatchLoadedStreamlineImports(bool& foundAny)
                 continue;
             }
 
+            // During combined/FG probing, prioritize dynamic resolution before
+            // the slower Streamline import inspection. Satisfactory resolves
+            // slGetFeatureFunction through a game DLL's GetProcAddress IAT;
+            // the earliest resolver calls cannot be recovered after caching.
+            // Reflex-only retains its previously validated discovery order.
+            const bool probeFg = IsFgProbingEnabled();
+            bool patched = !probeFg ||
+                PatchGetProcAddressResolverInModule(heldModule);
             bool sawTarget = false;
-            bool patched = PatchStreamlineImportsInModule(heldModule, sawTarget);
-            if (patched && !sawTarget)
+            if (patched)
+                patched = PatchStreamlineImportsInModule(heldModule, sawTarget);
+            if (patched && !probeFg && !sawTarget)
                 patched = PatchGetProcAddressResolverInModule(heldModule);
             FreeLibrary(heldModule);
 
@@ -1149,7 +1397,10 @@ bool PatchLoadedStreamlineImports(bool& foundAny)
 
             if (sawTarget) {
                 foundAny = true;
-                break;
+                // With FG enabled, keep discovering resolver imports in other
+                // modules; the FG and Reflex call sites may be in different DLLs.
+                if (!IsFgProbingEnabled())
+                    break;
             }
         } while (Module32NextW(snapshot, &entry));
     }
@@ -1163,6 +1414,9 @@ DWORD WINAPI WorkerThread(void*)
     if (!ConnectSharedState())
         return 1;
 
+    if (!IsReflexProbingEnabled() && !IsFgProbingEnabled())
+        return 0;
+
     InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateWaitingForDll);
 
     // Prefer already-loaded/static Streamline boundaries. Also arm GetProcAddress IATs
@@ -1173,7 +1427,7 @@ DWORD WINAPI WorkerThread(void*)
         if (!PatchLoadedStreamlineImports(foundStreamlineImport))
             return 1;
 
-        if (foundStreamlineImport) {
+        if (foundStreamlineImport && !IsFgProbingEnabled()) {
             if (InterlockedCompareExchange(&g_legacyPluginGatewayArmed, 0, 0) != 0) {
                 OutputDebugStringW(
                     L"ReflexProbe64: armed Streamline 1.x sl.reflex plugin-gateway interception; worker exiting.\n");
@@ -1188,10 +1442,11 @@ DWORD WINAPI WorkerThread(void*)
         }
 
         bool armedNvapiResolver = false;
-        if (!PatchApplicationNvapiResolver(armedNvapiResolver))
+        if (IsReflexProbingEnabled() && !PatchApplicationNvapiResolver(armedNvapiResolver))
             return 1;
 
-        if (InterlockedCompareExchange(&g_nativeNvapiCaptured, 0, 0) != 0) {
+        if (!IsFgProbingEnabled() &&
+            InterlockedCompareExchange(&g_nativeNvapiCaptured, 0, 0) != 0) {
             OutputDebugStringW(
                 L"ReflexProbe64: captured native NVAPI D3D NvAPI_D3D_SetSleepMode; worker exiting.\n");
             return 0;
@@ -1202,13 +1457,28 @@ DWORD WINAPI WorkerThread(void*)
         // Streamline 1.x titles such as A Plague Tale: Requiem can load sl.interposer.dll later,
         // and their Reflex path lives behind the interposer's own
         // slGetPluginFunction("slSetConstants") gateway.
-        if (InterlockedCompareExchange(&g_modernReflexCaptured, 0, 0) != 0) {
+        if (!IsFgProbingEnabled() &&
+            InterlockedCompareExchange(&g_modernReflexCaptured, 0, 0) != 0) {
             OutputDebugStringW(
                 L"ReflexProbe64: dynamic modern Reflex resolver captured slReflexSetOptions; worker exiting.\n");
             return 0;
         }
 
-        Sleep(attempt < 100 ? 10 : 100);
+        if (IsFgProbingEnabled() &&
+            (InterlockedCompareExchange(&g_shared->fgHookBits, 0, 0) & 3) == 3 &&
+            (!IsReflexProbingEnabled() ||
+             InterlockedCompareExchange(&g_modernReflexCaptured, 0, 0) ||
+             InterlockedCompareExchange(&g_nativeNvapiCaptured, 0, 0) ||
+             InterlockedCompareExchange(&g_legacyPluginGatewayArmed, 0, 0) ||
+             g_realLegacySetFeatureConstants)) {
+            OutputDebugStringW(L"ReflexProbe64: selected feature function paths resolved.\n");
+            return 0;
+        }
+
+        // Keep discovery alive for later-loaded FG modules without polling
+        // a fully running game's module list at 10 Hz indefinitely.
+        Sleep(attempt < 100 ? 10 :
+            (IsFgProbingEnabled() ? (attempt < 300 ? 250 : 1000) : 100));
     }
 }
 

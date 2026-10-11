@@ -21,7 +21,6 @@ constexpr int kWatchWidth = 116;
 constexpr int kAttachWidth = 92;
 constexpr int kAcquisitionGap = 8;
 constexpr int kPolicyGap = 10;
-constexpr int kPolicyToAcquisitionGap = 16;
 constexpr int kOverrideWidth = 172;
 constexpr int kOverrideFpsWidth = 70;
 constexpr int kFpsLabelWidth = 34;
@@ -34,15 +33,22 @@ constexpr int kStateWidth = 108;
 constexpr int kCaptureLabelWidth = 92;
 constexpr int kCaptureGap = 8;
 
-constexpr int kFpsX = kMargin + kOverrideWidth;
+constexpr int kFpsX = kMargin + 18 + kOverrideWidth;
 constexpr int kFpsLabelX = kFpsX + kOverrideFpsWidth + 8;
 constexpr int kForceBoostX = kFpsLabelX + kFpsLabelWidth + kPolicyGap;
 constexpr int kCountSleepX = kForceBoostX + kForceBoostWidth + kPolicyGap;
 constexpr int kPolicyRight = kCountSleepX + kCountSleepWidth;
-constexpr int kAcquisitionWidth =
-    kLaunchWidth + kAcquisitionGap + kWatchWidth + kAcquisitionGap + kAttachWidth;
-constexpr int kMinimumClientWidth =
-    kPolicyRight + kPolicyToAcquisitionGap + kAcquisitionWidth + kMargin;
+constexpr int kMinimumClientWidth = kPolicyRight + kMargin + 36;
+
+constexpr int kReflexGroupTop = 127;
+constexpr int kReflexGroupHeight = 56;
+constexpr int kFgGroupTop = 198;
+constexpr int kFgGroupHeight = 92;
+constexpr int kAcquisitionTop = 303;
+constexpr int kReflexStateTop = kAcquisitionTop - 1;
+constexpr int kFgStateTop = kAcquisitionTop + 15;
+constexpr int kStatusHeadingTop = 346;
+constexpr int kAcquisitionStatusGap = 8;
 
 bool IsSelectedGameExecutableValid()
 {
@@ -116,6 +122,76 @@ bool ParseOverrideFromUi(bool& enabled, uint32_t& frameLimitUs, wchar_t* error, 
     return true;
 }
 
+bool ReflexProbingSelected()
+{
+    return g_app.reflexProbing && Button_GetCheck(g_app.reflexProbing) == BST_CHECKED;
+}
+
+bool FgProbingSelected()
+{
+    return g_app.fgProbing && Button_GetCheck(g_app.fgProbing) == BST_CHECKED;
+}
+
+FgPolicy ReadFgPolicyFromUi()
+{
+    FgPolicy policy{};
+    if (FgProbingSelected()) {
+        policy.forceOnWhenAuto = Button_GetCheck(g_app.fgForceAutoOn) == BST_CHECKED;
+        policy.overrideMultiplier = Button_GetCheck(g_app.fgMultiplierOverride) == BST_CHECKED;
+        const LRESULT multiplierIndex = SendMessageW(
+            g_app.fgMultiplierChoice, CB_GETCURSEL, 0, 0);
+        if (multiplierIndex >= 0 && multiplierIndex <= 4)
+            policy.multiplierFrames = static_cast<uint32_t>(multiplierIndex + 1);
+        policy.overrideMenu = Button_GetCheck(g_app.fgMenuOverride) == BST_CHECKED;
+        policy.menuDetectionOn = Button_GetCheck(g_app.fgMenuOn) == BST_CHECKED;
+        policy.overrideRetention = Button_GetCheck(g_app.fgRetentionOverride) == BST_CHECKED;
+        policy.retainResourcesWhenOff = Button_GetCheck(g_app.fgRetentionOn) == BST_CHECKED;
+        policy.wrapGetState = Button_GetCheck(g_app.fgGetState) == BST_CHECKED;
+    }
+    return policy;
+}
+
+void ApplyFgPolicyToShared()
+{
+    if (!g_app.shared || !FgProbingSelected())
+        return;
+    const FgPolicy policy = ReadFgPolicyFromUi();
+    InterlockedExchange(&g_app.shared->fgForceOnWhenAuto, policy.forceOnWhenAuto ? 1 : 0);
+    InterlockedExchange(&g_app.shared->fgMultiplierFrames,
+        static_cast<LONG>(policy.multiplierFrames));
+    InterlockedExchange(&g_app.shared->fgMultiplierOverrideEnabled,
+        policy.overrideMultiplier ? 1 : 0);
+    InterlockedExchange(&g_app.shared->fgMenuOverrideEnabled, policy.overrideMenu ? 1 : 0);
+    InterlockedExchange(&g_app.shared->fgMenuOverrideOn, policy.menuDetectionOn ? 1 : 0);
+    InterlockedExchange(&g_app.shared->fgRetentionOverrideEnabled,
+        policy.overrideRetention ? 1 : 0);
+    InterlockedExchange(&g_app.shared->fgRetentionOverrideOn,
+        policy.retainResourcesWhenOff ? 1 : 0);
+    InterlockedIncrement(&g_app.shared->configSequence);
+    AppendStatusLine(policy.forceOnWhenAuto
+        ? L"FG policy: Force Auto to On enabled; applies to next SetOptions call."
+        : L"FG policy: Force Auto to On disabled.");
+    if (policy.overrideMultiplier) {
+        wchar_t multiplierLine[128]{};
+        swprintf_s(multiplierLine,
+            L"FG policy: multiplier override %uX; applies to next game SetOptions call.",
+            policy.multiplierFrames + 1);
+        AppendStatusLine(multiplierLine);
+    } else {
+        AppendStatusLine(L"FG policy: multiplier override disabled.");
+    }
+    AppendStatusLine(!policy.overrideMenu
+        ? L"FG policy: fullscreen-menu-detection override disabled."
+        : (policy.menuDetectionOn
+            ? L"FG policy: fullscreen-menu-detection override forced On."
+            : L"FG policy: fullscreen-menu-detection override forced Off."));
+    AppendStatusLine(!policy.overrideRetention
+        ? L"FG policy: resource-retention override disabled."
+        : (policy.retainResourcesWhenOff
+            ? L"FG policy: resource-retention override forced On (retained VRAM possible while Off)."
+            : L"FG policy: resource-retention override forced Off."));
+}
+
 void ApplyPolicyToShared(bool logFrameLimit, bool logBoost)
 {
     if (!g_app.shared)
@@ -161,13 +237,17 @@ void UpdateAcquisitionControls()
     const bool targetActive = g_app.process != nullptr;
     const bool watching = g_app.watchArmed;
     const bool validTarget = IsSelectedGameExecutableValid();
+    const bool reflexEnabled = ReflexProbingSelected();
+    const bool fgEnabled = FgProbingSelected();
+    const bool anyProbe = reflexEnabled || fgEnabled;
+    const bool probeSelectionLocked = targetActive || watching;
 
     if (g_app.launch)
-        EnableWindow(g_app.launch, validTarget && !targetActive && !watching);
+        EnableWindow(g_app.launch, validTarget && anyProbe && !targetActive && !watching);
     if (g_app.attach)
-        EnableWindow(g_app.attach, validTarget && !targetActive && !watching);
+        EnableWindow(g_app.attach, validTarget && anyProbe && !targetActive && !watching);
     if (g_app.watch) {
-        EnableWindow(g_app.watch, watching || (validTarget && !targetActive));
+        EnableWindow(g_app.watch, watching || (validTarget && anyProbe && !targetActive));
         SetWindowTextW(g_app.watch, watching ? L"Cancel Watch" : L"Watch + Inject");
     }
 
@@ -178,17 +258,52 @@ void UpdateAcquisitionControls()
     if (g_app.arguments)
         EnableWindow(g_app.arguments, !watching);
 
+    if (g_app.reflexProbing)
+        EnableWindow(g_app.reflexProbing, !probeSelectionLocked);
+    if (g_app.fgProbing)
+        EnableWindow(g_app.fgProbing, !probeSelectionLocked);
+    if (g_app.fgForceAutoOn)
+        EnableWindow(g_app.fgForceAutoOn, fgEnabled && !watching);
+    if (g_app.fgMultiplierOverride)
+        EnableWindow(g_app.fgMultiplierOverride, fgEnabled && !watching);
+    const bool multiplierChecked = g_app.fgMultiplierOverride &&
+        Button_GetCheck(g_app.fgMultiplierOverride) == BST_CHECKED;
+    if (g_app.fgMultiplierChoice)
+        EnableWindow(g_app.fgMultiplierChoice,
+            fgEnabled && !watching && multiplierChecked);
+    if (g_app.fgMenuOverride)
+        EnableWindow(g_app.fgMenuOverride, fgEnabled && !watching);
+    const bool menuOverrideChecked = g_app.fgMenuOverride &&
+        Button_GetCheck(g_app.fgMenuOverride) == BST_CHECKED;
+    if (g_app.fgMenuOff)
+        EnableWindow(g_app.fgMenuOff, fgEnabled && !watching && menuOverrideChecked);
+    if (g_app.fgMenuOn)
+        EnableWindow(g_app.fgMenuOn, fgEnabled && !watching && menuOverrideChecked);
+    if (g_app.fgRetentionOverride)
+        EnableWindow(g_app.fgRetentionOverride, fgEnabled && !watching);
+    const bool retentionChecked = g_app.fgRetentionOverride &&
+        Button_GetCheck(g_app.fgRetentionOverride) == BST_CHECKED;
+    if (g_app.fgRetentionOff)
+        EnableWindow(g_app.fgRetentionOff, fgEnabled && !watching && retentionChecked);
+    if (g_app.fgRetentionOn)
+        EnableWindow(g_app.fgRetentionOn, fgEnabled && !watching && retentionChecked);
+    if (g_app.fgGetState)
+        EnableWindow(g_app.fgGetState, fgEnabled && !probeSelectionLocked);
+    if (g_app.fgDetailedDiagnosticsControl)
+        EnableWindow(g_app.fgDetailedDiagnosticsControl,
+            fgEnabled && g_app.captureMode == CaptureModeStateChanges);
+
     if (g_app.overrideEnable)
-        EnableWindow(g_app.overrideEnable, !watching);
+        EnableWindow(g_app.overrideEnable, reflexEnabled && !watching);
     if (g_app.overrideFps) {
         const bool frameOverrideChecked =
             g_app.overrideEnable && Button_GetCheck(g_app.overrideEnable) == BST_CHECKED;
-        EnableWindow(g_app.overrideFps, !watching && frameOverrideChecked);
+        EnableWindow(g_app.overrideFps, reflexEnabled && !watching && frameOverrideChecked);
     }
     if (g_app.forceBoost)
-        EnableWindow(g_app.forceBoost, !watching);
+        EnableWindow(g_app.forceBoost, reflexEnabled && !watching);
     if (g_app.countReflexSleep)
-        EnableWindow(g_app.countReflexSleep, !targetActive && !watching);
+        EnableWindow(g_app.countReflexSleep, reflexEnabled && !targetActive && !watching);
     if (g_app.clearHistory)
         EnableWindow(g_app.clearHistory, !targetActive && !watching);
 }
@@ -213,6 +328,7 @@ void CleanupTarget()
 
     g_app.processId = 0;
     g_app.lastHookState = -1;
+    g_app.lastFgHookBits = 0;
     g_app.lastEventSerial = 0;
     g_app.loggedInjectedBuild = false;
     g_app.rawUiBatchWarningShown = false;
@@ -247,8 +363,13 @@ bool LaunchAndInject()
     const bool forceBoostWhenOn = Button_GetCheck(g_app.forceBoost) == BST_CHECKED;
     const bool countReflexSleepCalls =
         Button_GetCheck(g_app.countReflexSleep) == BST_CHECKED;
+    const bool probeReflex = ReflexProbingSelected();
+    const bool probeDlssFg = FgProbingSelected();
+    const FgPolicy fgPolicy = ReadFgPolicyFromUi();
+    if (!probeReflex && !probeDlssFg)
+        return false;
     wchar_t error[512]{};
-    if (!ParseOverrideFromUi(overrideEnabled, overrideUs, error, _countof(error))) {
+    if (probeReflex && !ParseOverrideFromUi(overrideEnabled, overrideUs, error, _countof(error))) {
         MessageBoxW(g_app.window, error, L"ReflexProbe", MB_ICONWARNING);
         return false;
     }
@@ -306,7 +427,7 @@ bool LaunchAndInject()
 
     if (!CreateSharedState(process.dwProcessId, gamePath,
             overrideEnabled, overrideUs, forceBoostWhenOn, countReflexSleepCalls,
-            error, _countof(error))) {
+            probeReflex, probeDlssFg, fgPolicy, error, _countof(error))) {
         TerminateProcess(process.hProcess, 1);
         CloseHandle(process.hThread);
         MessageBoxW(g_app.window, error, L"ReflexProbe", MB_ICONERROR);
@@ -340,6 +461,7 @@ bool LaunchAndInject()
     CloseHandle(process.hThread);
 
     g_app.lastHookState = -1;
+    g_app.lastFgHookBits = 0;
     g_app.lastEventSerial = 0;
     g_app.loggedInjectedBuild = false;
     g_app.rawUiBatchWarningShown = false;
@@ -348,29 +470,62 @@ bool LaunchAndInject()
     wchar_t line[512]{};
     swprintf_s(line, L"Launched %s (PID %lu) and injected ReflexProbe64.dll.", PathFileName(gamePath), process.dwProcessId);
     AppendStatusLine(line);
-    if (overrideEnabled && overrideUs) {
+    AppendStatusLine(probeReflex
+        ? L"Reflex probing: enabled; supported Reflex functions can be wrapped."
+        : L"Reflex probing: disabled; Reflex functions are passed through untouched.");
+    AppendStatusLine(probeDlssFg
+        ? (fgPolicy.wrapGetState
+            ? L"DLSS FG probing: SetOptions and GetState intercepted."
+            : L"DLSS FG probing: SetOptions intercepted; GetState pointer untouched.")
+        : L"DLSS FG probing: disabled; FG functions are passed through untouched.");
+    if (probeDlssFg) {
+        AppendStatusLine(fgPolicy.forceOnWhenAuto
+            ? L"Initial FG Auto-to-On override: enabled."
+            : L"Initial FG Auto-to-On override: disabled.");
+        if (fgPolicy.overrideMultiplier) {
+            wchar_t multiplierLine[128]{};
+            swprintf_s(multiplierLine,
+                L"Initial FG multiplier override: %uX (next game SetOptions).",
+                fgPolicy.multiplierFrames + 1);
+            AppendStatusLine(multiplierLine);
+        } else {
+            AppendStatusLine(L"Initial FG multiplier override: disabled.");
+        }
+        AppendStatusLine(!fgPolicy.overrideMenu
+            ? L"Initial FG menu-detection override: disabled."
+            : (fgPolicy.menuDetectionOn
+                ? L"Initial FG menu-detection override: On."
+                : L"Initial FG menu-detection override: Off."));
+        AppendStatusLine(!fgPolicy.overrideRetention
+            ? L"Initial FG resource-retention override: disabled."
+            : (fgPolicy.retainResourcesWhenOff
+                ? L"Initial FG resource-retention override: On (VRAM retained while FG Off)."
+                : L"Initial FG resource-retention override: Off."));
+    }
+    if (probeReflex && overrideEnabled && overrideUs) {
         swprintf_s(line, L"Initial override: %u us (%.3f FPS).", overrideUs,
             1000000.0 / static_cast<double>(overrideUs));
         AppendStatusLine(line);
-    } else if (overrideEnabled) {
+    } else if (probeReflex && overrideEnabled) {
         AppendStatusLine(L"Initial override: 0 us (no explicit Reflex frame limit).");
-    } else {
+    } else if (probeReflex) {
         AppendStatusLine(L"Initial frame-limit override: disabled.");
     }
 
-    if (forceBoostWhenOn)
+    if (probeReflex && forceBoostWhenOn)
         AppendStatusLine(L"Initial Force Boost policy: enabled; plain Reflex On requests will be forwarded as On + Boost.");
-    else
+    else if (probeReflex)
         AppendStatusLine(L"Initial Force Boost policy: disabled; Reflex mode requests pass through unchanged.");
 
-    AppendStatusLine(countReflexSleepCalls
-        ? L"Initial Reflex Sleep call counting: enabled; Reflex Sleep will be wrapped for this target."
-        : L"Initial Reflex Sleep call counting: disabled; Reflex Sleep will remain untouched for this target.");
+    if (probeReflex)
+        AppendStatusLine(countReflexSleepCalls
+            ? L"Initial Reflex Sleep call counting: enabled; Reflex Sleep will be wrapped for this target."
+            : L"Initial Reflex Sleep call counting: disabled; Reflex Sleep will remain untouched for this target.");
 
     if (g_app.captureMode == CaptureModeRawDebug)
         AppendStatusLine(L"Capture mode: Raw debug; bounded raw retention starts with this target.");
     else
-        AppendStatusLine(L"Capture mode: State changes; identical Reflex calls are counted but not retained individually.");
+        AppendStatusLine(L"Capture mode: State changes; identical Reflex and per-viewport FG calls are counted.");
 
     return true;
 }
@@ -378,7 +533,8 @@ bool LaunchAndInject()
 bool ReadTargetAndPolicyForExternalAcquisition(
     wchar_t* gamePath, size_t gamePathCount,
     bool& overrideEnabled, uint32_t& overrideUs, bool& forceBoostWhenOn,
-    bool& countReflexSleepCalls, wchar_t* error, size_t errorCount)
+    bool& countReflexSleepCalls, bool& probeReflex, bool& probeDlssFg,
+    FgPolicy& fgPolicy, wchar_t* error, size_t errorCount)
 {
     if (!gamePath || !gamePathCount)
         return false;
@@ -395,9 +551,23 @@ bool ReadTargetAndPolicyForExternalAcquisition(
         return false;
     }
 
+    probeReflex = ReflexProbingSelected();
+    probeDlssFg = FgProbingSelected();
+    fgPolicy = ReadFgPolicyFromUi();
+    if (!probeReflex && !probeDlssFg) {
+        swprintf_s(error, errorCount, L"Enable at least one probe before acquisition.");
+        return false;
+    }
     forceBoostWhenOn = Button_GetCheck(g_app.forceBoost) == BST_CHECKED;
     countReflexSleepCalls =
         Button_GetCheck(g_app.countReflexSleep) == BST_CHECKED;
+    if (!probeReflex) {
+        overrideEnabled = false;
+        overrideUs = 0;
+        forceBoostWhenOn = false;
+        countReflexSleepCalls = false;
+        return true;
+    }
     return ParseOverrideFromUi(overrideEnabled, overrideUs, error, errorCount);
 }
 
@@ -413,17 +583,20 @@ bool ToggleWatchAndInject()
     uint32_t overrideUs = 0;
     bool forceBoostWhenOn = false;
     bool countReflexSleepCalls = false;
+    bool probeReflex = true;
+    bool probeDlssFg = false;
+    FgPolicy fgPolicy{};
     wchar_t error[512]{};
 
     if (!ReadTargetAndPolicyForExternalAcquisition(
             gamePath, _countof(gamePath), overrideEnabled, overrideUs, forceBoostWhenOn,
-            countReflexSleepCalls, error, _countof(error))) {
+            countReflexSleepCalls, probeReflex, probeDlssFg, fgPolicy, error, _countof(error))) {
         MessageBoxW(g_app.window, error, L"ReflexProbe", MB_ICONWARNING);
         return false;
     }
 
     if (!ArmProcessWatch(gamePath, overrideEnabled, overrideUs, forceBoostWhenOn,
-            countReflexSleepCalls, error, _countof(error))) {
+            countReflexSleepCalls, probeReflex, probeDlssFg, fgPolicy, error, _countof(error))) {
         MessageBoxW(g_app.window, error, L"ReflexProbe Watch + Inject", MB_ICONERROR);
         return false;
     }
@@ -438,17 +611,20 @@ bool AttachToRunningTarget()
     uint32_t overrideUs = 0;
     bool forceBoostWhenOn = false;
     bool countReflexSleepCalls = false;
+    bool probeReflex = true;
+    bool probeDlssFg = false;
+    FgPolicy fgPolicy{};
     wchar_t error[512]{};
 
     if (!ReadTargetAndPolicyForExternalAcquisition(
             gamePath, _countof(gamePath), overrideEnabled, overrideUs, forceBoostWhenOn,
-            countReflexSleepCalls, error, _countof(error))) {
+            countReflexSleepCalls, probeReflex, probeDlssFg, fgPolicy, error, _countof(error))) {
         MessageBoxW(g_app.window, error, L"ReflexProbe", MB_ICONWARNING);
         return false;
     }
 
     if (!AttachRunningProcess(gamePath, overrideEnabled, overrideUs, forceBoostWhenOn,
-            countReflexSleepCalls, error, _countof(error))) {
+            countReflexSleepCalls, probeReflex, probeDlssFg, fgPolicy, error, _countof(error))) {
         MessageBoxW(g_app.window, error, L"ReflexProbe Attach", MB_ICONERROR);
         return false;
     }
@@ -475,6 +651,49 @@ void BrowseForGame()
     }
 }
 
+// A checkbox painted over a group-box caption interrupts its border for the entire
+// checkbox rectangle. Size the caption to its actual font/text instead of leaving
+// a long blank section of border hidden by a fixed-width checkbox.
+int MeasureGroupHeadingWidth(HWND checkbox)
+{
+    if (!checkbox)
+        return 0;
+
+    wchar_t label[128]{};
+    GetWindowTextW(checkbox, label, static_cast<int>(_countof(label)));
+
+    HDC dc = GetDC(checkbox);
+    if (!dc)
+        return 0;
+
+    HFONT font = reinterpret_cast<HFONT>(SendMessageW(checkbox, WM_GETFONT, 0, 0));
+    HGDIOBJ previous = nullptr;
+    if (font)
+        previous = SelectObject(dc, font);
+
+    SIZE extent{};
+    const BOOL measured = GetTextExtentPoint32W(
+        dc, label, static_cast<int>(wcslen(label)), &extent);
+
+    if (previous)
+        SelectObject(dc, previous);
+    ReleaseDC(checkbox, dc);
+
+    if (!measured)
+        return 0;
+
+    // Checkbox glyph + text gap + a little trailing breathing room.
+    return GetSystemMetrics(SM_CXMENUCHECK) + extent.cx + 12;
+}
+
+// The radio glyph is already accounted for by MeasureGroupHeadingWidth.
+// Its heading-specific extra trailing gap is unnecessary in a packed row.
+int MeasureCompactRadioWidth(HWND radio)
+{
+    const int width = MeasureGroupHeadingWidth(radio);
+    return width > 8 ? width - 6 : 40;
+}
+
 void LayoutControls(int clientWidth, int clientHeight)
 {
     if (clientWidth <= 0 || clientHeight <= 0)
@@ -496,31 +715,123 @@ void LayoutControls(int clientWidth, int clientHeight)
     if (g_app.arguments)
         MoveWindow(g_app.arguments, kMargin, 90, usableWidth > 50 ? usableWidth : 50, 24, TRUE);
 
+    if (g_app.reflexGroup)
+        MoveWindow(g_app.reflexGroup, kMargin, kReflexGroupTop,
+            usableWidth, kReflexGroupHeight, TRUE);
+    if (g_app.reflexProbing)
+        MoveWindow(g_app.reflexProbing, kMargin + 14, kReflexGroupTop - 9,
+            MeasureGroupHeadingWidth(g_app.reflexProbing), 22, TRUE);
+
     if (g_app.overrideEnable)
-        MoveWindow(g_app.overrideEnable, kMargin, 128, kOverrideWidth, 22, TRUE);
+        MoveWindow(g_app.overrideEnable, kMargin + 18, 149, kOverrideWidth, 22, TRUE);
     if (g_app.overrideFps)
-        MoveWindow(g_app.overrideFps, kFpsX, 126, kOverrideFpsWidth, 24, TRUE);
+        MoveWindow(g_app.overrideFps, kFpsX, 148, kOverrideFpsWidth, 24, TRUE);
     if (g_app.fpsLabel)
-        MoveWindow(g_app.fpsLabel, kFpsLabelX, 130, kFpsLabelWidth, 20, TRUE);
+        MoveWindow(g_app.fpsLabel, kFpsLabelX, 151, kFpsLabelWidth, 20, TRUE);
     if (g_app.forceBoost)
-        MoveWindow(g_app.forceBoost, kForceBoostX, 128, kForceBoostWidth, 22, TRUE);
+        MoveWindow(g_app.forceBoost, kForceBoostX, 149, kForceBoostWidth, 22, TRUE);
     if (g_app.countReflexSleep)
-        MoveWindow(g_app.countReflexSleep, kCountSleepX, 128, kCountSleepWidth, 22, TRUE);
+        MoveWindow(g_app.countReflexSleep, kCountSleepX, 149, kCountSleepWidth, 22, TRUE);
+
+    if (g_app.fgGroup)
+        MoveWindow(g_app.fgGroup, kMargin, kFgGroupTop,
+            usableWidth, kFgGroupHeight, TRUE);
+    if (g_app.fgProbing)
+        MoveWindow(g_app.fgProbing, kMargin + 14, kFgGroupTop - 9,
+            MeasureGroupHeadingWidth(g_app.fgProbing), 22, TRUE);
+
+    // Compact one-line FG override layout, including both independent Off/On
+    // radio groups. Text-derived widths reclaim the blank areas of fixed slots
+    // at the minimum window size while still using the actual UI font.
+    int fgX = kMargin + 18;
+    const int fgRowY = 220;
+    const int fgControlHeight = 22;
+    const int fgGroupGap = 5;
+    const int fgRadioGap = 1;
+    if (g_app.fgForceAutoOn) {
+        const int width = MeasureGroupHeadingWidth(g_app.fgForceAutoOn);
+        MoveWindow(g_app.fgForceAutoOn, fgX, fgRowY, width, fgControlHeight, TRUE);
+        fgX += width + fgGroupGap;
+    }
+    if (g_app.fgMenuOverride) {
+        const int width = MeasureGroupHeadingWidth(g_app.fgMenuOverride);
+        MoveWindow(g_app.fgMenuOverride, fgX, fgRowY, width, fgControlHeight, TRUE);
+        fgX += width + fgRadioGap;
+    }
+    if (g_app.fgMenuOff) {
+        const int width = MeasureCompactRadioWidth(g_app.fgMenuOff);
+        MoveWindow(g_app.fgMenuOff, fgX, fgRowY, width, fgControlHeight, TRUE);
+        fgX += width;
+    }
+    if (g_app.fgMenuOn) {
+        const int width = MeasureCompactRadioWidth(g_app.fgMenuOn);
+        MoveWindow(g_app.fgMenuOn, fgX, fgRowY, width, fgControlHeight, TRUE);
+        fgX += width + fgGroupGap;
+    }
+    if (g_app.fgRetentionOverride) {
+        const int width = MeasureGroupHeadingWidth(g_app.fgRetentionOverride);
+        MoveWindow(g_app.fgRetentionOverride, fgX, fgRowY, width, fgControlHeight, TRUE);
+        fgX += width + fgRadioGap;
+    }
+    if (g_app.fgRetentionOff) {
+        const int width = MeasureCompactRadioWidth(g_app.fgRetentionOff);
+        MoveWindow(g_app.fgRetentionOff, fgX, fgRowY, width, fgControlHeight, TRUE);
+        fgX += width;
+    }
+    if (g_app.fgRetentionOn) {
+        const int width = MeasureCompactRadioWidth(g_app.fgRetentionOn);
+        MoveWindow(g_app.fgRetentionOn, fgX, fgRowY, width, fgControlHeight, TRUE);
+    }
+    // Pack the second FG row by actual caption widths, just like the first.
+    // The multiplier combo only contains 2X-6X; do not reserve room for
+    // longer placeholder labels or stretch the row to align with the one above.
+    int fgLowerX = kMargin + 18;
+    const int fgLowerY = 250;
+    const int fgMultiplierComboWidth = 62;
+    if (g_app.fgMultiplierOverride) {
+        const int width = MeasureGroupHeadingWidth(g_app.fgMultiplierOverride);
+        MoveWindow(g_app.fgMultiplierOverride, fgLowerX, fgLowerY,
+            width, fgControlHeight, TRUE);
+        fgLowerX += width + fgGroupGap;
+    }
+    if (g_app.fgMultiplierChoice) {
+        MoveWindow(g_app.fgMultiplierChoice, fgLowerX, fgLowerY - 2,
+            fgMultiplierComboWidth, 112, TRUE);
+        fgLowerX += fgMultiplierComboWidth + fgGroupGap + 5;
+    }
+    if (g_app.fgDetailedDiagnosticsControl) {
+        const int width = MeasureGroupHeadingWidth(g_app.fgDetailedDiagnosticsControl);
+        MoveWindow(g_app.fgDetailedDiagnosticsControl, fgLowerX, fgLowerY,
+            width, fgControlHeight, TRUE);
+        fgLowerX += width + fgGroupGap + 5;
+    }
+    if (g_app.fgGetState)
+        MoveWindow(g_app.fgGetState, fgLowerX, fgLowerY,
+            MeasureGroupHeadingWidth(g_app.fgGetState),
+            fgControlHeight, TRUE);
+
     const int attachX = clientWidth - kMargin - kAttachWidth;
     const int watchX = attachX - kAcquisitionGap - kWatchWidth;
     const int launchX = watchX - kAcquisitionGap - kLaunchWidth;
     if (g_app.launch)
-        MoveWindow(g_app.launch, launchX, 124, kLaunchWidth, 30, TRUE);
+        MoveWindow(g_app.launch, launchX, kAcquisitionTop, kLaunchWidth, 30, TRUE);
     if (g_app.watch)
-        MoveWindow(g_app.watch, watchX, 124, kWatchWidth, 30, TRUE);
+        MoveWindow(g_app.watch, watchX, kAcquisitionTop, kWatchWidth, 30, TRUE);
     if (g_app.attach)
-        MoveWindow(g_app.attach, attachX, 124, kAttachWidth, 30, TRUE);
+        MoveWindow(g_app.attach, attachX, kAcquisitionTop, kAttachWidth, 30, TRUE);
 
+    // Both status lines share the acquisition-button height. The available label
+    // width is bounded by Launch's left edge even at minimum window width.
+    const int stateWidth = launchX - kMargin - kAcquisitionStatusGap;
     if (g_app.currentState)
-        MoveWindow(g_app.currentState, kMargin, 164, usableWidth > 50 ? usableWidth : 50, 20, TRUE);
+        MoveWindow(g_app.currentState, kMargin, kReflexStateTop,
+            stateWidth > 50 ? stateWidth : 50, 16, TRUE);
+    if (g_app.fgState)
+        MoveWindow(g_app.fgState, kMargin, kFgStateTop,
+            stateWidth > 50 ? stateWidth : 50, 16, TRUE);
 
     if (g_app.statusLabel)
-        MoveWindow(g_app.statusLabel, kMargin, 190, 180, 20, TRUE);
+        MoveWindow(g_app.statusLabel, kMargin, kStatusHeadingTop, 180, 20, TRUE);
 
     const int wrapX = clientWidth - kMargin - kWordWrapWidth;
     const int clearX = wrapX - kCaptureGap - kClearWidth;
@@ -528,15 +839,15 @@ void LayoutControls(int clientWidth, int clientHeight)
     const int stateX = rawX - kCaptureGap - kStateWidth;
     const int captureLabelX = stateX - kCaptureGap - kCaptureLabelWidth;
     if (g_app.captureModeLabel)
-        MoveWindow(g_app.captureModeLabel, captureLabelX, 190, kCaptureLabelWidth, 20, TRUE);
+        MoveWindow(g_app.captureModeLabel, captureLabelX, kStatusHeadingTop, kCaptureLabelWidth, 20, TRUE);
     if (g_app.captureState)
-        MoveWindow(g_app.captureState, stateX, 188, kStateWidth, 22, TRUE);
+        MoveWindow(g_app.captureState, stateX, kStatusHeadingTop - 2, kStateWidth, 22, TRUE);
     if (g_app.captureRaw)
-        MoveWindow(g_app.captureRaw, rawX, 188, kRawWidth, 22, TRUE);
+        MoveWindow(g_app.captureRaw, rawX, kStatusHeadingTop - 2, kRawWidth, 22, TRUE);
     if (g_app.clearHistory)
-        MoveWindow(g_app.clearHistory, clearX, 187, kClearWidth, 24, TRUE);
+        MoveWindow(g_app.clearHistory, clearX, kStatusHeadingTop - 3, kClearWidth, 24, TRUE);
     if (g_app.wordWrap)
-        MoveWindow(g_app.wordWrap, wrapX, 188, kWordWrapWidth, 22, TRUE);
+        MoveWindow(g_app.wordWrap, wrapX, kStatusHeadingTop - 2, kWordWrapWidth, 22, TRUE);
 
     if (g_app.status) {
         int statusHeight = clientHeight - kStatusTop - kMargin;
@@ -579,6 +890,119 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_ARGUMENTS), g_app.instance, nullptr);
         SetChildFont(g_app.arguments, font);
 
+        // Independent acquisition-time feature switches in stacked native group boxes.
+        // The checkbox sits over the upper border; the groups are created first for z-order.
+        g_app.reflexGroup = CreateWindowExW(0, L"BUTTON", L"",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
+        SetChildFont(g_app.reflexGroup, font);
+
+        g_app.reflexProbing = CreateWindowExW(0, L"BUTTON", L"Enable Reflex probing",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_REFLEX_PROBING),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.reflexProbing, font);
+        Button_SetCheck(g_app.reflexProbing, BST_CHECKED);
+
+        g_app.fgGroup = CreateWindowExW(0, L"BUTTON", L"",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
+        SetChildFont(g_app.fgGroup, font);
+
+        g_app.fgProbing = CreateWindowExW(0, L"BUTTON", L"Enable DLSS Frame Generation probing",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FG_PROBING),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.fgProbing, font);
+
+        g_app.fgForceAutoOn = CreateWindowExW(0, L"BUTTON",
+            L"Force Auto to On",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FG_FORCE_AUTO_ON),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.fgForceAutoOn, font);
+
+        g_app.fgMultiplierOverride = CreateWindowExW(0, L"BUTTON",
+            L"Override FG multiplier",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FG_MULTIPLIER_OVERRIDE),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.fgMultiplierOverride, font);
+
+        g_app.fgMultiplierChoice = CreateWindowExW(0, L"COMBOBOX", L"",
+            WS_CHILD | WS_VISIBLE | WS_DISABLED | WS_VSCROLL | CBS_DROPDOWNLIST,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FG_MULTIPLIER_CHOICE),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.fgMultiplierChoice, font);
+        SendMessageW(g_app.fgMultiplierChoice, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(L"2X"));
+        SendMessageW(g_app.fgMultiplierChoice, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(L"3X"));
+        SendMessageW(g_app.fgMultiplierChoice, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(L"4X"));
+        SendMessageW(g_app.fgMultiplierChoice, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(L"5X"));
+        SendMessageW(g_app.fgMultiplierChoice, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(L"6X"));
+        SendMessageW(g_app.fgMultiplierChoice, CB_SETCURSEL, 0, 0);
+
+        g_app.fgMenuOverride = CreateWindowExW(0, L"BUTTON",
+            L"Override menu detection",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FG_MENU_OVERRIDE),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.fgMenuOverride, font);
+
+        g_app.fgMenuOff = CreateWindowExW(0, L"BUTTON", L"Off",
+            WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FG_MENU_OFF),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.fgMenuOff, font);
+        Button_SetCheck(g_app.fgMenuOff, BST_CHECKED);
+
+        g_app.fgMenuOn = CreateWindowExW(0, L"BUTTON", L"On",
+            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FG_MENU_ON),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.fgMenuOn, font);
+
+        g_app.fgRetentionOverride = CreateWindowExW(0, L"BUTTON",
+            L"Override FG resource retention",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FG_RETENTION_OVERRIDE),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.fgRetentionOverride, font);
+
+        // Independent radio group: On is the default *selection*, but the
+        // override checkbox itself starts unchecked (no intervention).
+        g_app.fgRetentionOff = CreateWindowExW(0, L"BUTTON", L"Off",
+            WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FG_RETENTION_OFF),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.fgRetentionOff, font);
+
+        g_app.fgRetentionOn = CreateWindowExW(0, L"BUTTON", L"On",
+            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FG_RETENTION_ON),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.fgRetentionOn, font);
+        Button_SetCheck(g_app.fgRetentionOn, BST_CHECKED);
+
+        g_app.fgGetState = CreateWindowExW(0, L"BUTTON",
+            L"Intercept FG GetState calls",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_GROUP,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FG_WRAP_GET_STATE),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.fgGetState, font);
+
+        g_app.fgDetailedDiagnosticsControl = CreateWindowExW(0, L"BUTTON",
+            L"Detailed FG diagnostics",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, window,
+            reinterpret_cast<HMENU>(IDC_FG_DETAILED_DIAGNOSTICS),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.fgDetailedDiagnosticsControl, font);
+
         g_app.overrideEnable = CreateWindowExW(0, L"BUTTON", L"Override Reflex frame limit",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
             0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_OVERRIDE_ENABLE), g_app.instance, nullptr);
@@ -620,12 +1044,18 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         SetChildFont(g_app.attach, font);
 
         g_app.currentState = CreateWindowExW(0, L"STATIC",
-            L"Current effective state: Reflex Unknown | Reflex FPS limit: Unknown",
+            L"Reflex: Unknown | Limit: Unknown",
             WS_CHILD | WS_VISIBLE,
             0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
         SetChildFont(g_app.currentState, font);
 
-        g_app.statusLabel = CreateWindowExW(0, L"STATIC", L"Status / Reflex requests",
+        g_app.fgState = CreateWindowExW(0, L"STATIC",
+            L"DLSS FG: Probing disabled",
+            WS_CHILD | WS_VISIBLE,
+            0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
+        SetChildFont(g_app.fgState, font);
+
+        g_app.statusLabel = CreateWindowExW(0, L"STATIC", L"Status / API requests",
             WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
         SetChildFont(g_app.statusLabel, font);
 
@@ -663,12 +1093,15 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         LayoutControls(client.right - client.left, client.bottom - client.top);
         UpdateAcquisitionControls();
 
-        AppendStatusLine(L"ReflexProbe bootstrap: Launch, Watch or Attach Reflex observer/override.");
+        g_app.capturingStartupDiagnostics = true;
+        AppendStatusLine(L"ReflexProbe bootstrap: Launch, Watch or Attach selected API probes.");
+        AppendStatusLine(L"Reflex probing is ON by default; DLSS FG probing is OFF. FG SetOptions is observed when enabled; GetState interception is independently optional.");
         AppendStatusLine(L"Frame-limit override is OFF by default. When checked, the FPS value replaces frameLimitUs on intercepted Reflex settings calls.");
         AppendStatusLine(L"Force Boost when Reflex On is independent: plain On requests become On + Boost; Off and existing On + Boost requests are unchanged.");
         AppendStatusLine(L"Reflex Sleep call counting is OFF by default. When disabled, ReflexProbe does not wrap the Reflex Sleep call.");
         AppendStatusLine(L"Capture mode defaults to State changes. Raw debug retains at most 131072 calls in RAM. ReflexProbe never writes capture data to disk.");
         LogBinaryIdentity();
+        g_app.capturingStartupDiagnostics = false;
         SetTimer(window, kPollTimer, kPollIntervalMs, nullptr);
         return 0;
     }
@@ -693,6 +1126,14 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             if (HIWORD(wParam) == EN_KILLFOCUS)
                 UpdateAcquisitionControls();
             return 0;
+        case IDC_REFLEX_PROBING:
+        case IDC_FG_PROBING:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                UpdateAcquisitionControls();
+                if (!g_app.process && !g_app.watchArmed && !g_app.haveEffectiveState)
+                    ResetCurrentEffectiveState();
+            }
+            return 0;
         case IDC_OVERRIDE_ENABLE:
             if (HIWORD(wParam) == BN_CLICKED) {
                 UpdateAcquisitionControls();
@@ -710,6 +1151,32 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
                 ApplyPolicyToShared(false, true);
             return 0;
         case IDC_COUNT_REFLEX_SLEEP:
+        case IDC_FG_WRAP_GET_STATE:
+            return 0;
+        case IDC_FG_DETAILED_DIAGNOSTICS:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                // Drain already-published events under the preceding display policy.
+                PollSharedState();
+                SetFgDetailedDiagnostics(
+                    Button_GetCheck(g_app.fgDetailedDiagnosticsControl) == BST_CHECKED);
+            }
+            return 0;
+        case IDC_FG_MULTIPLIER_CHOICE:
+            if (HIWORD(wParam) == CBN_SELCHANGE)
+                ApplyFgPolicyToShared();
+            return 0;
+        case IDC_FG_MULTIPLIER_OVERRIDE:
+        case IDC_FG_FORCE_AUTO_ON:
+        case IDC_FG_MENU_OVERRIDE:
+        case IDC_FG_MENU_OFF:
+        case IDC_FG_MENU_ON:
+        case IDC_FG_RETENTION_OVERRIDE:
+        case IDC_FG_RETENTION_OFF:
+        case IDC_FG_RETENTION_ON:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                UpdateAcquisitionControls();
+                ApplyFgPolicyToShared();
+            }
             return 0;
         case IDC_LAUNCH:
             LaunchAndInject();
@@ -766,6 +1233,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         }
         CleanupTarget();
         FreeRawDebugBuffer();
+        FreeTextBuffer(g_app.startupDiagnostics);
         PostQuitMessage(0);
         return 0;
     }
@@ -825,7 +1293,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
 
     HWND window = CreateWindowExW(0, kWindowClass, L"ReflexProbe",
         WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 1100, 650,
+        CW_USEDEFAULT, CW_USEDEFAULT, 1100, 760,
         nullptr, nullptr, instance, nullptr);
     if (!window)
         return 1;

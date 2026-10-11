@@ -19,8 +19,8 @@ constexpr UINT_PTR kPollTimer = 1;
 constexpr UINT_PTR kWatchTimer = 2;
 constexpr UINT kWatchPollIntervalMs = 10;
 constexpr int kMargin = 12;
-constexpr int kStatusTop = 212;
-constexpr int kMinimumWindowHeight = 506;
+constexpr int kStatusTop = 376;
+constexpr int kMinimumWindowHeight = 615;
 constexpr WPARAM kStatusTextLimit = 16u * 1024u * 1024u;
 constexpr size_t kInitialTextBufferCapacity = 8 * 1024;
 constexpr size_t kRawDebugCapacity = 131072;
@@ -41,7 +41,31 @@ enum ControlId : int {
     IDC_ATTACH,
     IDC_FORCE_BOOST,
     IDC_COUNT_REFLEX_SLEEP,
-    IDC_CLEAR_HISTORY
+    IDC_CLEAR_HISTORY,
+    IDC_REFLEX_PROBING,
+    IDC_FG_PROBING,
+    IDC_FG_FORCE_AUTO_ON,
+    IDC_FG_MENU_OVERRIDE,
+    IDC_FG_MENU_OFF,
+    IDC_FG_MENU_ON,
+    IDC_FG_RETENTION_OVERRIDE,
+    IDC_FG_RETENTION_OFF,
+    IDC_FG_RETENTION_ON,
+    IDC_FG_WRAP_GET_STATE,
+    IDC_FG_DETAILED_DIAGNOSTICS,
+    IDC_FG_MULTIPLIER_OVERRIDE,
+    IDC_FG_MULTIPLIER_CHOICE
+};
+
+struct FgPolicy {
+    bool forceOnWhenAuto = false;
+    bool overrideMultiplier = false;
+    uint32_t multiplierFrames = 1; // 1=2X; checkbox off by default
+    bool overrideMenu = false;
+    bool menuDetectionOn = false;
+    bool overrideRetention = false;
+    bool retainResourcesWhenOff = true; // when checked, default radio is On
+    bool wrapGetState = false;
 };
 
 enum CaptureMode : uint32_t {
@@ -59,7 +83,20 @@ struct CapturedReflexEvent {
     LONG backend;
     uint32_t requestedUs;
     uint32_t effectiveUs;
+    ReflexProbeProtocol::FgEventData fg{};
 };
+
+struct FgStateRun {
+    bool used = false;
+    LONG kind = 0;
+    uint32_t viewport = 0;
+    CapturedReflexEvent previous{}; // last complete state, regardless of visibility
+    CapturedReflexEvent displayed{}; // latest state shown in State changes mode
+    uint64_t repeats = 0; // identical calls in current complete-state run
+    uint64_t pendingDisplayRepeats = 0; // genuine repeats since last displayed state
+};
+
+constexpr size_t kFgTrackedStreams = 32;
 
 struct TextBuffer {
     wchar_t* data = nullptr;
@@ -77,6 +114,21 @@ struct AppState {
     HWND browse = nullptr;
     HWND argumentsLabel = nullptr;
     HWND arguments = nullptr;
+    HWND reflexGroup = nullptr;
+    HWND reflexProbing = nullptr;
+    HWND fgGroup = nullptr;
+    HWND fgProbing = nullptr;
+    HWND fgMultiplierOverride = nullptr;
+    HWND fgMultiplierChoice = nullptr;
+    HWND fgMenuOverride = nullptr;
+    HWND fgMenuOff = nullptr;
+    HWND fgMenuOn = nullptr;
+    HWND fgRetentionOverride = nullptr;
+    HWND fgRetentionOff = nullptr;
+    HWND fgRetentionOn = nullptr;
+    HWND fgForceAutoOn = nullptr;
+    HWND fgGetState = nullptr;
+    HWND fgDetailedDiagnosticsControl = nullptr;
     HWND overrideEnable = nullptr;
     HWND overrideFps = nullptr;
     HWND fpsLabel = nullptr;
@@ -86,6 +138,7 @@ struct AppState {
     HWND watch = nullptr;
     HWND attach = nullptr;
     HWND currentState = nullptr;
+    HWND fgState = nullptr;
     HWND statusLabel = nullptr;
     HWND captureModeLabel = nullptr;
     HWND captureState = nullptr;
@@ -101,6 +154,7 @@ struct AppState {
     ReflexProbeProtocol::SharedState* shared = nullptr;
 
     LONG lastHookState = -1;
+    LONG lastFgHookBits = 0;
     LONG lastEventSerial = 0;
     bool loggedInjectedBuild = false;
     bool rawUiBatchWarningShown = false;
@@ -109,15 +163,26 @@ struct AppState {
     LONG currentEffectiveMode = 0;
     uint32_t currentEffectiveUs = 0;
 
+    // Cache only the configuration fields displayed by the FG status label.
+    // High-frequency identical SetOptions submissions require no Win32 text I/O.
+    bool haveFgLabelState = false;
+    uint32_t fgLabelMode = 0;
+    uint32_t fgLabelGeneratedFrames = 0;
+    bool fgLabelMenuDetection = false;
+
     bool watchArmed = false;
     wchar_t watchTargetPath[ReflexProbeProtocol::kPathChars]{};
     bool watchOverrideEnabled = false;
     uint32_t watchOverrideUs = 0;
     bool watchForceBoostWhenOn = false;
     bool watchCountReflexSleepCalls = false;
+    bool watchProbeReflex = true;
+    bool watchProbeDlssFg = false;
+    FgPolicy watchFgPolicy{};
     LONGLONG watchStartQpc = 0;
 
     CaptureMode captureMode = CaptureModeStateChanges;
+    bool fgDetailedDiagnostics = false;
     CapturedReflexEvent* rawDebugEvents = nullptr;
     size_t rawDebugCount = 0;
     size_t rawDebugWriteIndex = 0;
@@ -125,10 +190,16 @@ struct AppState {
     bool rawDebugWrapped = false;
     bool rawRingWrapNoticePending = false;
 
+    // RAM-only startup banner, stored without timestamps for Clear replay.
+    TextBuffer startupDiagnostics{};
+    bool capturingStartupDiagnostics = false;
+
     bool haveStateEvent = false;
     CapturedReflexEvent stateEvent{};
     uint64_t stateRepeatCount = 0;
     uint64_t stateSleepCount = 0;
+    FgStateRun fgRuns[kFgTrackedStreams]{};
+    bool fgTrackingOverflowWarned = false;
 };
 
 extern AppState g_app;
@@ -157,15 +228,18 @@ bool InjectDll(HANDLE process, DWORD processId, const wchar_t* dllPath,
                wchar_t* error, size_t errorCount);
 bool CreateSharedState(DWORD processId, const wchar_t* targetPath,
                        bool overrideEnabled, uint32_t overrideUs, bool forceBoostWhenOn,
-                       bool countReflexSleepCalls, wchar_t* error, size_t errorCount);
+                       bool countReflexSleepCalls, bool probeReflex, bool probeDlssFg,
+                       const FgPolicy& fgPolicy, wchar_t* error, size_t errorCount);
 bool ArmProcessWatch(const wchar_t* targetPath, bool overrideEnabled, uint32_t overrideUs,
                      bool forceBoostWhenOn, bool countReflexSleepCalls,
+                     bool probeReflex, bool probeDlssFg, const FgPolicy& fgPolicy,
                      wchar_t* error, size_t errorCount);
 void CancelProcessWatch(bool logCancellation);
 void PollProcessWatch();
 bool AttachRunningProcess(const wchar_t* targetPath, bool overrideEnabled, uint32_t overrideUs,
                           bool forceBoostWhenOn, bool countReflexSleepCalls,
-                          wchar_t* error, size_t errorCount);
+                          bool probeReflex, bool probeDlssFg, const FgPolicy& fgPolicy,
+                     wchar_t* error, size_t errorCount);
 
 void ResetLiveStateTracking();
 bool EnsureRawDebugBuffer();
@@ -174,6 +248,7 @@ void FreeRawDebugBuffer();
 void ClearCaptureHistory();
 void SetCaptureButtons(CaptureMode mode);
 bool SetCaptureMode(CaptureMode mode);
+void SetFgDetailedDiagnostics(bool detailed);
 void ResetCurrentEffectiveState();
 void PollSharedState();
 
