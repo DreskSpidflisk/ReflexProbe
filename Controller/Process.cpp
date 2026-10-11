@@ -13,8 +13,8 @@
 namespace ReflexProbeController {
 
 constexpr wchar_t kControllerBuildStamp[] = RP_WIDEN(__DATE__) L" " RP_WIDEN(__TIME__);
-constexpr DWORD kLaunchVerificationTimeoutMs = 1000;
-constexpr DWORD kLaunchVerificationPollMs = 5;
+constexpr DWORD kPostLoadVerificationTimeoutMs = 1000;
+constexpr DWORD kPostLoadVerificationPollMs = 5;
 
 void BuildMappingName(DWORD processId, wchar_t* out, size_t outCount)
 {
@@ -310,13 +310,21 @@ bool InjectDll(HANDLE process, DWORD processId, const wchar_t* dllPath,
 
     VirtualFreeEx(process, remotePath, 0, MEM_RELEASE);
 
-    // Preserve the original successful path exactly: one immediate Toolhelp module check.
-    if (FindRemoteModuleBase(processId, L"ReflexProbe64.dll"))
+    // Preserve the fast success path: one immediate Toolhelp module check.
+    const ULONGLONG verificationStart = GetTickCount64();
+    if (FindRemoteModuleBase(processId, L"ReflexProbe64.dll")) {
+        if (allowPostLoadVerificationRecovery) {
+            wchar_t line[240]{};
+            swprintf_s(line,
+                L"Injection verification: initial module snapshot confirmed ReflexProbe64.dll (%llu ms).",
+                static_cast<unsigned long long>(GetTickCount64() - verificationStart));
+            AppendStatusLine(line);
+        }
         return true;
+    }
 
-    // The false negative has only been observed when Launch + Inject loads into a process
-    // that ReflexProbe itself just created. Watch/Attach deliberately keep the old one-shot
-    // behavior until there is evidence that those acquisition paths need this fallback.
+    // Both Launch and Watch have now reproduced a false negative in the immediate
+    // module snapshot. Attach deliberately keeps its one-shot behavior for now.
     if (!allowPostLoadVerificationRecovery) {
         swprintf_s(error, errorCount,
             L"ReflexProbe64.dll was not present after LoadLibraryW returned.");
@@ -326,10 +334,12 @@ bool InjectDll(HANDLE process, DWORD processId, const wchar_t* dllPath,
     bool recoveredByHandshake = false;
     bool recoveredByModule = false;
     const ULONGLONG verificationEnd =
-        GetTickCount64() + static_cast<ULONGLONG>(kLaunchVerificationTimeoutMs);
+        GetTickCount64() + static_cast<ULONGLONG>(kPostLoadVerificationTimeoutMs);
 
     do {
-        if (g_app.shared && g_app.shared->injectedBuild[0]) {
+        if (g_app.shared &&
+            g_app.shared->targetProcessId == processId &&
+            g_app.shared->injectedBuild[0]) {
             recoveredByHandshake = true;
             break;
         }
@@ -339,13 +349,17 @@ bool InjectDll(HANDLE process, DWORD processId, const wchar_t* dllPath,
             break;
         }
 
-        Sleep(kLaunchVerificationPollMs);
+        Sleep(kPostLoadVerificationPollMs);
     } while (GetTickCount64() < verificationEnd);
 
     if (recoveredByHandshake || recoveredByModule) {
-        AppendStatusLine(recoveredByHandshake
-            ? L"Launch injection verification recovered after the initial module snapshot miss: injected DLL shared-memory handshake observed."
-            : L"Launch injection verification recovered after the initial module snapshot miss: ReflexProbe64.dll became visible on retry.");
+        wchar_t line[320]{};
+        swprintf_s(line,
+            recoveredByHandshake
+                ? L"Injection verification recovered: injected DLL handshake observed after initial module snapshot miss (%llu ms)."
+                : L"Injection verification recovered: ReflexProbe64.dll visible on retry after initial module snapshot miss (%llu ms).",
+            static_cast<unsigned long long>(GetTickCount64() - verificationStart));
+        AppendStatusLine(line);
         return true;
     }
 
@@ -353,13 +367,13 @@ bool InjectDll(HANDLE process, DWORD processId, const wchar_t* dllPath,
         swprintf_s(error, errorCount,
             L"ReflexProbe64.dll could not be verified within %lu ms after LoadLibraryW returned. "
             L"Remote thread exit code: 0x%08lX. No module snapshot or injected build handshake was observed.",
-            kLaunchVerificationTimeoutMs, remoteExitCode);
+            kPostLoadVerificationTimeoutMs, remoteExitCode);
     } else {
         swprintf_s(error, errorCount,
             L"ReflexProbe64.dll could not be verified within %lu ms after LoadLibraryW returned. "
             L"Remote thread exit code was unavailable (GetExitCodeThread error %lu). "
             L"No module snapshot or injected build handshake was observed.",
-            kLaunchVerificationTimeoutMs, remoteExitCodeError);
+            kPostLoadVerificationTimeoutMs, remoteExitCodeError);
     }
 
     return false;
@@ -671,7 +685,11 @@ bool InjectMatchedProcess(const ProcessMatch& match,
     LARGE_INTEGER injectStartQpc{};
     QueryPerformanceCounter(&injectStartQpc);
 
-    if (!InjectDll(target, match.processId, dllPath, false, error, errorCount)) {
+    // Watch needs the same post-LoadLibrary verification recovery as Launch;
+    // Attach retains the existing immediate module-check behavior.
+    const bool allowVerificationRecovery = watchStartQpc > 0;
+    if (!InjectDll(target, match.processId, dllPath,
+            allowVerificationRecovery, error, errorCount)) {
         CleanupTarget();
         return false;
     }
