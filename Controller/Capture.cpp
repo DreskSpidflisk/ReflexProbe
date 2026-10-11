@@ -723,29 +723,38 @@ bool SetCaptureMode(CaptureMode mode)
         return true;
     }
 
+    // Consume already-published events under the old capture policy.
+    PollSharedState();
+    if (mode == CaptureModeRawDebug && !EnsureRawDebugBuffer()) {
+        MessageBoxW(g_app.window,
+            L"Could not allocate the bounded Raw debug capture buffer.",
+            L"ReflexProbe", MB_ICONERROR);
+        SetCaptureButtons(g_app.captureMode);
+        return false;
+    }
+
     LARGE_INTEGER qpc{};
     QueryPerformanceCounter(&qpc);
-
     const CaptureMode previous = g_app.captureMode;
-    if (previous == CaptureModeStateChanges)
-        FinalizeStateRun(qpc.QuadPart);
-    else
-        ResetLiveStateTracking();
-
-    if (mode == CaptureModeRawDebug) {
-        if (!EnsureRawDebugBuffer()) {
-            MessageBoxW(g_app.window,
-                L"Could not allocate the bounded Raw debug capture buffer.",
-                L"ReflexProbe", MB_ICONERROR);
-            g_app.captureMode = previous;
-            SetCaptureButtons(previous);
-            return false;
+    if (previous == CaptureModeStateChanges) {
+        if (g_app.haveStateEvent) {
+            AppendRepeatCount(g_app.stateRepeatCount, qpc.QuadPart);
+            AppendSleepCount(g_app.stateSleepCount, qpc.QuadPart);
         }
-        ResetRawDebugCapture();
+        FinishFgDisplayIntervals(qpc.QuadPart, true);
     }
+
+    // Reset Reflex presentation, not the last observed complete FG state.
+    // Raw mode continues updating that FG state as calls arrive.
+    g_app.haveStateEvent = false;
+    g_app.stateRepeatCount = 0;
+    g_app.stateSleepCount = 0;
+    if (mode == CaptureModeRawDebug)
+        ResetRawDebugCapture();
 
     g_app.captureMode = mode;
     SetCaptureButtons(mode);
+    UpdateAcquisitionControls();
 
     if (mode == CaptureModeRawDebug) {
         AppendStatusLineAtQpc(
@@ -754,14 +763,22 @@ bool SetCaptureMode(CaptureMode mode)
     } else {
         wchar_t line[224]{};
         swprintf_s(line,
-            L"Capture mode changed to State changes. Raw debug stopped after %llu captured call(s); state tracking resumes with the next selected probe call.",
+            L"Capture mode changed to State changes. Raw debug stopped after %llu captured call(s); current FG states shown as snapshots.",
             static_cast<unsigned long long>(g_app.rawDebugTotalCaptured));
         AppendStatusLineAtQpc(line, qpc.QuadPart);
+        for (size_t i = 0; i < kFgTrackedStreams; ++i) {
+            FgStateRun& run = g_app.fgRuns[i];
+            if (!run.used)
+                continue;
+            run.repeats = 0;
+            run.pendingDisplayRepeats = 0;
+            run.displayed = run.previous;
+            AppendFgSnapshot(run, qpc.QuadPart);
+        }
     }
 
     return true;
 }
-
 void HandleCapturedReflexEvent(const CapturedReflexEvent& event)
 {
     if (event.kind == ReflexProbeProtocol::FgEventSetOptions ||
