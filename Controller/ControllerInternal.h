@@ -51,7 +51,8 @@ enum ControlId : int {
     IDC_FG_RETENTION_OVERRIDE,
     IDC_FG_RETENTION_OFF,
     IDC_FG_RETENTION_ON,
-    IDC_FG_WRAP_GET_STATE
+    IDC_FG_WRAP_GET_STATE,
+    IDC_FG_DETAILED_DIAGNOSTICS
 };
 
 struct FgPolicy {
@@ -85,8 +86,10 @@ struct FgStateRun {
     bool used = false;
     LONG kind = 0;
     uint32_t viewport = 0;
-    CapturedReflexEvent previous{};
-    uint64_t repeats = 0;
+    CapturedReflexEvent previous{}; // last complete state, regardless of visibility
+    CapturedReflexEvent displayed{}; // latest state shown in State changes mode
+    uint64_t repeats = 0; // identical calls in current complete-state run
+    uint64_t pendingDisplayRepeats = 0; // genuine repeats since last displayed state
 };
 
 constexpr size_t kFgTrackedStreams = 32;
@@ -121,6 +124,7 @@ struct AppState {
     HWND fgRetentionOn = nullptr;
     HWND fgForceAutoOn = nullptr;
     HWND fgGetState = nullptr;
+    HWND fgDetailedDiagnosticsControl = nullptr;
     HWND overrideEnable = nullptr;
     HWND overrideFps = nullptr;
     HWND fpsLabel = nullptr;
@@ -174,6 +178,7 @@ struct AppState {
     LONGLONG watchStartQpc = 0;
 
     CaptureMode captureMode = CaptureModeStateChanges;
+    bool fgDetailedDiagnostics = false;
     CapturedReflexEvent* rawDebugEvents = nullptr;
     size_t rawDebugCount = 0;
     size_t rawDebugWriteIndex = 0;
@@ -239,6 +244,7 @@ void FreeRawDebugBuffer();
 void ClearCaptureHistory();
 void SetCaptureButtons(CaptureMode mode);
 bool SetCaptureMode(CaptureMode mode);
+void SetFgDetailedDiagnostics(bool detailed);
 void ResetCurrentEffectiveState();
 void PollSharedState();
 
