@@ -52,11 +52,15 @@ enum ControlId : int {
     IDC_FG_RETENTION_OFF,
     IDC_FG_RETENTION_ON,
     IDC_FG_WRAP_GET_STATE,
-    IDC_FG_DETAILED_DIAGNOSTICS
+    IDC_FG_DETAILED_DIAGNOSTICS,
+    IDC_FG_MULTIPLIER_OVERRIDE,
+    IDC_FG_MULTIPLIER_CHOICE
 };
 
 struct FgPolicy {
     bool forceOnWhenAuto = false;
+    bool overrideMultiplier = false;
+    uint32_t multiplierFrames = 1; // 1=2X; checkbox off by default
     bool overrideMenu = false;
     bool menuDetectionOn = false;
     bool overrideRetention = false;
