@@ -303,11 +303,29 @@ const wchar_t* FgBooleanName(uint32_t value)
 }
 
 void FormatFgDisplayLine(const CapturedReflexEvent& event, bool newState,
-                         wchar_t* line, size_t lineCount)
+                         wchar_t* line, size_t lineCount, bool detailed = true)
 {
     const ReflexProbeProtocol::FgEventData& fg = event.fg;
     const wchar_t* prefix = newState ? L"NEW FG State: " : L"";
     if (event.kind == ReflexProbeProtocol::FgEventSetOptions) {
+        // Normal view: no detailed-format construction for hidden fields.
+        if (!detailed) {
+            swprintf_s(line, lineCount,
+                L"%sslDLSSGSetOptions #%ld: requested mode=%s (%u), "
+                L"forwarded mode=%s (%u), framesToGenerate=%u (%uX), "
+                L"requested fullscreenMenuDetection=%s, forwarded fullscreenMenuDetection=%s, "
+                L"requested retainResourcesWhenOff=%s, forwarded retainResourcesWhenOff=%s, result=%ld",
+                prefix, event.sequence,
+                FgModeName(fg.mode), fg.mode,
+                FgModeName(fg.forwardedMode), fg.forwardedMode,
+                fg.generatedFrames, fg.generatedFrames + 1,
+                (fg.flags & 0x10u) ? L"On" : L"Off",
+                (fg.forwardedFlags & 0x10u) ? L"On" : L"Off",
+                (fg.flags & 0x08u) ? L"On" : L"Off",
+                (fg.forwardedFlags & 0x08u) ? L"On" : L"Off",
+                event.result);
+            return;
+        }
         float targetFps = 0;
         memcpy(&targetFps, &fg.targetFrameRateBits, sizeof(targetFps));
         const wchar_t* overrideMarker =
@@ -332,7 +350,7 @@ void FormatFgDisplayLine(const CapturedReflexEvent& event, bool newState,
             L"framesToGenerate=%u (%uX), "
             L"requested flags=0x%08X, forwarded flags=0x%08X%s "
             L"[requested fullscreenMenuDetection=%s, forwarded fullscreenMenuDetection=%s, "
-            L"requested retainResourcesOff=%s, forwarded retainResourcesOff=%s, "
+            L"requested retainResourcesWhenOff=%s, forwarded retainResourcesWhenOff=%s, "
             L"dynamicResolution=%s, showOnlyInterpolated=%s, requestVRAM=%s], "
             L"dynamicRes=%ux%u, backBuffers=%u, inputSize=%ux%u, backbufferSize=%ux%u, "
             L"bufferFormats[color=%u mvec=%u depth=%u hudless=%u UI=%u], "
@@ -396,23 +414,93 @@ void FormatFgDisplayLine(const CapturedReflexEvent& event, bool newState,
     }
 }
 
-void AppendFgEvent(const CapturedReflexEvent& event, bool newState)
+void AppendFgEvent(const CapturedReflexEvent& event, bool newState, bool detailed = true)
 {
     wchar_t line[1024]{};
-    FormatFgDisplayLine(event, newState, line, _countof(line));
+    FormatFgDisplayLine(event, newState, line, _countof(line), detailed);
     AppendDisplayLineAtQpc(line, event.qpc);
 }
 
 void AppendFgRepeatCount(const FgStateRun& run, LONGLONG eventQpc)
 {
-    if (!run.repeats)
+    const bool normalSetOptions =
+        run.kind == ReflexProbeProtocol::FgEventSetOptions &&
+        !g_app.fgDetailedDiagnostics;
+    const uint64_t count = normalSetOptions ? run.pendingDisplayRepeats : run.repeats;
+    if (!count)
         return;
 
     wchar_t line[180]{};
-    swprintf_s(line, L"Previous FG %s state (viewport=%u) repeated %llu more times.",
-        run.kind == ReflexProbeProtocol::FgEventSetOptions ? L"SetOptions" : L"GetState",
-        run.viewport, static_cast<unsigned long long>(run.repeats));
+    if (normalSetOptions) {
+        // Exact complete-state repetitions, potentially across multiple
+        // hidden state transitions; do not claim a single state persisted.
+        swprintf_s(line, L"FG SetOptions: %llu repeated calls since last displayed state.",
+            static_cast<unsigned long long>(count));
+    } else {
+        swprintf_s(line, L"Previous FG %s state (viewport=%u) repeated %llu more times.",
+            run.kind == ReflexProbeProtocol::FgEventSetOptions ? L"SetOptions" : L"GetState",
+            run.viewport, static_cast<unsigned long long>(count));
+    }
     AppendDisplayLineAtQpc(line, eventQpc);
+}
+
+void AppendFgSnapshot(const FgStateRun& run, LONGLONG eventQpc)
+{
+    if (run.kind != ReflexProbeProtocol::FgEventSetOptions)
+        return;
+    wchar_t state[1024]{};
+    wchar_t line[1152]{};
+    FormatFgDisplayLine(run.previous, false, state, _countof(state),
+        g_app.fgDetailedDiagnostics);
+    swprintf_s(line, L"FG State snapshot: %s", state);
+    AppendDisplayLineAtQpc(line, eventQpc);
+}
+
+void FinishFgDisplayIntervals(LONGLONG eventQpc, bool includeGetState)
+{
+    for (size_t i = 0; i < kFgTrackedStreams; ++i) {
+        FgStateRun& run = g_app.fgRuns[i];
+        if (!run.used || (!includeGetState &&
+            run.kind != ReflexProbeProtocol::FgEventSetOptions))
+            continue;
+        AppendFgRepeatCount(run, eventQpc);
+        run.repeats = 0;
+        run.pendingDisplayRepeats = 0;
+        run.displayed = run.previous;
+    }
+}
+
+void SetFgDetailedDiagnostics(bool detailed)
+{
+    if (g_app.fgDetailedDiagnostics == detailed)
+        return;
+    LARGE_INTEGER qpc{};
+    QueryPerformanceCounter(&qpc);
+    if (g_app.captureMode == CaptureModeStateChanges)
+        FinishFgDisplayIntervals(qpc.QuadPart, false);
+    g_app.fgDetailedDiagnostics = detailed;
+    AppendStatusLineAtQpc(detailed
+        ? L"Detailed FG diagnostics enabled."
+        : L"Detailed FG diagnostics disabled; normal FG SetOptions view active.",
+        qpc.QuadPart);
+    if (g_app.captureMode == CaptureModeStateChanges) {
+        for (size_t i = 0; i < kFgTrackedStreams; ++i) {
+            if (g_app.fgRuns[i].used)
+                AppendFgSnapshot(g_app.fgRuns[i], qpc.QuadPart);
+        }
+    }
+}
+
+bool SameVisibleFgSetOptions(const CapturedReflexEvent& a, const CapturedReflexEvent& b)
+{
+    constexpr uint32_t kVisibleFlags = 0x10u | 0x08u;
+    return a.result == b.result &&
+           a.fg.mode == b.fg.mode &&
+           a.fg.forwardedMode == b.fg.forwardedMode &&
+           a.fg.generatedFrames == b.fg.generatedFrames &&
+           (a.fg.flags & kVisibleFlags) == (b.fg.flags & kVisibleFlags) &&
+           (a.fg.forwardedFlags & kVisibleFlags) ==
+               (b.fg.forwardedFlags & kVisibleFlags);
 }
 
 bool SameFgState(const CapturedReflexEvent& a, const CapturedReflexEvent& b)
