@@ -545,21 +545,39 @@ bool SameFgState(const CapturedReflexEvent& a, const CapturedReflexEvent& b)
 
 void HandleCapturedFgEvent(const CapturedReflexEvent& event)
 {
-    if (CurrentCaptureMode() == CaptureModeRawDebug) {
+    const bool raw = CurrentCaptureMode() == CaptureModeRawDebug;
+    if (raw)
         CaptureRawDebugEvent(event);
-        return;
-    }
 
     FgStateRun* available = nullptr;
     for (size_t i = 0; i < kFgTrackedStreams; ++i) {
         FgStateRun& run = g_app.fgRuns[i];
         if (run.used && run.kind == event.kind &&
             run.viewport == event.fg.viewport) {
+            if (raw) {
+                // Preserve latest complete state through Raw without
+                // incurring any formatting or state-change reporting cost.
+                run.previous = event;
+                run.displayed = event;
+                return;
+            }
+
             if (SameFgState(run.previous, event)) {
                 ++run.repeats;
+                if (run.kind == ReflexProbeProtocol::FgEventSetOptions)
+                    ++run.pendingDisplayRepeats;
             } else {
-                AppendFgRepeatCount(run, event.qpc);
-                AppendFgEvent(event, true);
+                const bool showState =
+                    run.kind != ReflexProbeProtocol::FgEventSetOptions ||
+                    g_app.fgDetailedDiagnostics ||
+                    !SameVisibleFgSetOptions(run.displayed, event);
+                if (showState) {
+                    AppendFgRepeatCount(run, event.qpc);
+                    AppendFgEvent(event, true, g_app.fgDetailedDiagnostics);
+                    run.displayed = event;
+                    run.pendingDisplayRepeats = 0;
+                }
+                // Hidden changes still update the true full-state baseline.
                 run.previous = event;
                 run.repeats = 0;
             }
@@ -570,12 +588,13 @@ void HandleCapturedFgEvent(const CapturedReflexEvent& event)
     }
 
     if (!available) {
-        if (!g_app.fgTrackingOverflowWarned) {
+        if (!raw && !g_app.fgTrackingOverflowWarned) {
             g_app.fgTrackingOverflowWarned = true;
             AppendStatusLine(L"WARNING: FG tracker exceeded 32 viewport/function streams; "
                 L"excess streams are logged uncompressed.");
         }
-        AppendFgEvent(event, true);
+        if (!raw)
+            AppendFgEvent(event, true, g_app.fgDetailedDiagnostics);
         return;
     }
 
@@ -583,8 +602,11 @@ void HandleCapturedFgEvent(const CapturedReflexEvent& event)
     available->kind = event.kind;
     available->viewport = event.fg.viewport;
     available->previous = event;
+    available->displayed = event;
     available->repeats = 0;
-    AppendFgEvent(event, true);
+    available->pendingDisplayRepeats = 0;
+    if (!raw)
+        AppendFgEvent(event, true, g_app.fgDetailedDiagnostics);
 }
 
 void UpdateCurrentFgState(const CapturedReflexEvent& event)
