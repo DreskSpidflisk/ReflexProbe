@@ -87,6 +87,17 @@ A positive FPS entry is converted as `frameLimitUs = round(1,000,000 / FPS)` (16
 - **Submission is frequent:** tens of thousands of otherwise identical FG SetOptions calls were reduced to repeated-state counts. FG SetOptions, FG GetState, and Reflex histories remained independent; per-call presented-frame counts were not treated as persistent GetState changes.
 - **Presentation-rate measurement remains separate:** 6X is a successfully submitted multiplier, not a measurement of original rendered FPS. A monitor indication around 225 is insufficient to establish either actual displayed FPS or base rendering cadence; the next comparison should use an overlay that distinguishes rendered FPS from DLSS-generated output (such as Steam's separate FPS / DLSS FPS readings).
 
+### Experimental MFG multiplier limits: Dawnwalker and Indiana Jones (October 11, 2026)
+
+On an RTX 5090 with a reported NVIDIA 610.47 driver, ReflexProbe's live **2X–6X fixed multiplier override** was tested against two DRM-free GOG games. The game-originated `slDLSSGSetOptions` calls were modified without altering the games' own selected 2X multiplier or requiring `slDLSSGGetState` interception for the override.
+
+| Game | Active components | Successful overrides | Rejected requests and observed fallback |
+| --- | --- | --- | --- |
+| **Blood of the Dawnwalker** | Game `sl.interposer.dll` **2.7.30.0**; NGX `sl_dlss_g` **2.14.0.0** | **2X–4X**; expected generated-inclusive rates additionally confirmed through Steam's overlay when launched as a non-Steam game | **6X** explicitly returned `38`; tester also observed **5X** disengaging FG (not separately captured in the short log). Unsupported requests visibly stopped FG; restoring 4X recovered. |
+| **Indiana Jones and the Great Circle** | Game `sl.interposer.dll` **2.7.32.0**; NGX `sl_dlss_g` **2.14.0.0** | **2X–4X**; optional GetState Raw capture reported **2/3/4 presented frames** and **`numFramesToGenerateMax=3` (4X max)** | **5X and 6X** explicitly returned `38`; FG **continued at the previously accepted 4X**, also reflected in the game's own top-right performance metrics. |
+
+Here `38` is Streamline's **`sl::Result::eErrorInvalidState`**, not a promise that FG will stop. Indiana Jones supplied direct GetState evidence of a 4X runtime maximum; **Dawnwalker did not have GetState interception enabled**, so its precise reported maximum is unknown. Same-version NGX plugin files do not, by themselves, establish the cause or guarantee identical fallback behavior. GetState's per-call presented-frame count is **transient telemetry**, intentionally omitted from State changes comparisons; its first call and persistent capability fields are still logged. See **[per-game evidence and caveats](docs/TestFindings.md#per-game-results)**.
+
 ## Tested games
 
 These are observed results from specific tested builds, not a universal compatibility guarantee. Detailed evidence and caveats are in **[Test findings](docs/TestFindings.md#per-game-results)**.
@@ -97,8 +108,8 @@ These are observed results from specific tested builds, not a universal compatib
 | Cyberpunk 2077 | D3D12 / Streamline 2.x+ | Frequent zero-interval Reflex settings submissions. |
 | The Witcher 3 Remastered | D3D12 / Streamline 2.14.1 | Reflex probing plus validated standalone/GOG Galaxy FG-only acquisition; observed 2X, 3X, 6X and explicit menu Off/On requests with detector flag unset. |
 | A Plague Tale: Requiem | D3D12 / Streamline 1.x | Legacy plugin gateway; injected Force Boost has a performance caveat. |
-| Blood of the Dawnwalker | D3D12 / Streamline 2.x+ | Sparse startup states; dynamic resolution and GOG Watch verified. |
-| Indiana Jones and the Great Circle | Vulkan / Streamline 2.x+ | DLSS-gated Reflex/FG; setter and Sleep calls nearly 1:1. |
+| Blood of the Dawnwalker | D3D12 / Streamline 2.x+ | Fixed override 2X–4X works; 6X returns invalid state and FG disengages; 5X failure user-observed. |
+| Indiana Jones and the Great Circle | Vulkan / Streamline 2.x+ | GetState reports 4X max; 2X–4X work; rejected 5X/6X requests leave 4X FG operating. |
 | No Man's Sky | Vulkan / Streamline 2.x+ | Override accepted but presentation did not obey; zero observed Sleep calls. |
 | God of War (2018) | D3D11 / native NVAPI | Explicit limit works even when Reflex Off records no Sleep calls. |
 | DOOM: The Dark Ages | Vulkan / Streamline 2.x+ | Game CVar maps to Reflex interval; PT/FG introduces pacing transitions. |
