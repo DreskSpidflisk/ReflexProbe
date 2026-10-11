@@ -264,6 +264,9 @@ void UpdateAcquisitionControls()
         EnableWindow(g_app.fgRetentionOn, fgEnabled && !watching && retentionChecked);
     if (g_app.fgGetState)
         EnableWindow(g_app.fgGetState, fgEnabled && !probeSelectionLocked);
+    if (g_app.fgDetailedDiagnosticsControl)
+        EnableWindow(g_app.fgDetailedDiagnosticsControl,
+            fgEnabled && g_app.captureMode == CaptureModeStateChanges);
 
     if (g_app.overrideEnable)
         EnableWindow(g_app.overrideEnable, reflexEnabled && !watching);
@@ -749,8 +752,15 @@ void LayoutControls(int clientWidth, int clientHeight)
         MoveWindow(g_app.fgMultiplierOverride, kMargin + 18, 250, 168, 22, TRUE);
     if (g_app.fgMultiplierChoice)
         MoveWindow(g_app.fgMultiplierChoice, kMargin + 192, 248, 84, 112, TRUE);
+    const int fgGetX = kMargin + 294;
+    const int fgGetWidth = g_app.fgGetState
+        ? MeasureGroupHeadingWidth(g_app.fgGetState) : 0;
     if (g_app.fgGetState)
-        MoveWindow(g_app.fgGetState, kMargin + 294, 250, 250, 22, TRUE);
+        MoveWindow(g_app.fgGetState, fgGetX, 250, fgGetWidth, 22, TRUE);
+    if (g_app.fgDetailedDiagnosticsControl)
+        MoveWindow(g_app.fgDetailedDiagnosticsControl,
+            fgGetX + fgGetWidth + 10, 250,
+            MeasureGroupHeadingWidth(g_app.fgDetailedDiagnosticsControl), 22, TRUE);
 
     const int attachX = clientWidth - kMargin - kAttachWidth;
     const int watchX = attachX - kAcquisitionGap - kWatchWidth;
@@ -934,6 +944,14 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             g_app.instance, nullptr);
         SetChildFont(g_app.fgGetState, font);
 
+        g_app.fgDetailedDiagnosticsControl = CreateWindowExW(0, L"BUTTON",
+            L"Detailed FG diagnostics",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, window,
+            reinterpret_cast<HMENU>(IDC_FG_DETAILED_DIAGNOSTICS),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.fgDetailedDiagnosticsControl, font);
+
         g_app.overrideEnable = CreateWindowExW(0, L"BUTTON", L"Override Reflex frame limit",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
             0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_OVERRIDE_ENABLE), g_app.instance, nullptr);
@@ -1083,6 +1101,14 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             return 0;
         case IDC_COUNT_REFLEX_SLEEP:
         case IDC_FG_WRAP_GET_STATE:
+            return 0;
+        case IDC_FG_DETAILED_DIAGNOSTICS:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                // Drain already-published events under the preceding display policy.
+                PollSharedState();
+                SetFgDetailedDiagnostics(
+                    Button_GetCheck(g_app.fgDetailedDiagnosticsControl) == BST_CHECKED);
+            }
             return 0;
         case IDC_FG_FORCE_AUTO_ON:
         case IDC_FG_MENU_OVERRIDE:
