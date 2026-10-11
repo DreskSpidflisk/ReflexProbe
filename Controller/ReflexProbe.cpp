@@ -799,16 +799,15 @@ void LayoutControls(int clientWidth, int clientHeight)
             fgMultiplierComboWidth, 112, TRUE);
         fgLowerX += fgMultiplierComboWidth + fgGroupGap + 5;
     }
-    if (g_app.fgGetState) {
-        const int width = MeasureGroupHeadingWidth(g_app.fgGetState);
-        MoveWindow(g_app.fgGetState, fgLowerX, fgLowerY,
+    if (g_app.fgDetailedDiagnosticsControl) {
+        const int width = MeasureGroupHeadingWidth(g_app.fgDetailedDiagnosticsControl);
+        MoveWindow(g_app.fgDetailedDiagnosticsControl, fgLowerX, fgLowerY,
             width, fgControlHeight, TRUE);
         fgLowerX += width + fgGroupGap + 5;
     }
-    if (g_app.fgDetailedDiagnosticsControl)
-        MoveWindow(g_app.fgDetailedDiagnosticsControl,
-            fgLowerX, fgLowerY,
-            MeasureGroupHeadingWidth(g_app.fgDetailedDiagnosticsControl),
+    if (g_app.fgGetState)
+        MoveWindow(g_app.fgGetState, fgLowerX, fgLowerY,
+            MeasureGroupHeadingWidth(g_app.fgGetState),
             fgControlHeight, TRUE);
 
     const int attachX = clientWidth - kMargin - kAttachWidth;
