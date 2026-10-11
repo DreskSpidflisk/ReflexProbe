@@ -137,6 +137,11 @@ FgPolicy ReadFgPolicyFromUi()
     FgPolicy policy{};
     if (FgProbingSelected()) {
         policy.forceOnWhenAuto = Button_GetCheck(g_app.fgForceAutoOn) == BST_CHECKED;
+        policy.overrideMultiplier = Button_GetCheck(g_app.fgMultiplierOverride) == BST_CHECKED;
+        const LRESULT multiplierIndex = SendMessageW(
+            g_app.fgMultiplierChoice, CB_GETCURSEL, 0, 0);
+        if (multiplierIndex >= 0 && multiplierIndex <= 4)
+            policy.multiplierFrames = static_cast<uint32_t>(multiplierIndex + 1);
         policy.overrideMenu = Button_GetCheck(g_app.fgMenuOverride) == BST_CHECKED;
         policy.menuDetectionOn = Button_GetCheck(g_app.fgMenuOn) == BST_CHECKED;
         policy.overrideRetention = Button_GetCheck(g_app.fgRetentionOverride) == BST_CHECKED;
@@ -152,6 +157,10 @@ void ApplyFgPolicyToShared()
         return;
     const FgPolicy policy = ReadFgPolicyFromUi();
     InterlockedExchange(&g_app.shared->fgForceOnWhenAuto, policy.forceOnWhenAuto ? 1 : 0);
+    InterlockedExchange(&g_app.shared->fgMultiplierFrames,
+        static_cast<LONG>(policy.multiplierFrames));
+    InterlockedExchange(&g_app.shared->fgMultiplierOverrideEnabled,
+        policy.overrideMultiplier ? 1 : 0);
     InterlockedExchange(&g_app.shared->fgMenuOverrideEnabled, policy.overrideMenu ? 1 : 0);
     InterlockedExchange(&g_app.shared->fgMenuOverrideOn, policy.menuDetectionOn ? 1 : 0);
     InterlockedExchange(&g_app.shared->fgRetentionOverrideEnabled,
@@ -162,6 +171,15 @@ void ApplyFgPolicyToShared()
     AppendStatusLine(policy.forceOnWhenAuto
         ? L"FG policy: Force Auto to On enabled; applies to next SetOptions call."
         : L"FG policy: Force Auto to On disabled.");
+    if (policy.overrideMultiplier) {
+        wchar_t multiplierLine[128]{};
+        swprintf_s(multiplierLine,
+            L"FG policy: multiplier override %uX; applies to next game SetOptions call.",
+            policy.multiplierFrames + 1);
+        AppendStatusLine(multiplierLine);
+    } else {
+        AppendStatusLine(L"FG policy: multiplier override disabled.");
+    }
     AppendStatusLine(!policy.overrideMenu
         ? L"FG policy: fullscreen-menu-detection override disabled."
         : (policy.menuDetectionOn
@@ -246,6 +264,13 @@ void UpdateAcquisitionControls()
         EnableWindow(g_app.fgProbing, !probeSelectionLocked);
     if (g_app.fgForceAutoOn)
         EnableWindow(g_app.fgForceAutoOn, fgEnabled && !watching);
+    if (g_app.fgMultiplierOverride)
+        EnableWindow(g_app.fgMultiplierOverride, fgEnabled && !watching);
+    const bool multiplierChecked = g_app.fgMultiplierOverride &&
+        Button_GetCheck(g_app.fgMultiplierOverride) == BST_CHECKED;
+    if (g_app.fgMultiplierChoice)
+        EnableWindow(g_app.fgMultiplierChoice,
+            fgEnabled && !watching && multiplierChecked);
     if (g_app.fgMenuOverride)
         EnableWindow(g_app.fgMenuOverride, fgEnabled && !watching);
     const bool menuOverrideChecked = g_app.fgMenuOverride &&
@@ -457,6 +482,15 @@ bool LaunchAndInject()
         AppendStatusLine(fgPolicy.forceOnWhenAuto
             ? L"Initial FG Auto-to-On override: enabled."
             : L"Initial FG Auto-to-On override: disabled.");
+        if (fgPolicy.overrideMultiplier) {
+            wchar_t multiplierLine[128]{};
+            swprintf_s(multiplierLine,
+                L"Initial FG multiplier override: %uX (next game SetOptions).",
+                fgPolicy.multiplierFrames + 1);
+            AppendStatusLine(multiplierLine);
+        } else {
+            AppendStatusLine(L"Initial FG multiplier override: disabled.");
+        }
         AppendStatusLine(!fgPolicy.overrideMenu
             ? L"Initial FG menu-detection override: disabled."
             : (fgPolicy.menuDetectionOn
@@ -874,25 +908,28 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             g_app.instance, nullptr);
         SetChildFont(g_app.fgForceAutoOn, font);
 
-        // Multiplier override is reserved for a later, capability-aware build.
         g_app.fgMultiplierOverride = CreateWindowExW(0, L"BUTTON",
             L"Override FG multiplier",
-            WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_AUTOCHECKBOX,
-            0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FG_MULTIPLIER_OVERRIDE),
+            g_app.instance, nullptr);
         SetChildFont(g_app.fgMultiplierOverride, font);
 
         g_app.fgMultiplierChoice = CreateWindowExW(0, L"COMBOBOX", L"",
             WS_CHILD | WS_VISIBLE | WS_DISABLED | WS_VSCROLL | CBS_DROPDOWNLIST,
-            0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FG_MULTIPLIER_CHOICE),
+            g_app.instance, nullptr);
         SetChildFont(g_app.fgMultiplierChoice, font);
-        SendMessageW(g_app.fgMultiplierChoice, CB_ADDSTRING, 0,
-            reinterpret_cast<LPARAM>(L"Auto"));
         SendMessageW(g_app.fgMultiplierChoice, CB_ADDSTRING, 0,
             reinterpret_cast<LPARAM>(L"2X"));
         SendMessageW(g_app.fgMultiplierChoice, CB_ADDSTRING, 0,
             reinterpret_cast<LPARAM>(L"3X"));
         SendMessageW(g_app.fgMultiplierChoice, CB_ADDSTRING, 0,
             reinterpret_cast<LPARAM>(L"4X"));
+        SendMessageW(g_app.fgMultiplierChoice, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(L"5X"));
+        SendMessageW(g_app.fgMultiplierChoice, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(L"6X"));
         SendMessageW(g_app.fgMultiplierChoice, CB_SETCURSEL, 0, 0);
 
         g_app.fgMenuOverride = CreateWindowExW(0, L"BUTTON",
@@ -1110,6 +1147,11 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
                     Button_GetCheck(g_app.fgDetailedDiagnosticsControl) == BST_CHECKED);
             }
             return 0;
+        case IDC_FG_MULTIPLIER_CHOICE:
+            if (HIWORD(wParam) == CBN_SELCHANGE)
+                ApplyFgPolicyToShared();
+            return 0;
+        case IDC_FG_MULTIPLIER_OVERRIDE:
         case IDC_FG_FORCE_AUTO_ON:
         case IDC_FG_MENU_OVERRIDE:
         case IDC_FG_MENU_OFF:
