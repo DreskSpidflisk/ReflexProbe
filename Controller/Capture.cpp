@@ -564,6 +564,9 @@ void HandleCapturedFgEvent(const CapturedReflexEvent& event)
 
             if (SameFgState(run.previous, event)) {
                 ++run.repeats;
+                // Keep snapshots' call ordinal current without copying the
+                // entire event or changing the full-state comparison.
+                run.previous.sequence = event.sequence;
                 if (run.kind == ReflexProbeProtocol::FgEventSetOptions)
                     ++run.pendingDisplayRepeats;
             } else {
