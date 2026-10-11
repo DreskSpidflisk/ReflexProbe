@@ -312,13 +312,15 @@ void FormatFgDisplayLine(const CapturedReflexEvent& event, bool newState,
         if (!detailed) {
             swprintf_s(line, lineCount,
                 L"%sslDLSSGSetOptions #%ld: requested mode=%s (%u), "
-                L"forwarded mode=%s (%u), framesToGenerate=%u (%uX), "
+                L"forwarded mode=%s (%u), "
+                L"requested framesToGenerate=%u (%uX), forwarded framesToGenerate=%u (%uX), "
                 L"requested fullscreenMenuDetection=%s, forwarded fullscreenMenuDetection=%s, "
                 L"requested retainResourcesWhenOff=%s, forwarded retainResourcesWhenOff=%s, result=%ld",
                 prefix, event.sequence,
                 FgModeName(fg.mode), fg.mode,
                 FgModeName(fg.forwardedMode), fg.forwardedMode,
                 fg.generatedFrames, fg.generatedFrames + 1,
+                fg.forwardedGeneratedFrames, fg.forwardedGeneratedFrames + 1,
                 (fg.flags & 0x10u) ? L"On" : L"Off",
                 (fg.forwardedFlags & 0x10u) ? L"On" : L"Off",
                 (fg.flags & 0x08u) ? L"On" : L"Off",
@@ -329,7 +331,9 @@ void FormatFgDisplayLine(const CapturedReflexEvent& event, bool newState,
         float targetFps = 0;
         memcpy(&targetFps, &fg.targetFrameRateBits, sizeof(targetFps));
         const wchar_t* overrideMarker =
-            (fg.mode != fg.forwardedMode || fg.flags != fg.forwardedFlags)
+            (fg.mode != fg.forwardedMode ||
+             fg.generatedFrames != fg.forwardedGeneratedFrames ||
+             fg.flags != fg.forwardedFlags)
                 ? L" [OVERRIDE]" : L"";
         wchar_t extras[256]{};
         if (fg.optionsVersion >= 3)
@@ -347,7 +351,8 @@ void FormatFgDisplayLine(const CapturedReflexEvent& event, bool newState,
         swprintf_s(line, lineCount,
             L"%sslDLSSGSetOptions #%ld: viewport=%u, version=%u, "
             L"requested mode=%s (%u), forwarded mode=%s (%u), "
-            L"framesToGenerate=%u (%uX), "
+            L"requested framesToGenerate=%u (%uX), "
+            L"forwarded framesToGenerate=%u (%uX), "
             L"requested flags=0x%08X, forwarded flags=0x%08X%s "
             L"[requested fullscreenMenuDetection=%s, forwarded fullscreenMenuDetection=%s, "
             L"requested retainResourcesWhenOff=%s, forwarded retainResourcesWhenOff=%s, "
@@ -359,6 +364,7 @@ void FormatFgDisplayLine(const CapturedReflexEvent& event, bool newState,
             FgModeName(fg.mode), fg.mode,
             FgModeName(fg.forwardedMode), fg.forwardedMode,
             fg.generatedFrames, fg.generatedFrames + 1,
+            fg.forwardedGeneratedFrames, fg.forwardedGeneratedFrames + 1,
             fg.flags, fg.forwardedFlags, overrideMarker,
             (fg.flags & 0x10u) ? L"On" : L"Off",
             (fg.forwardedFlags & 0x10u) ? L"On" : L"Off",
@@ -498,6 +504,7 @@ bool SameVisibleFgSetOptions(const CapturedReflexEvent& a, const CapturedReflexE
            a.fg.mode == b.fg.mode &&
            a.fg.forwardedMode == b.fg.forwardedMode &&
            a.fg.generatedFrames == b.fg.generatedFrames &&
+           a.fg.forwardedGeneratedFrames == b.fg.forwardedGeneratedFrames &&
            (a.fg.flags & kVisibleFlags) == (b.fg.flags & kVisibleFlags) &&
            (a.fg.forwardedFlags & kVisibleFlags) ==
                (b.fg.forwardedFlags & kVisibleFlags);
@@ -623,18 +630,18 @@ void UpdateCurrentFgState(const CapturedReflexEvent& event)
     const bool menuDetection = (fg.forwardedFlags & 0x10u) != 0;
     if (g_app.haveFgLabelState &&
         g_app.fgLabelMode == fg.forwardedMode &&
-        g_app.fgLabelGeneratedFrames == fg.generatedFrames &&
+        g_app.fgLabelGeneratedFrames == fg.forwardedGeneratedFrames &&
         g_app.fgLabelMenuDetection == menuDetection)
         return;
 
     wchar_t label[320]{};
     swprintf_s(label, L"DLSS FG: %s | %uX | Menu detection: %s",
-        FgModeName(fg.forwardedMode), fg.generatedFrames + 1,
+        FgModeName(fg.forwardedMode), fg.forwardedGeneratedFrames + 1,
         menuDetection ? L"On" : L"Off");
     if (SetWindowTextW(g_app.fgState, label)) {
         g_app.haveFgLabelState = true;
         g_app.fgLabelMode = fg.forwardedMode;
-        g_app.fgLabelGeneratedFrames = fg.generatedFrames;
+        g_app.fgLabelGeneratedFrames = fg.forwardedGeneratedFrames;
         g_app.fgLabelMenuDetection = menuDetection;
     }
 }
