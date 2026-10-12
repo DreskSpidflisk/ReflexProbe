@@ -456,15 +456,21 @@ void AppendFgRepeatCount(const FgStateRun& run, LONGLONG eventQpc)
         return;
 
     wchar_t line[180]{};
+    const bool isSetOptions = run.kind == ReflexProbeProtocol::FgEventSetOptions;
+    const wchar_t* callName = isSetOptions ? L"slDLSSGSetOptions" : L"slDLSSGGetState";
     if (normalSetOptions) {
         // Exact complete-state repetitions, potentially across multiple
         // hidden state transitions; do not claim a single state persisted.
-        swprintf_s(line, L"FG SetOptions: %llu repeated calls since last displayed state.",
-            static_cast<unsigned long long>(count));
+        swprintf_s(line,
+            L"FG SetOptions: %llu repeated calls since %s #%ld (viewport=%u).",
+            static_cast<unsigned long long>(count),
+            callName, run.displayed.sequence, run.viewport);
     } else {
-        swprintf_s(line, L"Previous FG %s state (viewport=%u) repeated %llu more times.",
-            run.kind == ReflexProbeProtocol::FgEventSetOptions ? L"SetOptions" : L"GetState",
-            run.viewport, static_cast<unsigned long long>(count));
+        swprintf_s(line,
+            L"FG %s: %llu repeated calls since %s #%ld (viewport=%u).",
+            isSetOptions ? L"SetOptions" : L"GetState",
+            static_cast<unsigned long long>(count),
+            callName, run.displayed.sequence, run.viewport);
     }
     AppendDisplayLineAtQpc(line, eventQpc);
 }
@@ -691,19 +697,22 @@ bool SameReflexState(const CapturedReflexEvent& a, const CapturedReflexEvent& b)
            a.result == b.result;
 }
 
-void FormatRepeatCount(uint64_t repeatCount, wchar_t* line, size_t lineCount)
+void FormatRepeatCount(uint64_t repeatCount, const CapturedReflexEvent& state,
+                       wchar_t* line, size_t lineCount)
 {
-    swprintf_s(line, lineCount, L"Previous Reflex State repeated %llu more times.",
-        static_cast<unsigned long long>(repeatCount));
+    swprintf_s(line, lineCount, L"Reflex State: %llu repeated calls since %s #%ld.",
+        static_cast<unsigned long long>(repeatCount),
+        BackendCallName(state.backend), state.sequence);
 }
 
-void AppendRepeatCount(uint64_t repeatCount, LONGLONG eventQpc)
+void AppendRepeatCount(uint64_t repeatCount, const CapturedReflexEvent& state,
+                       LONGLONG eventQpc)
 {
     if (!repeatCount)
         return;
 
-    wchar_t line[128]{};
-    FormatRepeatCount(repeatCount, line, _countof(line));
+    wchar_t line[180]{};
+    FormatRepeatCount(repeatCount, state, line, _countof(line));
     AppendDisplayLineAtQpc(line, eventQpc);
 }
 
@@ -713,7 +722,8 @@ bool SleepCountingCurrentlyEnabled()
            Button_GetCheck(g_app.countReflexSleep) == BST_CHECKED;
 }
 
-void AppendSleepCount(uint64_t sleepCount, LONGLONG eventQpc)
+void AppendSleepCount(uint64_t sleepCount, const CapturedReflexEvent& state,
+                      LONGLONG eventQpc)
 {
     // SL1 has no sleep wrapper in ReflexProbe. Never present unavailable
     // measurement as a zero; zero only becomes meaningful after a sleep
@@ -731,17 +741,18 @@ void AppendSleepCount(uint64_t sleepCount, LONGLONG eventQpc)
          InterlockedCompareExchange(&g_app.shared->sleepCallSerial, 0, 0) == 0))
         return;
 
-    wchar_t line[160]{};
-    swprintf_s(line, L"Reflex Sleep calls counted during previous state: %llu.",
-        static_cast<unsigned long long>(sleepCount));
+    wchar_t line[180]{};
+    swprintf_s(line, L"Reflex Sleep: %llu calls since %s #%ld.",
+        static_cast<unsigned long long>(sleepCount),
+        BackendCallName(state.backend), state.sequence);
     AppendDisplayLineAtQpc(line, eventQpc);
 }
 
 void FinalizeStateRun(LONGLONG eventQpc)
 {
     if (g_app.haveStateEvent) {
-        AppendRepeatCount(g_app.stateRepeatCount, eventQpc);
-        AppendSleepCount(g_app.stateSleepCount, eventQpc);
+        AppendRepeatCount(g_app.stateRepeatCount, g_app.stateEvent, eventQpc);
+        AppendSleepCount(g_app.stateSleepCount, g_app.stateEvent, eventQpc);
     }
     for (size_t i = 0; i < kFgTrackedStreams; ++i) {
         if (g_app.fgRuns[i].used)
@@ -780,8 +791,8 @@ bool SetCaptureMode(CaptureMode mode)
     const CaptureMode previous = g_app.captureMode;
     if (previous == CaptureModeStateChanges) {
         if (g_app.haveStateEvent) {
-            AppendRepeatCount(g_app.stateRepeatCount, qpc.QuadPart);
-            AppendSleepCount(g_app.stateSleepCount, qpc.QuadPart);
+            AppendRepeatCount(g_app.stateRepeatCount, g_app.stateEvent, qpc.QuadPart);
+            AppendSleepCount(g_app.stateSleepCount, g_app.stateEvent, qpc.QuadPart);
         }
         FinishFgDisplayIntervals(qpc.QuadPart, true);
     }
@@ -849,8 +860,8 @@ void HandleCapturedReflexEvent(const CapturedReflexEvent& event)
     } else if (SameReflexState(g_app.stateEvent, event)) {
         ++g_app.stateRepeatCount;
     } else {
-        AppendRepeatCount(g_app.stateRepeatCount, event.qpc);
-        AppendSleepCount(g_app.stateSleepCount, event.qpc);
+        AppendRepeatCount(g_app.stateRepeatCount, g_app.stateEvent, event.qpc);
+        AppendSleepCount(g_app.stateSleepCount, g_app.stateEvent, event.qpc);
         AppendReflexEvent(event, true);
         g_app.stateEvent = event;
         g_app.stateRepeatCount = 0;
