@@ -131,6 +131,8 @@ FgPolicy ReadFgPolicyFromUi()
         policy.forceOnWhenAuto = Button_GetCheck(g_app.fgForceAutoOn) == BST_CHECKED;
         policy.overrideOffAfterSuccessfulOn =
             Button_GetCheck(g_app.fgOverrideOffAfterOn) == BST_CHECKED;
+        policy.offOverrideAlways =
+            SendMessageW(g_app.fgOffModeChoice, CB_GETCURSEL, 0, 0) == 1;
         policy.overrideMultiplier = Button_GetCheck(g_app.fgMultiplierOverride) == BST_CHECKED;
         const LRESULT multiplierIndex = SendMessageW(
             g_app.fgMultiplierChoice, CB_GETCURSEL, 0, 0);
@@ -153,6 +155,8 @@ void ApplyFgPolicyToShared()
     InterlockedExchange(&g_app.shared->fgForceOnWhenAuto, policy.forceOnWhenAuto ? 1 : 0);
     InterlockedExchange(&g_app.shared->fgForceOffAfterOn,
         policy.overrideOffAfterSuccessfulOn ? 1 : 0);
+    InterlockedExchange(&g_app.shared->fgOffOverrideAlways,
+        policy.offOverrideAlways ? 1 : 0);
     InterlockedExchange(&g_app.shared->fgMultiplierFrames,
         static_cast<LONG>(policy.multiplierFrames));
     InterlockedExchange(&g_app.shared->fgMultiplierOverrideEnabled,
@@ -167,9 +171,11 @@ void ApplyFgPolicyToShared()
     AppendStatusLine(policy.forceOnWhenAuto
         ? L"FG policy: Force Auto to On enabled; applies to next SetOptions call."
         : L"FG policy: Force Auto to On disabled.");
-    AppendStatusLine(policy.overrideOffAfterSuccessfulOn
-        ? L"FG policy: experimental Off override enabled; requires prior successful On/Auto request for the same viewport."
-        : L"FG policy: experimental Off override disabled.");
+    AppendStatusLine(!policy.overrideOffAfterSuccessfulOn
+        ? L"FG policy: experimental Off override disabled."
+        : policy.offOverrideAlways
+            ? L"FG policy: experimental Off override Always; forward On using submitted frame count unless multiplier override is enabled."
+            : L"FG policy: experimental Off override After success; reuse last successful On/Auto request for the same viewport.");
     if (policy.overrideMultiplier) {
         wchar_t multiplierLine[128]{};
         swprintf_s(multiplierLine,
@@ -267,6 +273,10 @@ void UpdateAcquisitionControls()
         EnableWindow(g_app.fgMultiplierOverride, fgEnabled && !watching);
     if (g_app.fgOverrideOffAfterOn)
         EnableWindow(g_app.fgOverrideOffAfterOn, fgEnabled && !watching);
+    const bool offOverrideChecked = g_app.fgOverrideOffAfterOn &&
+        Button_GetCheck(g_app.fgOverrideOffAfterOn) == BST_CHECKED;
+    if (g_app.fgOffModeChoice)
+        EnableWindow(g_app.fgOffModeChoice, fgEnabled && !watching && offOverrideChecked);
     const bool multiplierChecked = g_app.fgMultiplierOverride &&
         Button_GetCheck(g_app.fgMultiplierOverride) == BST_CHECKED;
     if (g_app.fgMultiplierChoice)
@@ -483,9 +493,11 @@ bool LaunchAndInject()
         AppendStatusLine(fgPolicy.forceOnWhenAuto
             ? L"Initial FG Auto-to-On override: enabled."
             : L"Initial FG Auto-to-On override: disabled.");
-        AppendStatusLine(fgPolicy.overrideOffAfterSuccessfulOn
-            ? L"Initial experimental FG Off override: enabled after successful On/Auto SetOptions per viewport."
-            : L"Initial experimental FG Off override: disabled.");
+        AppendStatusLine(!fgPolicy.overrideOffAfterSuccessfulOn
+            ? L"Initial experimental FG Off override: disabled."
+            : fgPolicy.offOverrideAlways
+                ? L"Initial experimental FG Off override: Always (Off -> On, submitted frames unless separately overridden)."
+                : L"Initial experimental FG Off override: After success (last accepted On/Auto request per viewport).");
         if (fgPolicy.overrideMultiplier) {
             wchar_t multiplierLine[128]{};
             swprintf_s(multiplierLine,
@@ -829,6 +841,7 @@ void LayoutControls(int clientWidth, int clientHeight)
     int fgLowerX = kMargin + 18;
     const int fgLowerY = 250;
     const int fgMultiplierComboWidth = 56;
+    const int fgOffModeComboWidth = 112;
     const int fgLowerGap = 3;
     if (g_app.fgMultiplierOverride) {
         const int width = MeasureInlineCheckboxWidth(g_app.fgMultiplierOverride);
@@ -845,7 +858,12 @@ void LayoutControls(int clientWidth, int clientHeight)
         const int width = MeasureInlineCheckboxWidth(g_app.fgOverrideOffAfterOn);
         MoveWindow(g_app.fgOverrideOffAfterOn, fgLowerX, fgLowerY,
             width, fgControlHeight, TRUE);
-        fgLowerX += width + fgLowerGap;
+        fgLowerX += width + fgGroupGap;
+    }
+    if (g_app.fgOffModeChoice) {
+        MoveWindow(g_app.fgOffModeChoice, fgLowerX, fgLowerY - 2,
+            fgOffModeComboWidth, 90, TRUE);
+        fgLowerX += fgOffModeComboWidth + fgLowerGap;
     }
     if (g_app.fgDetailedDiagnosticsControl) {
         const int width = MeasureInlineCheckboxWidth(g_app.fgDetailedDiagnosticsControl);
@@ -1001,11 +1019,22 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         SendMessageW(g_app.fgMultiplierChoice, CB_SETCURSEL, 0, 0);
 
         g_app.fgOverrideOffAfterOn = CreateWindowExW(0, L"BUTTON",
-            L"Override FG Off (after On)",
+            L"Override FG Off",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
             0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FG_OVERRIDE_OFF_AFTER_ON),
             g_app.instance, nullptr);
         SetChildFont(g_app.fgOverrideOffAfterOn, font);
+
+        g_app.fgOffModeChoice = CreateWindowExW(0, L"COMBOBOX", L"",
+            WS_CHILD | WS_VISIBLE | WS_DISABLED | WS_VSCROLL | CBS_DROPDOWNLIST,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FG_OFF_MODE_CHOICE),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.fgOffModeChoice, font);
+        SendMessageW(g_app.fgOffModeChoice, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(L"After success"));
+        SendMessageW(g_app.fgOffModeChoice, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(L"Always"));
+        SendMessageW(g_app.fgOffModeChoice, CB_SETCURSEL, 0, 0);
 
         g_app.fgMenuOverride = CreateWindowExW(0, L"BUTTON",
             L"Override menu detection",
@@ -1224,6 +1253,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             }
             return 0;
         case IDC_FG_MULTIPLIER_CHOICE:
+        case IDC_FG_OFF_MODE_CHOICE:
             if (HIWORD(wParam) == CBN_SELCHANGE)
                 ApplyFgPolicyToShared();
             return 0;

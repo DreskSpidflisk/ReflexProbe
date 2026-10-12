@@ -495,6 +495,8 @@ sl::Result HookFgSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
         InterlockedCompareExchange(&g_shared->fgForceOnWhenAuto, 0, 0) != 0;
     const bool forceOffAfterOn = g_shared &&
         InterlockedCompareExchange(&g_shared->fgForceOffAfterOn, 0, 0) != 0;
+    const bool forceOffAlways = g_shared &&
+        InterlockedCompareExchange(&g_shared->fgOffOverrideAlways, 0, 0) != 0;
     const bool overrideMultiplier = g_shared &&
         InterlockedCompareExchange(&g_shared->fgMultiplierOverrideEnabled, 0, 0) != 0;
     const bool overrideMenu = g_shared &&
@@ -510,11 +512,18 @@ sl::Result HookFgSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
     uint32_t frames = data.generatedFrames;
     if (knownVersion) {
         if (forceOffAfterOn && options.mode == sl::DLSSGMode::eOff) {
-            uint32_t verifiedMode = 0;
-            uint32_t verifiedFrames = 0;
-            if (GetVerifiedFgRequest(data.viewport, verifiedMode, verifiedFrames)) {
-                mode = verifiedMode;
-                frames = verifiedFrames;
+            if (forceOffAlways) {
+                // Deliberately aggressive: even the first Off call becomes On.
+                // Keep the game's submitted count, including zero. The normal
+                // multiplier policy below can still replace it when enabled.
+                mode = static_cast<uint32_t>(sl::DLSSGMode::eOn);
+            } else {
+                uint32_t verifiedMode = 0;
+                uint32_t verifiedFrames = 0;
+                if (GetVerifiedFgRequest(data.viewport, verifiedMode, verifiedFrames)) {
+                    mode = verifiedMode;
+                    frames = verifiedFrames;
+                }
             }
         }
         // Apply Auto -> On also when an Off request reused a verified Auto mode.

@@ -55,12 +55,14 @@ enum ControlId : int {
     IDC_FG_DETAILED_DIAGNOSTICS,
     IDC_FG_MULTIPLIER_OVERRIDE,
     IDC_FG_MULTIPLIER_CHOICE,
-    IDC_FG_OVERRIDE_OFF_AFTER_ON
+    IDC_FG_OVERRIDE_OFF_AFTER_ON,
+    IDC_FG_OFF_MODE_CHOICE
 };
 
 struct FgPolicy {
     bool forceOnWhenAuto = false;
     bool overrideOffAfterSuccessfulOn = false;
+    bool offOverrideAlways = false; // mode dropdown: After success is the default
     bool overrideMultiplier = false;
     uint32_t multiplierFrames = 1; // 1=2X; checkbox off by default
     bool overrideMenu = false;
@@ -123,6 +125,7 @@ struct AppState {
     HWND fgMultiplierOverride = nullptr;
     HWND fgMultiplierChoice = nullptr;
     HWND fgOverrideOffAfterOn = nullptr;
+    HWND fgOffModeChoice = nullptr;
     HWND fgMenuOverride = nullptr;
     HWND fgMenuOff = nullptr;
     HWND fgMenuOn = nullptr;

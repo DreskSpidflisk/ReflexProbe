@@ -10,7 +10,7 @@
 namespace ReflexProbeProtocol {
 
 constexpr uint32_t kMagic = 0x31505246; // "FRP1" little-endian.
-constexpr uint32_t kVersion = 13;
+constexpr uint32_t kVersion = 14;
 constexpr uint32_t kEventCapacity = 4096;
 constexpr uint32_t kPathChars = 1024;
 constexpr uint32_t kVersionChars = 64;
@@ -18,7 +18,7 @@ constexpr uint32_t kErrorChars = 512;
 
 // Human-readable source tag for rapid local rebuild/testing. The controller also hashes the
 // actual EXE and DLL on disk, so a stale or mismatched binary is obvious in copied logs.
-constexpr wchar_t kBuildTag[] = L"2026-10-12.30-fg-off-after-on";
+constexpr wchar_t kBuildTag[] = L"2026-10-12.31-fg-off-override-modes";
 
 constexpr wchar_t kMappingPrefix[] = L"Local\\ReflexProbe.";
 
@@ -112,7 +112,8 @@ struct SharedState {
     LONG probeDlssFgEnabled;
     LONG wrapFgGetState; // acquisition-time, original pointer when false
     volatile LONG fgForceOnWhenAuto;
-    volatile LONG fgForceOffAfterOn; // guarded by prior successful On/Auto request per viewport
+    volatile LONG fgForceOffAfterOn; // enables Off override; mode selected below
+    volatile LONG fgOffOverrideAlways; // 0=after successful active call, 1=every Off call
     volatile LONG fgMultiplierOverrideEnabled;
     volatile LONG fgMultiplierFrames; // generated frames: 1=2X through 5=6X
     volatile LONG fgMenuOverrideEnabled;
