@@ -519,7 +519,7 @@ bool LaunchAndInject()
 
     if (probeReflex)
         AppendStatusLine(countReflexSleepCalls
-            ? L"Initial Reflex Sleep call counting: enabled; Reflex Sleep will be wrapped for this target."
+            ? L"Initial Reflex Sleep call counting: requested; interception availability depends on the detected backend."
             : L"Initial Reflex Sleep call counting: disabled; Reflex Sleep will remain untouched for this target.");
 
     if (g_app.captureMode == CaptureModeRawDebug)
