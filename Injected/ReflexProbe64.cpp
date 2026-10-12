@@ -81,9 +81,10 @@ using PFunNvapiD3DSleep = int32_t (__cdecl)(void* device);
 HANDLE g_mapping = nullptr;
 ReflexProbeProtocol::SharedState* g_shared = nullptr;
 
-// Only successful active game requests qualify an FG Off -> active experiment.
-// Track the game's original Auto/On mode and frame count, even if another
-// override changed what was forwarded. A full table fails closed for new viewports.
+// Remember successful native Auto/On requests, including their original frame
+// count (even zero). In Always mode, a first successful forced Off -> On may
+// establish history, but no later Off request may overwrite it. A full table
+// fails closed for new viewports.
 constexpr size_t kVerifiedFgViewportCapacity = 64;
 struct VerifiedFgRequest {
     uint32_t viewport = 0;
@@ -111,29 +112,43 @@ bool GetVerifiedFgRequest(uint32_t viewport, uint32_t& mode, uint32_t& frames)
 }
 
 void RememberVerifiedFgRequest(uint32_t viewport,
-    const ReflexProbeProtocol::FgEventData& data, sl::Result result)
+    const ReflexProbeProtocol::FgEventData& data, sl::Result result,
+    bool allowOffBootstrap)
 {
-    if (result != sl::Result::eOk ||
-        (data.mode != static_cast<uint32_t>(sl::DLSSGMode::eAuto) &&
-         data.mode != static_cast<uint32_t>(sl::DLSSGMode::eOn)) ||
-        (data.forwardedMode != static_cast<uint32_t>(sl::DLSSGMode::eAuto) &&
-         data.forwardedMode != static_cast<uint32_t>(sl::DLSSGMode::eOn)) ||
-        data.generatedFrames == 0)
+    if (result != sl::Result::eOk)
+        return;
+
+    const bool nativeActive =
+        data.mode == static_cast<uint32_t>(sl::DLSSGMode::eAuto) ||
+        data.mode == static_cast<uint32_t>(sl::DLSSGMode::eOn);
+    const bool forwardedActive =
+        data.forwardedMode == static_cast<uint32_t>(sl::DLSSGMode::eAuto) ||
+        data.forwardedMode == static_cast<uint32_t>(sl::DLSSGMode::eOn);
+    const bool firstForcedOn = allowOffBootstrap &&
+        data.mode == static_cast<uint32_t>(sl::DLSSGMode::eOff) &&
+        data.forwardedMode == static_cast<uint32_t>(sl::DLSSGMode::eOn);
+    if (!forwardedActive || (!nativeActive && !firstForcedOn))
         return;
 
     AcquireSRWLockExclusive(&g_verifiedFgLock);
     VerifiedFgRequest* available = nullptr;
+    bool alreadyVerified = false;
     for (VerifiedFgRequest& entry : g_verifiedFgRequests) {
         if (entry.used && entry.viewport == viewport) {
             available = &entry;
+            alreadyVerified = true;
             break;
         }
         if (!entry.used && !available)
             available = &entry;
     }
-    if (available) {
+    // A native Auto/On success refreshes history. A successful forced Off
+    // call bootstraps it only if no record exists, even with concurrent calls.
+    if (available && (nativeActive || !alreadyVerified)) {
         available->viewport = viewport;
-        available->requestedMode = data.mode;
+        available->requestedMode = nativeActive
+            ? data.mode : static_cast<uint32_t>(sl::DLSSGMode::eOn);
+        // Preserve what the game submitted, including zero; never our override.
         available->requestedFrames = data.generatedFrames;
         available->used = true;
     }
@@ -512,18 +527,16 @@ sl::Result HookFgSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
     uint32_t frames = data.generatedFrames;
     if (knownVersion) {
         if (forceOffAfterOn && options.mode == sl::DLSSGMode::eOff) {
-            if (forceOffAlways) {
-                // Deliberately aggressive: even the first Off call becomes On.
-                // Keep the game's submitted count, including zero. The normal
-                // multiplier policy below can still replace it when enabled.
+            uint32_t verifiedMode = 0;
+            uint32_t verifiedFrames = 0;
+            if (GetVerifiedFgRequest(data.viewport, verifiedMode, verifiedFrames)) {
+                // Both policies reuse the same last successful active request.
+                mode = verifiedMode;
+                frames = verifiedFrames;
+            } else if (forceOffAlways) {
+                // No history yet: force On with the game's current frame count,
+                // including zero. The multiplier policy below still takes priority.
                 mode = static_cast<uint32_t>(sl::DLSSGMode::eOn);
-            } else {
-                uint32_t verifiedMode = 0;
-                uint32_t verifiedFrames = 0;
-                if (GetVerifiedFgRequest(data.viewport, verifiedMode, verifiedFrames)) {
-                    mode = verifiedMode;
-                    frames = verifiedFrames;
-                }
             }
         }
         // Apply Auto -> On also when an Off request reused a verified Auto mode.
@@ -548,12 +561,15 @@ sl::Result HookFgSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
     data.forwardedMode = mode;
     data.forwardedFlags = flags;
     data.forwardedGeneratedFrames = frames;
+    const bool allowOffBootstrap = knownVersion && forceOffAfterOn &&
+        forceOffAlways && options.mode == sl::DLSSGMode::eOff &&
+        mode == static_cast<uint32_t>(sl::DLSSGMode::eOn);
 
     if (mode == data.mode && frames == data.generatedFrames &&
         flags == data.flags) {
         // The ordinary observational path remains a direct pass-through.
         const sl::Result result = real(viewport, options);
-        RememberVerifiedFgRequest(data.viewport, data, result);
+        RememberVerifiedFgRequest(data.viewport, data, result, allowOffBootstrap);
         PublishFgEvent(ReflexProbeProtocol::FgEventSetOptions, data, static_cast<LONG>(result));
         return result;
     }
@@ -590,7 +606,7 @@ sl::Result HookFgSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
         forwarded.dynamicTargetFrameRate = options.dynamicTargetFrameRate;
 
     const sl::Result result = real(viewport, forwarded);
-    RememberVerifiedFgRequest(data.viewport, data, result);
+    RememberVerifiedFgRequest(data.viewport, data, result, allowOffBootstrap);
     PublishFgEvent(ReflexProbeProtocol::FgEventSetOptions, data, static_cast<LONG>(result));
     return result;
 }
