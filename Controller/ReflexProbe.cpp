@@ -20,25 +20,17 @@ constexpr int kLaunchWidth = 108;
 constexpr int kWatchWidth = 116;
 constexpr int kAttachWidth = 92;
 constexpr int kAcquisitionGap = 8;
-constexpr int kPolicyGap = 10;
-constexpr int kOverrideWidth = 172;
-constexpr int kOverrideFpsWidth = 70;
-constexpr int kFpsLabelWidth = 34;
+constexpr int kPolicyGap = 8;
+constexpr int kInlineGap = 5;
+constexpr int kOverrideFpsWidth = 52;
+constexpr int kFpsLabelWidth = 30;
 constexpr int kForceBoostWidth = 171;
 constexpr int kCountSleepWidth = 190;
-constexpr int kWordWrapWidth = 104;
 constexpr int kClearWidth = 58;
-constexpr int kRawWidth = 88;
-constexpr int kStateWidth = 108;
-constexpr int kCaptureLabelWidth = 92;
-constexpr int kCaptureGap = 8;
-
-constexpr int kFpsX = kMargin + 18 + kOverrideWidth;
-constexpr int kFpsLabelX = kFpsX + kOverrideFpsWidth + 8;
-constexpr int kForceBoostX = kFpsLabelX + kFpsLabelWidth + kPolicyGap;
-constexpr int kCountSleepX = kForceBoostX + kForceBoostWidth + kPolicyGap;
-constexpr int kPolicyRight = kCountSleepX + kCountSleepWidth;
-constexpr int kMinimumClientWidth = kPolicyRight + kMargin + 36;
+constexpr int kCaptureGap = 7;
+// Preserve the established minimum window width; control spacing is tightened
+// independently rather than letting the narrower Reflex row shrink the window.
+constexpr int kMinimumClientWidth = 743;
 
 constexpr int kReflexGroupTop = 127;
 constexpr int kReflexGroupHeight = 56;
@@ -694,6 +686,33 @@ int MeasureCompactRadioWidth(HWND radio)
     return width > 8 ? width - 6 : 40;
 }
 
+int MeasureInlineCheckboxWidth(HWND checkbox)
+{
+    const int width = MeasureGroupHeadingWidth(checkbox);
+    return width > 10 ? width - 8 : 40;
+}
+
+int MeasurePlainLabelWidth(HWND label)
+{
+    if (!label)
+        return 0;
+
+    wchar_t caption[128]{};
+    GetWindowTextW(label, caption, static_cast<int>(_countof(caption)));
+    HDC dc = GetDC(label);
+    if (!dc)
+        return 0;
+    HFONT font = reinterpret_cast<HFONT>(SendMessageW(label, WM_GETFONT, 0, 0));
+    HGDIOBJ previous = font ? SelectObject(dc, font) : nullptr;
+    SIZE extent{};
+    const BOOL measured = GetTextExtentPoint32W(
+        dc, caption, static_cast<int>(wcslen(caption)), &extent);
+    if (previous)
+        SelectObject(dc, previous);
+    ReleaseDC(label, dc);
+    return measured ? extent.cx + 2 : 80;
+}
+
 void LayoutControls(int clientWidth, int clientHeight)
 {
     if (clientWidth <= 0 || clientHeight <= 0)
@@ -722,16 +741,26 @@ void LayoutControls(int clientWidth, int clientHeight)
         MoveWindow(g_app.reflexProbing, kMargin + 14, kReflexGroupTop - 9,
             MeasureGroupHeadingWidth(g_app.reflexProbing), 22, TRUE);
 
-    if (g_app.overrideEnable)
-        MoveWindow(g_app.overrideEnable, kMargin + 18, 149, kOverrideWidth, 22, TRUE);
-    if (g_app.overrideFps)
-        MoveWindow(g_app.overrideFps, kFpsX, 148, kOverrideFpsWidth, 24, TRUE);
-    if (g_app.fpsLabel)
-        MoveWindow(g_app.fpsLabel, kFpsLabelX, 151, kFpsLabelWidth, 20, TRUE);
-    if (g_app.forceBoost)
-        MoveWindow(g_app.forceBoost, kForceBoostX, 149, kForceBoostWidth, 22, TRUE);
+    int reflexX = kMargin + 18;
+    if (g_app.overrideEnable) {
+        const int width = MeasureInlineCheckboxWidth(g_app.overrideEnable);
+        MoveWindow(g_app.overrideEnable, reflexX, 149, width, 22, TRUE);
+        reflexX += width + kInlineGap;
+    }
+    if (g_app.overrideFps) {
+        MoveWindow(g_app.overrideFps, reflexX, 148, kOverrideFpsWidth, 24, TRUE);
+        reflexX += kOverrideFpsWidth + kInlineGap;
+    }
+    if (g_app.fpsLabel) {
+        MoveWindow(g_app.fpsLabel, reflexX, 151, kFpsLabelWidth, 20, TRUE);
+        reflexX += kFpsLabelWidth + kPolicyGap;
+    }
+    if (g_app.forceBoost) {
+        MoveWindow(g_app.forceBoost, reflexX, 149, kForceBoostWidth, 22, TRUE);
+        reflexX += kForceBoostWidth + kPolicyGap;
+    }
     if (g_app.countReflexSleep)
-        MoveWindow(g_app.countReflexSleep, kCountSleepX, 149, kCountSleepWidth, 22, TRUE);
+        MoveWindow(g_app.countReflexSleep, reflexX, 149, kCountSleepWidth, 22, TRUE);
 
     if (g_app.fgGroup)
         MoveWindow(g_app.fgGroup, kMargin, kFgGroupTop,
@@ -787,9 +816,10 @@ void LayoutControls(int clientWidth, int clientHeight)
     // longer placeholder labels or stretch the row to align with the one above.
     int fgLowerX = kMargin + 18;
     const int fgLowerY = 250;
-    const int fgMultiplierComboWidth = 62;
+    const int fgMultiplierComboWidth = 56;
+    const int fgLowerGap = 3;
     if (g_app.fgMultiplierOverride) {
-        const int width = MeasureGroupHeadingWidth(g_app.fgMultiplierOverride);
+        const int width = MeasureInlineCheckboxWidth(g_app.fgMultiplierOverride);
         MoveWindow(g_app.fgMultiplierOverride, fgLowerX, fgLowerY,
             width, fgControlHeight, TRUE);
         fgLowerX += width + fgGroupGap;
@@ -797,17 +827,17 @@ void LayoutControls(int clientWidth, int clientHeight)
     if (g_app.fgMultiplierChoice) {
         MoveWindow(g_app.fgMultiplierChoice, fgLowerX, fgLowerY - 2,
             fgMultiplierComboWidth, 112, TRUE);
-        fgLowerX += fgMultiplierComboWidth + fgGroupGap + 5;
+        fgLowerX += fgMultiplierComboWidth + fgLowerGap;
     }
     if (g_app.fgDetailedDiagnosticsControl) {
-        const int width = MeasureGroupHeadingWidth(g_app.fgDetailedDiagnosticsControl);
+        const int width = MeasureInlineCheckboxWidth(g_app.fgDetailedDiagnosticsControl);
         MoveWindow(g_app.fgDetailedDiagnosticsControl, fgLowerX, fgLowerY,
             width, fgControlHeight, TRUE);
-        fgLowerX += width + fgGroupGap + 5;
+        fgLowerX += width + fgLowerGap;
     }
     if (g_app.fgGetState)
         MoveWindow(g_app.fgGetState, fgLowerX, fgLowerY,
-            MeasureGroupHeadingWidth(g_app.fgGetState),
+            MeasureInlineCheckboxWidth(g_app.fgGetState),
             fgControlHeight, TRUE);
 
     const int attachX = clientWidth - kMargin - kAttachWidth;
@@ -833,21 +863,27 @@ void LayoutControls(int clientWidth, int clientHeight)
     if (g_app.statusLabel)
         MoveWindow(g_app.statusLabel, kMargin, kStatusHeadingTop, 180, 20, TRUE);
 
-    const int wrapX = clientWidth - kMargin - kWordWrapWidth;
+    // Anchor Clear and Word wrap at the right edge. Pack Capture Mode radios
+    // immediately to their left using the same tight radio spacing as FG.
+    const int wrapWidth = MeasureInlineCheckboxWidth(g_app.wordWrap);
+    const int wrapX = clientWidth - kMargin - wrapWidth;
     const int clearX = wrapX - kCaptureGap - kClearWidth;
-    const int rawX = clearX - kCaptureGap - kRawWidth;
-    const int stateX = rawX - kCaptureGap - kStateWidth;
-    const int captureLabelX = stateX - kCaptureGap - kCaptureLabelWidth;
+    const int rawWidth = MeasureCompactRadioWidth(g_app.captureRaw);
+    const int captureStateWidth = MeasureCompactRadioWidth(g_app.captureState);
+    const int labelWidth = MeasurePlainLabelWidth(g_app.captureModeLabel);
+    const int rawX = clearX - kCaptureGap - rawWidth;
+    const int stateX = rawX - 1 - captureStateWidth;
+    const int captureLabelX = stateX - 2 - labelWidth;
     if (g_app.captureModeLabel)
-        MoveWindow(g_app.captureModeLabel, captureLabelX, kStatusHeadingTop, kCaptureLabelWidth, 20, TRUE);
+        MoveWindow(g_app.captureModeLabel, captureLabelX, kStatusHeadingTop, labelWidth, 20, TRUE);
     if (g_app.captureState)
-        MoveWindow(g_app.captureState, stateX, kStatusHeadingTop - 2, kStateWidth, 22, TRUE);
+        MoveWindow(g_app.captureState, stateX, kStatusHeadingTop - 2, captureStateWidth, 22, TRUE);
     if (g_app.captureRaw)
-        MoveWindow(g_app.captureRaw, rawX, kStatusHeadingTop - 2, kRawWidth, 22, TRUE);
+        MoveWindow(g_app.captureRaw, rawX, kStatusHeadingTop - 2, rawWidth, 22, TRUE);
     if (g_app.clearHistory)
         MoveWindow(g_app.clearHistory, clearX, kStatusHeadingTop - 3, kClearWidth, 24, TRUE);
     if (g_app.wordWrap)
-        MoveWindow(g_app.wordWrap, wrapX, kStatusHeadingTop - 2, kWordWrapWidth, 22, TRUE);
+        MoveWindow(g_app.wordWrap, wrapX, kStatusHeadingTop - 2, wrapWidth, 22, TRUE);
 
     if (g_app.status) {
         int statusHeight = clientHeight - kStatusTop - kMargin;
