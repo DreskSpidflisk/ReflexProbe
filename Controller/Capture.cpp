@@ -314,7 +314,9 @@ void FormatFgDisplayLine(const CapturedReflexEvent& event, bool newState,
                          wchar_t* line, size_t lineCount, bool detailed = true)
 {
     const ReflexProbeProtocol::FgEventData& fg = event.fg;
-    const wchar_t* prefix = newState ? L"NEW FG State: " : L"";
+    const wchar_t* prefix = !newState ? L"" :
+        (event.kind == ReflexProbeProtocol::FgEventSetOptions
+            ? L"NEW FG SetOptions: " : L"NEW FG GetState: ");
     if (event.kind == ReflexProbeProtocol::FgEventSetOptions) {
         wchar_t requestedMode[64]{};
         wchar_t forwardedMode[64]{};
