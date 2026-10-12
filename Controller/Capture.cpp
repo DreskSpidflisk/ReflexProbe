@@ -715,7 +715,20 @@ bool SleepCountingCurrentlyEnabled()
 
 void AppendSleepCount(uint64_t sleepCount, LONGLONG eventQpc)
 {
-    if (!sleepCount && !SleepCountingCurrentlyEnabled())
+    // SL1 has no sleep wrapper in ReflexProbe. Never present unavailable
+    // measurement as a zero; zero only becomes meaningful after a sleep
+    // event has actually been intercepted for this target.
+    if (!g_app.shared)
+        return;
+
+    const LONG backend = InterlockedCompareExchange(&g_app.shared->backend, 0, 0);
+    if (backend == ReflexProbeProtocol::ReflexBackendLegacyFeatureConstants ||
+        backend == ReflexProbeProtocol::ReflexBackendLegacyPluginConstants)
+        return;
+
+    if (!sleepCount &&
+        (!SleepCountingCurrentlyEnabled() ||
+         InterlockedCompareExchange(&g_app.shared->sleepCallSerial, 0, 0) == 0))
         return;
 
     wchar_t line[160]{};
@@ -872,7 +885,15 @@ void PollSharedState()
     const LONG backend = InterlockedCompareExchange(&g_app.shared->backend, 0, 0);
     const LONG hookState = InterlockedCompareExchange(&g_app.shared->hookState, 0, 0);
     if (hookState != g_app.lastHookState) {
+        const LONG previousHookState = g_app.lastHookState;
         g_app.lastHookState = hookState;
+        const bool warnLegacySleep =
+            g_app.shared->countReflexSleepCalls != 0 &&
+            (backend == ReflexProbeProtocol::ReflexBackendLegacyFeatureConstants ||
+             backend == ReflexProbeProtocol::ReflexBackendLegacyPluginConstants);
+        const wchar_t* legacySleepNote = warnLegacySleep
+            ? L"\r\nNOTE: Reflex Sleep counting unavailable for Streamline 1.x (not intercepted by ReflexProbe)."
+            : L"";
         wchar_t line[2300]{};
         switch (hookState) {
         case ReflexProbeProtocol::HookStateWaitingForDll:
@@ -885,14 +906,16 @@ void PollSharedState()
                 BackendName(backend));
             break;
         case ReflexProbeProtocol::HookStateReflexFound:
-            swprintf_s(line, L"Found Reflex backend: %s\r\nModule: %s\r\nFile version: %s",
-                BackendName(backend),
+            swprintf_s(line, L"Found Reflex backend: %s%s\r\nModule: %s\r\nFile version: %s",
+                BackendName(backend), legacySleepNote,
                 g_app.shared->reflexPath[0] ? g_app.shared->reflexPath : L"(path unavailable)",
                 g_app.shared->reflexVersion[0] ? g_app.shared->reflexVersion : L"unknown");
             break;
         case ReflexProbeProtocol::HookStateHooked:
-            swprintf_s(line, L"Hook active: %s via %s\r\nModule: %s\r\nFile version: %s",
+            swprintf_s(line, L"Hook active: %s via %s%s\r\nModule: %s\r\nFile version: %s",
                 BackendCallName(backend), BackendName(backend),
+                previousHookState == ReflexProbeProtocol::HookStateReflexFound
+                    ? L"" : legacySleepNote,
                 g_app.shared->reflexPath[0] ? g_app.shared->reflexPath : L"sl.reflex.dll",
                 g_app.shared->reflexVersion[0] ? g_app.shared->reflexVersion : L"unknown");
             break;
@@ -973,6 +996,13 @@ void PollSharedState()
         }
         if (captured.kind == ReflexProbeProtocol::ReflexEventSettings)
             UpdateCurrentEffectiveState(captured);
+        if (captured.kind == ReflexProbeProtocol::ReflexEventSleep &&
+            captured.sequence == 1) {
+            wchar_t line[192]{};
+            swprintf_s(line, L"Reflex Sleep interception confirmed: %s (first call observed).",
+                BackendSleepCallName(captured.backend));
+            AppendStatusLineAtQpc(line, captured.qpc);
+        }
         HandleCapturedReflexEvent(captured);
         if (rawDebug && rawBatchSuccess)
             rawBatchSuccess = AppendCapturedEventToBuffer(rawBatch, captured, false);
