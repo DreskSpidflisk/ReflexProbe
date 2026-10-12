@@ -81,6 +81,65 @@ using PFunNvapiD3DSleep = int32_t (__cdecl)(void* device);
 HANDLE g_mapping = nullptr;
 ReflexProbeProtocol::SharedState* g_shared = nullptr;
 
+// Only successful active game requests qualify an FG Off -> active experiment.
+// Track the game's original Auto/On mode and frame count, even if another
+// override changed what was forwarded. A full table fails closed for new viewports.
+constexpr size_t kVerifiedFgViewportCapacity = 64;
+struct VerifiedFgRequest {
+    uint32_t viewport = 0;
+    uint32_t requestedMode = 0;
+    uint32_t requestedFrames = 0;
+    bool used = false;
+};
+SRWLOCK g_verifiedFgLock = SRWLOCK_INIT;
+VerifiedFgRequest g_verifiedFgRequests[kVerifiedFgViewportCapacity]{};
+
+bool GetVerifiedFgRequest(uint32_t viewport, uint32_t& mode, uint32_t& frames)
+{
+    bool found = false;
+    AcquireSRWLockShared(&g_verifiedFgLock);
+    for (const VerifiedFgRequest& entry : g_verifiedFgRequests) {
+        if (entry.used && entry.viewport == viewport) {
+            mode = entry.requestedMode;
+            frames = entry.requestedFrames;
+            found = true;
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&g_verifiedFgLock);
+    return found;
+}
+
+void RememberVerifiedFgRequest(uint32_t viewport,
+    const ReflexProbeProtocol::FgEventData& data, sl::Result result)
+{
+    if (result != sl::Result::eOk ||
+        (data.mode != static_cast<uint32_t>(sl::DLSSGMode::eAuto) &&
+         data.mode != static_cast<uint32_t>(sl::DLSSGMode::eOn)) ||
+        (data.forwardedMode != static_cast<uint32_t>(sl::DLSSGMode::eAuto) &&
+         data.forwardedMode != static_cast<uint32_t>(sl::DLSSGMode::eOn)) ||
+        data.generatedFrames == 0)
+        return;
+
+    AcquireSRWLockExclusive(&g_verifiedFgLock);
+    VerifiedFgRequest* available = nullptr;
+    for (VerifiedFgRequest& entry : g_verifiedFgRequests) {
+        if (entry.used && entry.viewport == viewport) {
+            available = &entry;
+            break;
+        }
+        if (!entry.used && !available)
+            available = &entry;
+    }
+    if (available) {
+        available->viewport = viewport;
+        available->requestedMode = data.mode;
+        available->requestedFrames = data.generatedFrames;
+        available->used = true;
+    }
+    ReleaseSRWLockExclusive(&g_verifiedFgLock);
+}
+
 // The selected feature families are immutable for the acquired target.
 // Resolver interception is shared plumbing; disabled feature functions are untouched.
 bool IsReflexProbingEnabled()
@@ -434,6 +493,8 @@ sl::Result HookFgSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
     const bool knownVersion = version >= 1 && version <= 5;
     const bool forceAuto = g_shared &&
         InterlockedCompareExchange(&g_shared->fgForceOnWhenAuto, 0, 0) != 0;
+    const bool forceOffAfterOn = g_shared &&
+        InterlockedCompareExchange(&g_shared->fgForceOffAfterOn, 0, 0) != 0;
     const bool overrideMultiplier = g_shared &&
         InterlockedCompareExchange(&g_shared->fgMultiplierOverrideEnabled, 0, 0) != 0;
     const bool overrideMenu = g_shared &&
@@ -448,10 +509,19 @@ sl::Result HookFgSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
     uint32_t flags = data.flags;
     uint32_t frames = data.generatedFrames;
     if (knownVersion) {
-        if (forceAuto && options.mode == sl::DLSSGMode::eAuto)
+        if (forceOffAfterOn && options.mode == sl::DLSSGMode::eOff) {
+            uint32_t verifiedMode = 0;
+            uint32_t verifiedFrames = 0;
+            if (GetVerifiedFgRequest(data.viewport, verifiedMode, verifiedFrames)) {
+                mode = verifiedMode;
+                frames = verifiedFrames;
+            }
+        }
+        // Apply Auto -> On also when an Off request reused a verified Auto mode.
+        if (forceAuto && mode == static_cast<uint32_t>(sl::DLSSGMode::eAuto))
             mode = static_cast<uint32_t>(sl::DLSSGMode::eOn);
-        // Only change the numeric count for fixed modes. Preserve eOff as
-        // eOff, and never apply a fixed count to Dynamic MFG or unknown modes.
+        // Only change the numeric count for fixed modes. An Off request is
+        // otherwise kept Off; Dynamic MFG and unknown modes are never changed.
         if (overrideMultiplier &&
             (options.mode == sl::DLSSGMode::eOff ||
              options.mode == sl::DLSSGMode::eOn ||
@@ -474,6 +544,7 @@ sl::Result HookFgSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
         flags == data.flags) {
         // The ordinary observational path remains a direct pass-through.
         const sl::Result result = real(viewport, options);
+        RememberVerifiedFgRequest(data.viewport, data, result);
         PublishFgEvent(ReflexProbeProtocol::FgEventSetOptions, data, static_cast<LONG>(result));
         return result;
     }
@@ -510,6 +581,7 @@ sl::Result HookFgSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
         forwarded.dynamicTargetFrameRate = options.dynamicTargetFrameRate;
 
     const sl::Result result = real(viewport, forwarded);
+    RememberVerifiedFgRequest(data.viewport, data, result);
     PublishFgEvent(ReflexProbeProtocol::FgEventSetOptions, data, static_cast<LONG>(result));
     return result;
 }

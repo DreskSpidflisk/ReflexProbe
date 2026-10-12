@@ -418,6 +418,8 @@ bool CreateSharedState(DWORD processId, const wchar_t* targetPath,
     g_app.shared->probeDlssFgEnabled = probeDlssFg ? 1 : 0;
     g_app.shared->wrapFgGetState = probeDlssFg && fgPolicy.wrapGetState ? 1 : 0;
     g_app.shared->fgForceOnWhenAuto = probeDlssFg && fgPolicy.forceOnWhenAuto ? 1 : 0;
+    g_app.shared->fgForceOffAfterOn =
+        probeDlssFg && fgPolicy.overrideOffAfterSuccessfulOn ? 1 : 0;
     g_app.shared->fgMultiplierFrames = static_cast<LONG>(fgPolicy.multiplierFrames);
     g_app.shared->fgMultiplierOverrideEnabled =
         probeDlssFg && fgPolicy.overrideMultiplier ? 1 : 0;
@@ -536,6 +538,9 @@ void LogInitialTargetPolicy(bool overrideEnabled, uint32_t overrideUs, bool forc
         AppendStatusLine(fgPolicy.forceOnWhenAuto
             ? L"Initial FG Auto-to-On override: enabled."
             : L"Initial FG Auto-to-On override: disabled.");
+        AppendStatusLine(fgPolicy.overrideOffAfterSuccessfulOn
+            ? L"Initial experimental FG Off override: enabled after successful On/Auto SetOptions per viewport."
+            : L"Initial experimental FG Off override: disabled.");
         if (fgPolicy.overrideMultiplier) {
             wchar_t multiplierLine[128]{};
             swprintf_s(multiplierLine, L"Initial FG multiplier override: %uX (applies on game SetOptions).",
