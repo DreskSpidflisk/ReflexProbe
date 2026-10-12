@@ -227,35 +227,43 @@ void UpdateCurrentEffectiveState(const CapturedReflexEvent& event)
     SetWindowTextIfChanged(g_app.window, title);
 }
 
-void FormatReflexEvent(const CapturedReflexEvent& event, wchar_t* line, size_t lineCount)
+void FormatValuePair(const wchar_t* field, const wchar_t* requested,
+                     const wchar_t* forwarded, wchar_t* out, size_t outCount)
 {
-    const wchar_t* requestedMode = ReflexModeName(event.requestedMode);
-    const wchar_t* effectiveMode = ReflexModeName(event.effectiveMode);
-    const wchar_t* callName = BackendCallName(event.backend);
+    if (wcscmp(requested, forwarded) == 0)
+        swprintf_s(out, outCount, L"%s=%s", field, requested);
+    else
+        swprintf_s(out, outCount, L"%s=%s -> %s", field, requested, forwarded);
+}
 
-    if (event.requestedUs && event.effectiveUs) {
-        swprintf_s(line, lineCount,
-            L"%s #%ld: requested mode=%s, effective mode=%s, requested=%u us (%.3f FPS), effective=%u us (%.3f FPS), result=%ld",
-            callName, event.sequence, requestedMode, effectiveMode,
-            event.requestedUs, 1000000.0 / static_cast<double>(event.requestedUs),
-            event.effectiveUs, 1000000.0 / static_cast<double>(event.effectiveUs),
-            event.result);
-    } else if (event.requestedUs) {
-        swprintf_s(line, lineCount,
-            L"%s #%ld: requested mode=%s, effective mode=%s, requested=%u us (%.3f FPS), effective=0 us (no explicit frame limit), result=%ld",
-            callName, event.sequence, requestedMode, effectiveMode,
-            event.requestedUs, 1000000.0 / static_cast<double>(event.requestedUs), event.result);
-    } else if (event.effectiveUs) {
-        swprintf_s(line, lineCount,
-            L"%s #%ld: requested mode=%s, effective mode=%s, requested=0 us (no explicit frame limit), effective=%u us (%.3f FPS), result=%ld",
-            callName, event.sequence, requestedMode, effectiveMode,
-            event.effectiveUs, 1000000.0 / static_cast<double>(event.effectiveUs), event.result);
+void FormatFrameLimitValue(uint32_t microseconds, wchar_t* out, size_t outCount)
+{
+    if (microseconds) {
+        swprintf_s(out, outCount, L"%u us (%.3f FPS)", microseconds,
+            1000000.0 / static_cast<double>(microseconds));
     } else {
-        swprintf_s(line, lineCount,
-            L"%s #%ld: requested mode=%s, effective mode=%s, requested=0 us (no explicit frame limit), effective=0 us (no explicit frame limit), result=%ld",
-            callName, event.sequence, requestedMode, effectiveMode, event.result);
+        swprintf_s(out, outCount, L"0 us (no explicit frame limit)");
     }
 }
+
+void FormatReflexEvent(const CapturedReflexEvent& event, wchar_t* line, size_t lineCount)
+{
+    wchar_t mode[128]{};
+    wchar_t requestedLimit[96]{};
+    wchar_t forwardedLimit[96]{};
+    wchar_t frameLimit[240]{};
+
+    FormatValuePair(L"mode", ReflexModeName(event.requestedMode),
+        ReflexModeName(event.effectiveMode), mode, _countof(mode));
+    FormatFrameLimitValue(event.requestedUs, requestedLimit, _countof(requestedLimit));
+    FormatFrameLimitValue(event.effectiveUs, forwardedLimit, _countof(forwardedLimit));
+    FormatValuePair(L"frameLimit", requestedLimit, forwardedLimit,
+        frameLimit, _countof(frameLimit));
+
+    swprintf_s(line, lineCount, L"%s #%ld: %s, %s, result=%ld",
+        BackendCallName(event.backend), event.sequence, mode, frameLimit, event.result);
+}
+
 void FormatReflexDisplayLine(const CapturedReflexEvent& event, bool newState,
                             wchar_t* line, size_t lineCount)
 {
@@ -308,26 +316,48 @@ void FormatFgDisplayLine(const CapturedReflexEvent& event, bool newState,
     const ReflexProbeProtocol::FgEventData& fg = event.fg;
     const wchar_t* prefix = newState ? L"NEW FG State: " : L"";
     if (event.kind == ReflexProbeProtocol::FgEventSetOptions) {
-        // Normal view: no detailed-format construction for hidden fields.
+        wchar_t requestedMode[64]{};
+        wchar_t forwardedMode[64]{};
+        wchar_t mode[160]{};
+        swprintf_s(requestedMode, L"%s (%u)", FgModeName(fg.mode), fg.mode);
+        swprintf_s(forwardedMode, L"%s (%u)", FgModeName(fg.forwardedMode), fg.forwardedMode);
+        FormatValuePair(L"mode", requestedMode, forwardedMode, mode, _countof(mode));
+
+        wchar_t requestedFrames[48]{};
+        wchar_t forwardedFrames[48]{};
+        wchar_t frames[128]{};
+        swprintf_s(requestedFrames, L"%u (%uX)", fg.generatedFrames, fg.generatedFrames + 1);
+        swprintf_s(forwardedFrames, L"%u (%uX)",
+            fg.forwardedGeneratedFrames, fg.forwardedGeneratedFrames + 1);
+        FormatValuePair(L"framesToGenerate", requestedFrames, forwardedFrames,
+            frames, _countof(frames));
+
+        wchar_t menuDetection[96]{};
+        FormatValuePair(L"fullscreenMenuDetection",
+            (fg.flags & 0x10u) ? L"On" : L"Off",
+            (fg.forwardedFlags & 0x10u) ? L"On" : L"Off",
+            menuDetection, _countof(menuDetection));
+
+        wchar_t retention[96]{};
+        FormatValuePair(L"retainResourcesWhenOff",
+            (fg.flags & 0x08u) ? L"On" : L"Off",
+            (fg.forwardedFlags & 0x08u) ? L"On" : L"Off",
+            retention, _countof(retention));
+
         if (!detailed) {
             swprintf_s(line, lineCount,
-                L"%sslDLSSGSetOptions #%ld: requested mode=%s (%u), "
-                L"forwarded mode=%s (%u), "
-                L"requested framesToGenerate=%u (%uX), forwarded framesToGenerate=%u (%uX), "
-                L"requested fullscreenMenuDetection=%s, forwarded fullscreenMenuDetection=%s, "
-                L"requested retainResourcesWhenOff=%s, forwarded retainResourcesWhenOff=%s, result=%ld",
-                prefix, event.sequence,
-                FgModeName(fg.mode), fg.mode,
-                FgModeName(fg.forwardedMode), fg.forwardedMode,
-                fg.generatedFrames, fg.generatedFrames + 1,
-                fg.forwardedGeneratedFrames, fg.forwardedGeneratedFrames + 1,
-                (fg.flags & 0x10u) ? L"On" : L"Off",
-                (fg.forwardedFlags & 0x10u) ? L"On" : L"Off",
-                (fg.flags & 0x08u) ? L"On" : L"Off",
-                (fg.forwardedFlags & 0x08u) ? L"On" : L"Off",
-                event.result);
+                L"%sslDLSSGSetOptions #%ld: %s, %s, %s, %s, result=%ld",
+                prefix, event.sequence, mode, frames, menuDetection, retention, event.result);
             return;
         }
+
+        wchar_t requestedFlags[24]{};
+        wchar_t forwardedFlags[24]{};
+        wchar_t flags[96]{};
+        swprintf_s(requestedFlags, L"0x%08X", fg.flags);
+        swprintf_s(forwardedFlags, L"0x%08X", fg.forwardedFlags);
+        FormatValuePair(L"flags", requestedFlags, forwardedFlags, flags, _countof(flags));
+
         float targetFps = 0;
         memcpy(&targetFps, &fg.targetFrameRateBits, sizeof(targetFps));
         const wchar_t* overrideMarker =
@@ -350,26 +380,15 @@ void FormatFgDisplayLine(const CapturedReflexEvent& event, bool newState,
         }
         swprintf_s(line, lineCount,
             L"%sslDLSSGSetOptions #%ld: viewport=%u, version=%u, "
-            L"requested mode=%s (%u), forwarded mode=%s (%u), "
-            L"requested framesToGenerate=%u (%uX), "
-            L"forwarded framesToGenerate=%u (%uX), "
-            L"requested flags=0x%08X, forwarded flags=0x%08X%s "
-            L"[requested fullscreenMenuDetection=%s, forwarded fullscreenMenuDetection=%s, "
-            L"requested retainResourcesWhenOff=%s, forwarded retainResourcesWhenOff=%s, "
+            L"%s, %s, %s%s "
+            L"[%s, %s, "
             L"dynamicResolution=%s, showOnlyInterpolated=%s, requestVRAM=%s], "
             L"dynamicRes=%ux%u, backBuffers=%u, inputSize=%ux%u, backbufferSize=%ux%u, "
             L"bufferFormats[color=%u mvec=%u depth=%u hudless=%u UI=%u], "
             L"errorCallback=%s%s, result=%ld",
             prefix, event.sequence, fg.viewport, fg.optionsVersion,
-            FgModeName(fg.mode), fg.mode,
-            FgModeName(fg.forwardedMode), fg.forwardedMode,
-            fg.generatedFrames, fg.generatedFrames + 1,
-            fg.forwardedGeneratedFrames, fg.forwardedGeneratedFrames + 1,
-            fg.flags, fg.forwardedFlags, overrideMarker,
-            (fg.flags & 0x10u) ? L"On" : L"Off",
-            (fg.forwardedFlags & 0x10u) ? L"On" : L"Off",
-            (fg.flags & 0x08u) ? L"On" : L"Off",
-            (fg.forwardedFlags & 0x08u) ? L"On" : L"Off",
+            mode, frames, flags, overrideMarker,
+            menuDetection, retention,
             (fg.flags & 0x02u) ? L"On" : L"Off",
             (fg.flags & 0x01u) ? L"On" : L"Off",
             (fg.flags & 0x04u) ? L"On" : L"Off",
