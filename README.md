@@ -101,10 +101,11 @@ Reflex FPS targets use `frameLimitUs = round(1,000,000 / FPS)` (165 FPS → 6061
 - **Resident Evil Requiem is a third successful case:** the Steam D3D12/RE Engine build kept FG operating across tested main-menu, map, inventory, and video-playing menu transitions. A live **After success on → off → on** comparison captured the same game-requested `Off` forwarded as `On` when enabled and as `Off` when disabled.
 - **It can also fail:** Deadzone: Rogue and Satisfactory stopped FG despite accepted overridden requests. **Cyberpunk 2077 and The Witcher 3 Remastered did not retain FG in their commonly used gameplay menus** with Off overridden.
 - **Sometimes there is nothing to override:** Dawnwalker, The Talos Principle 2, and **Marvel's Spider-Man 2** maintain FG natively through tested menus. Spider-Man 2 never requested FG Off in its captured session; its 3X multiplier override and Reflex limiter both worked.
+- **One game can do both:** **The Last of Us Part II Remastered** leaves FG running in its animated main menu, successfully maintains FG with the Off override in the paused in-game menu, but still stops FG on loading screens despite forwarding On. Its explicit Reflex frame-limit override worked.
 - **MFG multiplier overrides are a separate capability:** Satisfactory and other games accepted multipliers beyond exposed menu choices; unsupported requests can be rejected or disengage FG, with differing fallback behavior.
 - **API acceptance is not measured output:** No Man's Sky accepted a Reflex interval that did not govern presentation. A successful FG SetOptions call similarly does not prove continued generation.
 
-See [FG continuation comparisons](docs/TestFindings.md#fg-off-override-cross-title-outcomes), [Spider-Man 2 testing and shutdown crash](docs/TestFindings.md#marvels-spider-man-2-steam--d3d12--proprietary-engine), [detailed game tests](docs/TestFindings.md#per-game-results), and [Requiem's PresentMon evidence](docs/TestFindings.md#a-plague-tale-requiem-gog--d3d12--proprietary-engine).
+See [FG continuation comparisons](docs/TestFindings.md#fg-off-override-cross-title-outcomes), [The Last of Us Part II Remastered's mixed FG outcome](docs/TestFindings.md#the-last-of-us-part-ii-remastered-steam--d3d12--proprietary-engine), [Spider-Man 2 testing and shutdown crash](docs/TestFindings.md#marvels-spider-man-2-steam--d3d12--proprietary-engine), [detailed game tests](docs/TestFindings.md#per-game-results), and [Requiem's PresentMon evidence](docs/TestFindings.md#a-plague-tale-requiem-gog--d3d12--proprietary-engine).
 
 ## Tested games
 
@@ -129,6 +130,7 @@ Observations below are specific to tested builds, not guarantees of compatibilit
 | Deadzone: Rogue | Steam / D3D12 / UE5 | **FG stopped despite Off → On returning success.** |
 | The Talos Principle 2 | Steam / D3D12 / UE5 | Explicit limiter works; menus keep FG enabled without the Off override. |
 | Marvel's Spider-Man 2 | Steam / D3D12 / Proprietary Engine | **FG stayed On natively through menus**; 3X override and Reflex limiter worked; three shutdown access violations, including Reflex-only runs without overrides. |
+| The Last of Us Part II Remastered | Steam / D3D12 / Proprietary Engine | **Mixed FG result:** native FG in the animated main menu; Off → On preserves FG in paused gameplay menus, not loading screens. Reflex frame-limit override works; GetState reports **4X maximum**. |
 
 ## Interception architecture
 
@@ -150,4 +152,4 @@ Modern Streamline FG probing uses the existing module-wide resolver and can be s
 
 **FG presentation filtering:** Compact State changes mode still compares the complete captured FG state, suppressing changes only to fields hidden from the compact view. Repetition summaries reference the previous displayed API call number (plus viewport for FG), not necessarily identical full states throughout. Changing detailed FG display while running flushes pending counts and prints a snapshot without issuing another Streamline call.
 
-Further experiments concern why FG Off → On succeeds in Pragmata, Hogwarts Legacy, and Resident Evil Requiem but fails in other integrations. Spider-Man 2, Dawnwalker, and The Talos Principle 2 instead keep FG enabled without menu-related Off requests; the resource-lifecycle and presentation interactions beyond accepted API calls remain open. See [Test Findings](docs/TestFindings.md).
+Further experiments concern why FG Off → On succeeds in Pragmata, Hogwarts Legacy, and Resident Evil Requiem but fails in other integrations. **The Last of Us Part II Remastered is scene-dependent:** it works in paused gameplay menus but does not keep FG running during loading. Spider-Man 2, Dawnwalker, and The Talos Principle 2 keep FG enabled without menu-related Off requests; the resource-lifecycle and presentation interactions beyond accepted API calls remain open. See [Test Findings](docs/TestFindings.md).

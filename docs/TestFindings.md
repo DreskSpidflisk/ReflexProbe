@@ -74,8 +74,9 @@ Modern Streamline FG probing can convert a game's `slDLSSGSetOptions` `Off` requ
 | **Blood of the Dawnwalker** | Normal tested menu navigation already kept FG active. | Not an Off-override success. |
 | **The Talos Principle 2** | Menus ordinarily kept FG active with the Off override disabled. | Not an Off-override success. |
 | **Marvel's Spider-Man 2** | **FG remains On natively during menu navigation.** No FG Off requests were captured, with the experimental Off override disabled. | Steam/D3D12, proprietary engine; working Reflex limiter and 3X FG multiplier override. |
+| **The Last of Us Part II Remastered** | **Mixed result:** animated 3D main menu retains FG natively; **After success** Off → On override keeps FG active in paused gameplay menus, but not on loading screens. | Steam/D3D12/proprietary engine; GetState **4X maximum**; working Reflex limiter. Off → On setters returned `result=0` during the override-enabled interval. |
 
-The intercepted boundary is a game-requested FG configuration call, **not** complete control of resource lifetime, engine enablement, and presentation. **Pragmata, Hogwarts Legacy, and Resident Evil Requiem** maintained FG through overridden Off calls. **Dawnwalker, The Talos Principle 2, and Spider-Man 2** kept FG on natively during tested menu navigation. Other games failed to keep FG on even with successful forwarded requests.
+The intercepted boundary is a game-requested FG configuration call, **not** complete control of resource lifetime, engine enablement, and presentation. **Pragmata, Hogwarts Legacy, and Resident Evil Requiem** maintained FG through overridden Off calls. **Dawnwalker, The Talos Principle 2, and Spider-Man 2** kept FG on natively during tested menu navigation. **The Last of Us Part II Remastered** demonstrated both native FG continuation and a scene-dependent Off override: successful in paused gameplay menus but unsuccessful during loading. Other games failed to keep FG on even with successful forwarded requests.
 
 ### Fixed MFG multiplier limits: Dawnwalker and Indiana Jones (October 11, 2026)
 
@@ -323,6 +324,36 @@ Changing the exposed 2X / 3X / 4X Frame Generation multiplier did not itself pro
 
 **FG Off override success:** in the user's testing, overriding the game's temporary **FG Off** requests to **On** successfully kept DLSS Frame Generation operating throughout **all tested menus**, just as observed in Pragmata. Hogwarts is therefore a second concrete positive example of choosing to keep FG active during ordinary menu navigation. The game's **heavily customized UE4 integration** is substantially unlike a stock UE4 implementation, so this result must **not** be generalized to UE4 titles as a group. This records continued FG operation throughout the tested menus; **Always** was not separately exercised.
 
+### The Last of Us Part II Remastered (Steam / D3D12 / Proprietary Engine)
+
+**October 14, 2026 — mixed FG Off override outcome, working Reflex limiter.** The PC version launched on **April 3, 2025**, with ordinary Frame Generation supported but **without native Multi Frame Generation**. Naughty Dog / Nixxes added MFG for supported RTX 50-series cards in [PC Patch 1.4, May 19, 2025](https://feedback.naughtydog.com/hc/en-us/articles/37637021167124-The-Last-of-Us-Part-II-Remastered-PC-Patch-1-4), alongside DLSS 4 Transformer upscaling and a **Max Generated Frames** setting. This preliminary experiment used the Steam build, D3D12, and the game's proprietary engine.
+
+**Acquisition and capabilities:** **Watch + Inject** acquired the game process `tlou-ii.exe`. The first Reflex backend discovery initially lacked a module path, but the actual `slReflexSetOptions` interception identified `sl.reflex.dll` **2.7.2.0**, resolved via **`tlou-ii.exe direct IAT`**. FG `sl.dlss_g.dll` also reported **2.7.2.0** through the same direct-IAT path. Both `slDLSSGSetOptions` and optional `slDLSSGGetState` were acquired. GetState on viewport **0** reported `stateVersion=3`, `status=OK`, `maxFramesToGenerate=3` (**4X maximum**), and successful results.
+
+**Reflex:** The game submitted `mode=On + Boost, frameLimitUs=0` and ReflexProbe forwarded **6329 µs (~158.003 FPS)** with `result=0`. The tester confirmed that the explicit Reflex frame limit worked. Reflex Sleep call counting was **disabled at acquisition**, so this capture provides no Sleep-call cadence measurements.
+
+**Three FG behaviors within one game:**
+
+- **Animated main menu:** The game's opening menu contains a continuously rendered 3D boat scene, and **FG remained enabled natively** without needing to override Off.
+- **Paused gameplay menu:** Pressing Escape normally stopped FG. Enabling **Override FG Off / After success** kept FG operating in that menu. The tester also explored backpack, notes, tutorial images, and other game/menu screens; the in-game menu override worked across those observed interactions. No video-playback menu was encountered.
+- **Loading screens:** The game disabled FG during loading. **Forcing an Off request to On did not keep FG operating** through the loading transition.
+
+**Captured mode history:** The first successful native `On` configuration established history on viewport **0**. With **Override FG Off** initially disabled, the game made ordinary Off and On transitions. Enabling **After success** at **13:56:53** then changed the forwarded mode for subsequent Off calls:
+
+```text
+13:55:46  FG SetOptions #1:    mode=On (1),  framesToGenerate=2 (3X), result=0
+13:56:43  FG SetOptions #5056: mode=Off (0), framesToGenerate=2 (3X), result=0
+13:56:46  FG SetOptions #5474: mode=On (1),  framesToGenerate=2 (3X), result=0
+13:56:48  FG SetOptions #5611: mode=Off (0), framesToGenerate=2 (3X), result=0
+13:56:53  FG policy: Override FG Off / After success enabled
+13:56:53  FG SetOptions #6325: mode=Off (0) -> On (1), framesToGenerate=2 (3X), result=0
+13:56:58  FG SetOptions #6532: mode=Off (0) -> On (1), framesToGenerate=2 (3X), result=0
+```
+
+The game itself submitted **`framesToGenerate=2` (3X)** throughout these sampled states. ReflexProbe's fixed multiplier policy also selected **3X**, so this capture does **not** demonstrate a changed multiplier; it verifies the **Off → On mode substitution**. The game already requested **`fullscreenMenuDetection=Off`** and **`retainResourcesWhenOff=On`**; those flags appeared unchanged under the selected overrides. The loading failure despite accepted Off → On requests distinguishes **successful SetOptions forwarding** from FG actually running.
+
+**Session end:** The log showed **7,005 or more FG SetOptions calls** during the experiment and ended with `Target exited with code 1`. No crash diagnosis is inferred from that exit code alone. The GetState stream reported `1 repeated calls since ... #1`, but the State changes display did not establish a continuous physically presented/generated frame count. The main outcome is an intentionally **mixed, scene-dependent FG continuation result**, not a blanket failure of the hook.
+
 ### Marvel's Spider-Man 2 (Steam / D3D12 / Proprietary Engine)
 
 **October 14, 2026 — native FG continuation, working Reflex limiter and 3X override.** The Steam PC release launched **January 30, 2025** without Multi Frame Generation, although ordinary DLSS Frame Generation and Ray Reconstruction were supported. [Patch 10, May 22, 2025](https://steamcommunity.com/ogg/2651280/announcements/detail/530973313390870871), added NVIDIA DLSS 4 Transformer support, **Multi Frame Generation**, and the **Max Generated Frames** setting for supported RTX 50-series GPUs. The tested later Windows executable reports version **2.810.0.0** in Event Viewer. The PC port uses Insomniac's proprietary engine, and a launcher is integrated into the same `Spider-Man2.exe` as the renderer.
@@ -452,7 +483,7 @@ Earlier diagnostic builds had startup-global `--wrap-reflex-sleep` and `--no-wra
 
 ### Remaining experimental questions
 
-ReflexProbe's direct `slDLSSGSetOptions` and optional `slDLSSGGetState` interception is **implemented**, not future work. Outstanding questions concern why **Pragmata, Hogwarts Legacy, and Resident Evil Requiem** maintain FG after forced active requests while **Deadzone: Rogue, Satisfactory, Cyberpunk 2077, and The Witcher 3 Remastered** do not. **Dawnwalker, The Talos Principle 2, and Marvel's Spider-Man 2** form a separate group that never requested FG Off during tested menu navigation. Independent Reflex state changes, game-managed resource lifetime, and actual presentation remain difficult to isolate from an accepted configuration call alone. Overriding retention does not block `slFreeResources()`.
+ReflexProbe's direct `slDLSSGSetOptions` and optional `slDLSSGGetState` interception is **implemented**, not future work. Outstanding questions concern why **Pragmata, Hogwarts Legacy, and Resident Evil Requiem** maintain FG after forced active requests while **Deadzone: Rogue, Satisfactory, Cyberpunk 2077, and The Witcher 3 Remastered** do not. **The Last of Us Part II Remastered** adds a within-game contrast: an Off override works in paused gameplay menus but does not sustain FG during loading. **Dawnwalker, The Talos Principle 2, and Marvel's Spider-Man 2** form a separate group that never requested FG Off during tested menu navigation. Independent Reflex state changes, game-managed resource lifetime, and actual presentation remain difficult to isolate from an accepted configuration call alone. Overriding retention does not block `slFreeResources()`.
 
 Additional tests could investigate 5X/6X support limits, NVIDIA driver-profile interference, and genuine capabilities of legacy Streamline implementations. Native Vulkan `VK_NV_low_latency2` interception and SL1 Sleep counting are not currently implemented.
 
