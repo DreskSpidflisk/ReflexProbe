@@ -74,6 +74,7 @@ using PFunLegacySetFeatureConstants = bool(uint32_t feature, const void* constan
 using PFunLegacyPluginGetFunction = void* (const char* functionName);
 using PFunLegacyPluginSetConstants = bool(const void* constants, uint32_t frameIndex, uint32_t id);
 using PFunGetProcAddress = FARPROC (WINAPI)(HMODULE module, LPCSTR procName);
+using PFunSlFreeResources = sl::Result(sl::Feature feature, const sl::ViewportHandle& viewport);
 using PFunNvapiQueryInterface = void* (__cdecl)(uint32_t interfaceId);
 using PFunNvapiD3DSetSleepMode = int32_t (__cdecl)(void* device, void* params);
 using PFunNvapiD3DSleep = int32_t (__cdecl)(void* device);
@@ -172,6 +173,7 @@ PFun_slReflexSetOptions* g_realReflexSetOptions = nullptr;
 PFun_slReflexSleep* g_realReflexSleep = nullptr;
 PFun_slDLSSGSetOptions* g_realFgSetOptions = nullptr;
 PFun_slDLSSGGetState* g_realFgGetState = nullptr;
+PFunSlFreeResources* g_realSlFreeResources = nullptr;
 PFunLegacySetFeatureConstants* g_realLegacySetFeatureConstants = nullptr;
 PFunLegacyPluginGetFunction* g_realLegacyPluginGetFunction = nullptr;
 PFunLegacyPluginSetConstants* g_realLegacyPluginSetConstants = nullptr;
@@ -440,7 +442,9 @@ void PublishFgEvent(LONG kind, const ReflexProbeProtocol::FgEventData& data, LON
 
     const LONG callSequence = kind == ReflexProbeProtocol::FgEventSetOptions
         ? InterlockedIncrement(&g_shared->fgSetCallSerial)
-        : InterlockedIncrement(&g_shared->fgGetCallSerial);
+        : (kind == ReflexProbeProtocol::FgEventGetState
+            ? InterlockedIncrement(&g_shared->fgGetCallSerial)
+            : InterlockedIncrement(&g_shared->fgFreeCallSerial));
     const LONG serial = InterlockedIncrement(&g_shared->eventSerial);
     const uint32_t index = static_cast<uint32_t>(serial - 1) % ReflexProbeProtocol::kEventCapacity;
     ReflexProbeProtocol::ReflexEvent& event = g_shared->events[index];
@@ -460,6 +464,28 @@ void PublishFgEvent(LONG kind, const ReflexProbeProtocol::FgEventData& data, LON
 
     MemoryBarrier();
     InterlockedExchange(&event.sequence, serial);
+}
+
+// Core Streamline export, not an FG feature-function resolver callback.
+// Always forward frees for features other than DLSS-G.
+sl::Result HookSlFreeResources(sl::Feature feature, const sl::ViewportHandle& viewport)
+{
+    PFunSlFreeResources* real = g_realSlFreeResources;
+    if (!real)
+        return sl::Result::eErrorNotInitialized;
+
+    const bool suppressed = feature == sl::kFeatureDLSS_G && g_shared &&
+        InterlockedCompareExchange(&g_shared->fgSuppressFreeResources, 0, 0) != 0;
+    const sl::Result result = suppressed
+        ? sl::Result::eOk : real(feature, viewport);
+    ReflexProbeProtocol::FgEventData data{};
+    data.viewport = static_cast<uint32_t>(viewport);
+    data.mode = static_cast<uint32_t>(feature); // feature ID in FreeResources events
+    data.flags = suppressed ? 1u : 0u; // skipped original, synthetic success
+    data.forwardedMode = feature == sl::kFeatureDLSS_G ? 1u : 0u;
+    PublishFgEvent(ReflexProbeProtocol::FgEventFreeResources, data,
+        static_cast<LONG>(result));
+    return result;
 }
 
 void CaptureFgOptions(const sl::DLSSGOptions& options, ReflexProbeProtocol::FgEventData& out)
@@ -974,6 +1000,13 @@ FARPROC WINAPI HookApplicationGetProcAddress(HMODULE module, LPCSTR procName)
 
     const wchar_t* moduleName = PathFileName(modulePath);
 
+    if (IsFgProbingEnabled() && strcmp(procName, "slFreeResources") == 0 &&
+        _wcsicmp(moduleName, L"sl.interposer.dll") == 0) {
+        g_realSlFreeResources = reinterpret_cast<PFunSlFreeResources*>(result);
+        InterlockedOr(&g_shared->fgFreeHookBits, 2);
+        return reinterpret_cast<FARPROC>(&HookSlFreeResources);
+    }
+
     if (IsReflexProbingEnabled() && strcmp(procName, "nvapi_QueryInterface") == 0 &&
         _wcsicmp(moduleName, L"nvapi64.dll") == 0) {
         g_realNvapiQueryInterface = reinterpret_cast<PFunNvapiQueryInterface*>(result);
@@ -1383,6 +1416,8 @@ bool PatchStreamlineImportsInModule(HMODULE module, bool& sawTarget)
 
     void* modernResolver = reinterpret_cast<void*>(GetProcAddress(interposer, "slGetFeatureFunction"));
     void* legacySetConstants = reinterpret_cast<void*>(GetProcAddress(interposer, "slSetFeatureConstants"));
+    void* freeResources = IsFgProbingEnabled()
+        ? reinterpret_cast<void*>(GetProcAddress(interposer, "slFreeResources")) : nullptr;
     const bool useLegacyPublicPath = IsReflexProbingEnabled() &&
         IsLegacyStreamlineInterposer(interposer) && legacySetConstants != nullptr;
 
@@ -1398,6 +1433,19 @@ bool PatchStreamlineImportsInModule(HMODULE module, bool& sawTarget)
         auto* thunk = reinterpret_cast<IMAGE_THUNK_DATA64*>(base + descriptor->FirstThunk);
         for (; thunk->u1.Function; ++thunk) {
             void* current = reinterpret_cast<void*>(static_cast<uintptr_t>(thunk->u1.Function));
+
+            if (freeResources &&
+                (current == freeResources || current == reinterpret_cast<void*>(&HookSlFreeResources))) {
+                sawTarget = true;
+                if (current == reinterpret_cast<void*>(&HookSlFreeResources))
+                    continue;
+                g_realSlFreeResources = reinterpret_cast<PFunSlFreeResources*>(freeResources);
+                if (!PatchImportSlot(thunk, reinterpret_cast<void*>(&HookSlFreeResources),
+                        L"slFreeResources (DLSS-G experiment)"))
+                    return false;
+                InterlockedOr(&g_shared->fgFreeHookBits, 1);
+                continue;
+            }
 
             if (modernResolver &&
                 (current == modernResolver || current == reinterpret_cast<void*>(&HookGetFeatureFunction))) {

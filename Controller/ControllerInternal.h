@@ -56,7 +56,8 @@ enum ControlId : int {
     IDC_FG_MULTIPLIER_OVERRIDE,
     IDC_FG_MULTIPLIER_CHOICE,
     IDC_FG_OVERRIDE_OFF_AFTER_ON,
-    IDC_FG_OFF_MODE_CHOICE
+    IDC_FG_OFF_MODE_CHOICE,
+    IDC_FG_SUPPRESS_FREE_RESOURCES
 };
 
 struct FgPolicy {
@@ -70,6 +71,7 @@ struct FgPolicy {
     bool overrideRetention = false;
     bool retainResourcesWhenOff = true; // when checked, default radio is On
     bool wrapGetState = false;
+    bool suppressFreeResources = false;
 };
 
 enum CaptureMode : uint32_t {
@@ -122,6 +124,7 @@ struct AppState {
     HWND reflexProbing = nullptr;
     HWND fgGroup = nullptr;
     HWND fgProbing = nullptr;
+    HWND fgSuppressFreeResources = nullptr;
     HWND fgMultiplierOverride = nullptr;
     HWND fgMultiplierChoice = nullptr;
     HWND fgOverrideOffAfterOn = nullptr;
@@ -161,6 +164,7 @@ struct AppState {
 
     LONG lastHookState = -1;
     LONG lastFgHookBits = 0;
+    LONG lastFgFreeHookBits = 0;
     LONG lastEventSerial = 0;
     bool loggedInjectedBuild = false;
     bool rawUiBatchWarningShown = false;

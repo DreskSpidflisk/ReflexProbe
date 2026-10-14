@@ -10,7 +10,7 @@
 namespace ReflexProbeProtocol {
 
 constexpr uint32_t kMagic = 0x31505246; // "FRP1" little-endian.
-constexpr uint32_t kVersion = 14;
+constexpr uint32_t kVersion = 15;
 constexpr uint32_t kEventCapacity = 4096;
 constexpr uint32_t kPathChars = 1024;
 constexpr uint32_t kVersionChars = 64;
@@ -18,7 +18,7 @@ constexpr uint32_t kErrorChars = 512;
 
 // Human-readable source tag for rapid local rebuild/testing. The controller also hashes the
 // actual EXE and DLL on disk, so a stale or mismatched binary is obvious in copied logs.
-constexpr wchar_t kBuildTag[] = L"2026-10-12.32-fg-off-history";
+constexpr wchar_t kBuildTag[] = L"2026-10-14.33-test-suppress-fg-free";
 
 constexpr wchar_t kMappingPrefix[] = L"Local\\ReflexProbe.";
 
@@ -42,7 +42,8 @@ enum ReflexEventKind : LONG {
     ReflexEventSettings = 0,
     ReflexEventSleep = 1,
     FgEventSetOptions = 2,
-    FgEventGetState = 3
+    FgEventGetState = 3,
+    FgEventFreeResources = 4
 };
 
 // Only POD values cross the shared-memory boundary. FG-specific fields are
@@ -120,6 +121,7 @@ struct SharedState {
     volatile LONG fgMenuOverrideOn;
     volatile LONG fgRetentionOverrideEnabled;
     volatile LONG fgRetentionOverrideOn;
+    volatile LONG fgSuppressFreeResources; // experimental, live DLSS-G-only switch
 
     volatile LONG hookState;
     volatile LONG backend;
@@ -128,6 +130,8 @@ struct SharedState {
     volatile LONG sleepCallSerial;
     volatile LONG fgSetCallSerial;
     volatile LONG fgGetCallSerial;
+    volatile LONG fgFreeCallSerial;
+    volatile LONG fgFreeHookBits; // 1 = direct IAT slFreeResources; 2 = dynamic resolver
     volatile LONG fgHookBits; // 1 = SetOptions resolved; 2 = GetState resolved.
 
     wchar_t targetPath[kPathChars];

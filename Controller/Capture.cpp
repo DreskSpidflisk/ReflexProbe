@@ -673,9 +673,26 @@ void UpdateCurrentFgState(const CapturedReflexEvent& event)
     }
 }
 
+void FormatFgFreeResourcesEvent(const CapturedReflexEvent& event,
+                                wchar_t* line, size_t lineCount)
+{
+    swprintf_s(line, lineCount,
+        L"slFreeResources #%ld: feature=%s (%u), viewport=%u, %s, result=%ld%s",
+        event.sequence,
+        event.fg.forwardedMode ? L"DLSS-G" : L"other",
+        event.fg.mode, event.fg.viewport,
+        event.fg.flags ? L"SUPPRESSED" : L"forwarded",
+        event.result,
+        event.fg.flags ? L" (synthetic success; original NOT called)" : L"");
+}
+
 bool AppendCapturedEventToBuffer(TextBuffer& buffer, const CapturedReflexEvent& event, bool newState)
 {
     wchar_t line[512]{};
+    if (event.kind == ReflexProbeProtocol::FgEventFreeResources) {
+        FormatFgFreeResourcesEvent(event, line, _countof(line));
+        return AppendTextBufferLineAtQpc(buffer, line, event.qpc);
+    }
     if (event.kind == ReflexProbeProtocol::FgEventSetOptions ||
         event.kind == ReflexProbeProtocol::FgEventGetState) {
         wchar_t fgLine[1024]{};
@@ -836,6 +853,16 @@ bool SetCaptureMode(CaptureMode mode)
 }
 void HandleCapturedReflexEvent(const CapturedReflexEvent& event)
 {
+    if (event.kind == ReflexProbeProtocol::FgEventFreeResources) {
+        if (CurrentCaptureMode() == CaptureModeRawDebug) {
+            CaptureRawDebugEvent(event);
+        } else {
+            wchar_t line[256]{};
+            FormatFgFreeResourcesEvent(event, line, _countof(line));
+            AppendDisplayLineAtQpc(line, event.qpc);
+        }
+        return;
+    }
     if (event.kind == ReflexProbeProtocol::FgEventSetOptions ||
         event.kind == ReflexProbeProtocol::FgEventGetState) {
         HandleCapturedFgEvent(event);
@@ -959,6 +986,14 @@ void PollSharedState()
         }
         g_app.lastFgHookBits = fgHookBits;
     }
+
+    const LONG freeHookBits = InterlockedCompareExchange(&g_app.shared->fgFreeHookBits, 0, 0);
+    const LONG newFreeHooks = freeHookBits & ~g_app.lastFgFreeHookBits;
+    if (newFreeHooks & 1)
+        AppendStatusLine(L"EXPERIMENT: slFreeResources direct-IAT interception active.");
+    if (newFreeHooks & 2)
+        AppendStatusLine(L"EXPERIMENT: slFreeResources dynamic-resolution interception active.");
+    g_app.lastFgFreeHookBits = freeHookBits;
 
     const LONG currentSerial = InterlockedCompareExchange(&g_app.shared->eventSerial, 0, 0);
     LONG first = g_app.lastEventSerial + 1;

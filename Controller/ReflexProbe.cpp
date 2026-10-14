@@ -143,6 +143,8 @@ FgPolicy ReadFgPolicyFromUi()
         policy.overrideRetention = Button_GetCheck(g_app.fgRetentionOverride) == BST_CHECKED;
         policy.retainResourcesWhenOff = Button_GetCheck(g_app.fgRetentionOn) == BST_CHECKED;
         policy.wrapGetState = Button_GetCheck(g_app.fgGetState) == BST_CHECKED;
+        policy.suppressFreeResources =
+            Button_GetCheck(g_app.fgSuppressFreeResources) == BST_CHECKED;
     }
     return policy;
 }
@@ -167,6 +169,8 @@ void ApplyFgPolicyToShared()
         policy.overrideRetention ? 1 : 0);
     InterlockedExchange(&g_app.shared->fgRetentionOverrideOn,
         policy.retainResourcesWhenOff ? 1 : 0);
+    InterlockedExchange(&g_app.shared->fgSuppressFreeResources,
+        policy.suppressFreeResources ? 1 : 0);
     InterlockedIncrement(&g_app.shared->configSequence);
     AppendStatusLine(policy.forceOnWhenAuto
         ? L"FG policy: Force Auto to On enabled; applies to next SetOptions call."
@@ -195,6 +199,9 @@ void ApplyFgPolicyToShared()
         : (policy.retainResourcesWhenOff
             ? L"FG policy: resource-retention override forced On (retained VRAM possible while Off)."
             : L"FG policy: resource-retention override forced Off."));
+    AppendStatusLine(policy.suppressFreeResources
+        ? L"EXPERIMENT: slFreeResources(DLSS-G) SUPPRESSED (synthetic success)."
+        : L"EXPERIMENT: slFreeResources(DLSS-G) forwarded normally.");
 }
 
 void ApplyPolicyToShared(bool logFrameLimit, bool logBoost)
@@ -267,6 +274,8 @@ void UpdateAcquisitionControls()
         EnableWindow(g_app.reflexProbing, !probeSelectionLocked);
     if (g_app.fgProbing)
         EnableWindow(g_app.fgProbing, !probeSelectionLocked);
+    if (g_app.fgSuppressFreeResources)
+        EnableWindow(g_app.fgSuppressFreeResources, fgEnabled && !watching);
     if (g_app.fgForceAutoOn)
         EnableWindow(g_app.fgForceAutoOn, fgEnabled && !watching);
     if (g_app.fgMultiplierOverride)
@@ -340,6 +349,7 @@ void CleanupTarget()
     g_app.processId = 0;
     g_app.lastHookState = -1;
     g_app.lastFgHookBits = 0;
+    g_app.lastFgFreeHookBits = 0;
     g_app.lastEventSerial = 0;
     g_app.loggedInjectedBuild = false;
     g_app.rawUiBatchWarningShown = false;
@@ -473,6 +483,7 @@ bool LaunchAndInject()
 
     g_app.lastHookState = -1;
     g_app.lastFgHookBits = 0;
+    g_app.lastFgFreeHookBits = 0;
     g_app.lastEventSerial = 0;
     g_app.loggedInjectedBuild = false;
     g_app.rawUiBatchWarningShown = false;
@@ -517,6 +528,9 @@ bool LaunchAndInject()
             : (fgPolicy.retainResourcesWhenOff
                 ? L"Initial FG resource-retention override: On (VRAM retained while FG Off)."
                 : L"Initial FG resource-retention override: Off."));
+        AppendStatusLine(fgPolicy.suppressFreeResources
+            ? L"EXPERIMENT: suppress slFreeResources(DLSS-G) enabled (synthetic success)."
+            : L"EXPERIMENT: suppress slFreeResources(DLSS-G) disabled; calls observed and forwarded.");
     }
     if (probeReflex && overrideEnabled && overrideUs) {
         swprintf_s(line, L"Initial override: %u us (%.3f FPS).", overrideUs,
@@ -792,6 +806,13 @@ void LayoutControls(int clientWidth, int clientHeight)
     if (g_app.fgProbing)
         MoveWindow(g_app.fgProbing, kMargin + 14, kFgGroupTop - 9,
             MeasureGroupHeadingWidth(g_app.fgProbing), 22, TRUE);
+    // Disposable experiment: checkbox at the far right of the FG group heading.
+    if (g_app.fgSuppressFreeResources) {
+        const int width = MeasureInlineCheckboxWidth(g_app.fgSuppressFreeResources);
+        MoveWindow(g_app.fgSuppressFreeResources,
+            clientWidth - kMargin - 12 - width, kFgGroupTop - 9,
+            width, 22, TRUE);
+    }
 
     // Compact one-line FG override layout, including both independent Off/On
     // radio groups. Text-derived widths reclaim the blank areas of fixed slots
@@ -986,6 +1007,14 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FG_PROBING),
             g_app.instance, nullptr);
         SetChildFont(g_app.fgProbing, font);
+
+        g_app.fgSuppressFreeResources = CreateWindowExW(0, L"BUTTON",
+            L"Suppress slFreeResources",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, window,
+            reinterpret_cast<HMENU>(IDC_FG_SUPPRESS_FREE_RESOURCES),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.fgSuppressFreeResources, font);
 
         g_app.fgForceAutoOn = CreateWindowExW(0, L"BUTTON",
             L"Force Auto to On",
@@ -1257,6 +1286,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             if (HIWORD(wParam) == CBN_SELCHANGE)
                 ApplyFgPolicyToShared();
             return 0;
+        case IDC_FG_SUPPRESS_FREE_RESOURCES:
         case IDC_FG_MULTIPLIER_OVERRIDE:
         case IDC_FG_OVERRIDE_OFF_AFTER_ON:
         case IDC_FG_FORCE_AUTO_ON:

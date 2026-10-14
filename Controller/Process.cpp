@@ -429,6 +429,7 @@ bool CreateSharedState(DWORD processId, const wchar_t* targetPath,
     g_app.shared->fgRetentionOverrideEnabled =
         probeDlssFg && fgPolicy.overrideRetention ? 1 : 0;
     g_app.shared->fgRetentionOverrideOn = fgPolicy.retainResourcesWhenOff ? 1 : 0;
+    g_app.shared->fgSuppressFreeResources = probeDlssFg && fgPolicy.suppressFreeResources ? 1 : 0;
     wcsncpy_s(g_app.shared->targetPath, _countof(g_app.shared->targetPath), targetPath, _TRUNCATE);
     return true;
 }
@@ -562,6 +563,9 @@ void LogInitialTargetPolicy(bool overrideEnabled, uint32_t overrideUs, bool forc
             : (fgPolicy.retainResourcesWhenOff
                 ? L"Initial FG resource-retention override: On (VRAM retained while FG Off)."
                 : L"Initial FG resource-retention override: Off."));
+        AppendStatusLine(fgPolicy.suppressFreeResources
+            ? L"EXPERIMENT: suppress slFreeResources(DLSS-G) enabled (synthetic success)."
+            : L"EXPERIMENT: suppress slFreeResources(DLSS-G) disabled; calls observed and forwarded.");
     }
 
     wchar_t line[256]{};
@@ -707,6 +711,7 @@ bool InjectMatchedProcess(const ProcessMatch& match,
 
     g_app.lastHookState = -1;
     g_app.lastFgHookBits = 0;
+    g_app.lastFgFreeHookBits = 0;
     g_app.lastEventSerial = 0;
     g_app.loggedInjectedBuild = false;
     g_app.rawUiBatchWarningShown = false;
