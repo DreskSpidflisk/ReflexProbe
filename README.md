@@ -67,7 +67,7 @@ All override checkboxes start **unchecked**. Unknown future options structure ve
 
 Once history exists, **both modes reuse the last successful active configuration** for subsequent Off requests. Successful native Auto/On calls refresh it; later Off calls and failed calls do not. History remembers the **game's original mode and `numFramesToGenerate`**, including zero, rather than the override's selected multiplier. Other enabled overrides take precedence on forwarding; there is **no fallback multiplier, synthetic call, or retry**.
 
-This is an experimental interception technique, **not a universal menu workaround**: [Pragmata](docs/TestFindings.md#pragmata-steam), [Hogwarts Legacy](docs/TestFindings.md#hogwarts-legacy-steam-d3d12--modern-streamline), and [Resident Evil Requiem](docs/TestFindings.md#resident-evil-requiem-steam-d3d12--re-engine) kept FG running with Off overridden in the tested transitions, whereas [other games did not](docs/TestFindings.md#fg-off-override-cross-title-outcomes). NVIDIA [documents](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideDLSS_G.md#64-disabling-frame-generation) that disabling FG can release resources; ReflexProbe does **not** intercept `slFreeResources()`. See [resource-retention and memory caveats](docs/TestFindings.md#fg-resource-retention-and-its-limits).
+This is an experimental interception technique, **not a universal menu workaround**: [Pragmata](docs/TestFindings.md#pragmata-steam--d3d12--re-engine), [Hogwarts Legacy](docs/TestFindings.md#hogwarts-legacy-steam--d3d12--ue4), and [Resident Evil Requiem](docs/TestFindings.md#resident-evil-requiem-steam--d3d12--re-engine) kept FG running with Off overridden in the tested transitions, whereas [other games did not](docs/TestFindings.md#fg-off-override-cross-title-outcomes). NVIDIA [documents](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideDLSS_G.md#64-disabling-frame-generation) that disabling FG can release resources; ReflexProbe does **not** intercept `slFreeResources()`. See [resource-retention and memory caveats](docs/TestFindings.md#fg-resource-retention-and-its-limits).
 
 ## Requirements and building
 
@@ -100,34 +100,35 @@ Reflex FPS targets use `frameLimitUs = round(1,000,000 / FPS)` (165 FPS → 6061
 - **Forced FG continuation can work:** Pragmata kept FG running through game-requested Off transitions forwarded as On; Steam's overlay showed generated output continuing without observed visual artifacts. Hogwarts Legacy also kept FG active across all tested menus in its heavily customized UE4 integration.
 - **Resident Evil Requiem is a third successful case:** the Steam D3D12/RE Engine build kept FG operating across tested main-menu, map, inventory, and video-playing menu transitions. A live **After success on → off → on** comparison captured the same game-requested `Off` forwarded as `On` when enabled and as `Off` when disabled.
 - **It can also fail:** Deadzone: Rogue and Satisfactory stopped FG despite accepted overridden requests. **Cyberpunk 2077 and The Witcher 3 Remastered did not retain FG in their commonly used gameplay menus** with Off overridden.
-- **Sometimes there is nothing to override:** Dawnwalker and The Talos Principle 2 have tested menus where the game already keeps FG running, independently of ReflexProbe's Off override.
+- **Sometimes there is nothing to override:** Dawnwalker, The Talos Principle 2, and **Marvel's Spider-Man 2** maintain FG natively through tested menus. Spider-Man 2 never requested FG Off in its captured session; its 3X multiplier override and Reflex limiter both worked.
 - **MFG multiplier overrides are a separate capability:** Satisfactory and other games accepted multipliers beyond exposed menu choices; unsupported requests can be rejected or disengage FG, with differing fallback behavior.
 - **API acceptance is not measured output:** No Man's Sky accepted a Reflex interval that did not govern presentation. A successful FG SetOptions call similarly does not prove continued generation.
 
-See [FG continuation comparisons](docs/TestFindings.md#fg-off-override-cross-title-outcomes), [detailed game tests](docs/TestFindings.md#per-game-results), and [Requiem's PresentMon evidence](docs/TestFindings.md#a-plague-tale-requiem-gog).
+See [FG continuation comparisons](docs/TestFindings.md#fg-off-override-cross-title-outcomes), [Spider-Man 2 testing and shutdown crash](docs/TestFindings.md#marvels-spider-man-2-steam--d3d12--proprietary-engine), [detailed game tests](docs/TestFindings.md#per-game-results), and [Requiem's PresentMon evidence](docs/TestFindings.md#a-plague-tale-requiem-gog--d3d12--proprietary-engine).
 
 ## Tested games
 
 Observations below are specific to tested builds, not guarantees of compatibility. Detailed evidence is in [TestFindings.md](docs/TestFindings.md#per-game-results).
 
-| Game / test target | Renderer / backend | Distinguishing observation |
+| Game / test target | Tested distribution / rendering API / engine | Distinguishing observation |
 | --- | --- | --- |
-| GSyncProbe | D3D11 / D3D12 / Vulkan | Controlled 240 Hz and 165/60/30 FPS override measurements. |
-| Cyberpunk 2077 | D3D12 / Streamline | FG Off override did **not** preserve generation in normal gameplay menus. |
-| The Witcher 3 Remastered | D3D12 / Streamline | FG probing showed 2X/3X/6X submissions; Off override did **not** preserve FG in normal gameplay menus. |
-| A Plague Tale: Requiem | D3D12 / Streamline 1.x | PresentMon captured ~158 → ~30 FPS collapse from forced Boost; choosing native Boost restored it. |
-| Blood of the Dawnwalker | D3D12 / Streamline | Fixed 2X–4X overrides work; FG already stays on in tested menus. |
-| Indiana Jones and the Great Circle | Vulkan / Streamline | GetState reports 4X maximum; rejected 5X/6X retained prior working 4X. |
-| No Man's Sky | Vulkan / Streamline | Accepted explicit Reflex limit did not control presentation. |
-| God of War (2018) | D3D11 / native NVAPI | Working explicit limiter with Reflex Off and zero observed Sleeps. |
-| DOOM: The Dark Ages | Vulkan / Streamline | Reflex CVar and PT/FG pacing transitions. |
-| Shadow Warrior 3 | Native NVAPI D3D | Exact-path Watch acquisition; working limiter with Reflex Off. |
-| Satisfactory | Streamline | Hidden menu 60 FPS limiter; multiplier override works; Off override did not preserve FG. |
-| Hogwarts Legacy | D3D12 / Streamline | **FG Off override successfully kept FG running across all tested menus** in its heavily customized UE4 integration; explicit limiter also worked with Reflex Off. |
-| Pragmata | D3D12 / Streamline | **FG continued operating through overridden game-requested Off calls.** |
-| Resident Evil Requiem | D3D12 / RE Engine / Streamline 2.8.0 | **FG Off → On successfully preserved generation throughout tested menus**; Watch acquisition, working Reflex cap, and GetState **4X maximum**. |
-| Deadzone: Rogue | Modern Streamline | **FG stopped despite Off → On returning success.** |
-| The Talos Principle 2 | UE5 / Streamline | Explicit limiter works; usual menus keep FG enabled without the Off override. |
+| GSyncProbe | Local / D3D11, D3D12, Vulkan / Test Harness | Controlled 240 Hz and 165/60/30 FPS override measurements. |
+| Cyberpunk 2077 | GOG / D3D12 / Proprietary Engine | FG Off override did **not** preserve generation in normal gameplay menus. |
+| The Witcher 3 Remastered | GOG / D3D12 / Proprietary Engine | FG probing showed 2X/3X/6X submissions; Off override did **not** preserve FG in normal gameplay menus. |
+| A Plague Tale: Requiem | GOG / D3D12 / Proprietary Engine | PresentMon captured ~158 → ~30 FPS collapse from forced Boost; choosing native Boost restored it. |
+| Blood of the Dawnwalker | GOG / D3D12 / UE5 | Fixed 2X–4X overrides work; FG already stays on in tested menus. |
+| Indiana Jones and the Great Circle | GOG / Vulkan / Motor | GetState reports 4X maximum; rejected 5X/6X retained prior working 4X. |
+| No Man's Sky | GOG / Vulkan / Proprietary Engine | Accepted explicit Reflex limit did not control presentation. |
+| God of War (2018) | GOG / D3D11 / Proprietary Engine | Working explicit limiter with Reflex Off and zero observed Sleeps. |
+| DOOM: The Dark Ages | Steam / Vulkan / id Tech 8 | Reflex CVar and PT/FG pacing transitions. |
+| Shadow Warrior 3 | GOG / D3D11 / UE4 | Exact-path Watch acquisition; working limiter with Reflex Off. |
+| Satisfactory | Steam / D3D12 / UE5 | Hidden menu 60 FPS limiter; multiplier override works; Off override did not preserve FG. |
+| Hogwarts Legacy | Steam / D3D12 / UE4 | **FG Off override successfully kept FG running across all tested menus** in its heavily customized UE4 integration; explicit limiter also worked with Reflex Off. |
+| Pragmata | Steam / D3D12 / RE Engine | **FG continued operating through overridden game-requested Off calls.** |
+| Resident Evil Requiem | Steam / D3D12 / RE Engine | **FG Off → On successfully preserved generation throughout tested menus**; Watch acquisition, working Reflex cap, and GetState **4X maximum**. |
+| Deadzone: Rogue | Steam / D3D12 / UE5 | **FG stopped despite Off → On returning success.** |
+| The Talos Principle 2 | Steam / D3D12 / UE5 | Explicit limiter works; menus keep FG enabled without the Off override. |
+| Marvel's Spider-Man 2 | Steam / D3D12 / Proprietary Engine | **FG stayed On natively through menus**; 3X override and Reflex limiter worked; three shutdown access violations, including Reflex-only runs without overrides. |
 
 ## Interception architecture
 
@@ -149,4 +150,4 @@ Modern Streamline FG probing uses the existing module-wide resolver and can be s
 
 **FG presentation filtering:** Compact State changes mode still compares the complete captured FG state, suppressing changes only to fields hidden from the compact view. Repetition summaries reference the previous displayed API call number (plus viewport for FG), not necessarily identical full states throughout. Changing detailed FG display while running flushes pending counts and prints a snapshot without issuing another Streamline call.
 
-Further experiments concern why FG Off → On succeeds in Pragmata, Hogwarts Legacy, and Resident Evil Requiem but fails to keep generation running in other integrations, along with the resource lifecycle and actual presentation behavior beyond accepted API calls. See [Test Findings](docs/TestFindings.md).
+Further experiments concern why FG Off → On succeeds in Pragmata, Hogwarts Legacy, and Resident Evil Requiem but fails in other integrations. Spider-Man 2, Dawnwalker, and The Talos Principle 2 instead keep FG enabled without menu-related Off requests; the resource-lifecycle and presentation interactions beyond accepted API calls remain open. See [Test Findings](docs/TestFindings.md).

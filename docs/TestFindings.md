@@ -60,21 +60,22 @@ In one DOOM PT + 2X-FG interval, **2,720 Sleeps over ~35 seconds (~77.7/s)** acc
 
 Modern Streamline FG probing can convert a game's `slDLSSGSetOptions` `Off` request into an active request. **After success** waits for a previous successful active configuration on that viewport. **Always** also tries immediately, forwarding the current game-submitted frame count (even zero) with our enabled overrides. A successful first forced Off → On may establish history. Once history exists, **both modes reuse the last successful active configuration** on later Off requests. Successful native Auto/On calls refresh it; subsequent Off calls and failed calls never replace it. History stores the game's **original mode and `numFramesToGenerate`**, including zero, not the substituted multiplier. There is no automatic 2X fallback or retry.
 
-**SetOptions `result=0` is not proof that Frame Generation continues.** Observations:
+**SetOptions `result=0` is not proof that Frame Generation continues.** The outcomes below distinguish successful overrides from games that keep FG active natively:
 
 | Game | FG Off override outcome | Qualification |
 | --- | --- | --- |
 | **Pragmata** | **Success:** Off requests forwarded as On returned `result=0`; Steam's overlay showed continued generation without visible artifacts. Aggressive initial activation also reportedly succeeded. | Verified positive case with overlay observation, specific to this integration. |
-| **Resident Evil Requiem** | **Success:** with **After success** enabled, tested menu/map/inventory/video-playing transitions retained FG when game `Off` was forwarded as `On`; disabling and re-enabling the override restored direct Off pass-through and forced-On forwarding respectively. | Steam D3D12/RE Engine build; game operation verified by the tester, with successful SetOptions calls and GetState reporting a **4X maximum**. Only tested menus are covered; **Always** was not tested. |
+| **Resident Evil Requiem** | **Success:** with **After success** enabled, menu/map/inventory/video-playing transitions retained FG when game `Off` was forwarded as `On`; toggling the override off and on changed the forwarded mode correspondingly. | Steam D3D12/RE Engine; GetState **4X maximum**; **After success** was exercised. |
 | **Hogwarts Legacy** | **Success:** overriding FG Off to On kept DLSS FG running throughout the tested menus. | User-observed success in a heavily customized UE4 integration; not a general statement about UE4 games or proof that the aggressive **Always** policy was needed. |
 | **Deadzone: Rogue** | **Failure despite `result=0`:** FG stopped; GetState presented-frame count dropped from three to one. | An accepted request did not preserve generated output. |
 | **Satisfactory** | **Failure:** forced On did not keep FG running; the game also changed Reflex state. | Cannot attribute the result to one mechanism alone. |
-| **Cyberpunk 2077** | **Failure in commonly used gameplay menus.** FG did not continue under forced On. | Not an exhaustive test of every possible scene or menu. |
+| **Cyberpunk 2077** | **Failure in gameplay menus:** FG did not continue under forced On. | GOG/D3D12. |
 | **The Witcher 3 Remastered** | **Failure in commonly used gameplay menus.** FG did not continue under forced On. | Separate from its valid MFG submissions. |
 | **Blood of the Dawnwalker** | Normal tested menu navigation already kept FG active. | Not an Off-override success. |
 | **The Talos Principle 2** | Menus ordinarily kept FG active with the Off override disabled. | Not an Off-override success. |
+| **Marvel's Spider-Man 2** | **FG remains On natively during menu navigation.** No FG Off requests were captured, with the experimental Off override disabled. | Steam/D3D12, proprietary engine; working Reflex limiter and 3X FG multiplier override. |
 
-The intercepted boundary is a game-requested FG configuration call, **not** complete control of resource lifetime, engine enablement, and presentation. **Pragmata, Hogwarts Legacy, and Resident Evil Requiem are the three documented FG-continuation successes** in this test set; their different integrations and the other failures do not establish NVIDIA internal mechanisms or an engine-wide compatibility rule.
+The intercepted boundary is a game-requested FG configuration call, **not** complete control of resource lifetime, engine enablement, and presentation. **Pragmata, Hogwarts Legacy, and Resident Evil Requiem** maintained FG through overridden Off calls. **Dawnwalker, The Talos Principle 2, and Spider-Man 2** kept FG on natively during tested menu navigation. Other games failed to keep FG on even with successful forwarded requests.
 
 ### Fixed MFG multiplier limits: Dawnwalker and Indiana Jones (October 11, 2026)
 
@@ -95,17 +96,19 @@ NVIDIA's [§1.1 total FG memory estimates](https://github.com/NVIDIA-RTX/Streaml
 
 ## Per-game results
 
-### GSyncProbe (controlled reference)
+Game headings consistently identify the **tested distribution / rendering API / engine**. A GOG binary remains categorized as GOG even when launched through another application. Proprietary engines are labeled generically; GSyncProbe is a local test harness. Streamline versions are recorded in the game findings.
+
+### GSyncProbe (Local / D3D11, D3D12, Vulkan / Test Harness)
 
 A controllable D3D11 / D3D12 / Vulkan reference target reproduced ~225 FPS on D3D at 240 Hz with Reflex, VSync, and G-SYNC, versus ~240 FPS on Vulkan without an equivalent automatic cap. It provided direct validation that replacing the explicit Reflex interval with **165, 60, or 30 FPS** changes measured presentation rate, including with Reflex Low Latency Off. Its baseline zero request must not be confused with a game-authored 225 FPS cap.
 
-### Cyberpunk 2077 (GOG)
+### Cyberpunk 2077 (GOG / D3D12 / Proprietary Engine)
 
 D3D12, modern Streamline. Repeated Reflex setter calls; all tested modes requested a zero explicit Reflex interval.
 
-**FG Off override:** in commonly used gameplay menus, forwarding On rather than the game's requested Off **did not keep FG running**. That does not rule out other menu or scene-specific behavior.
+**FG Off override:** in gameplay menus, forwarding On rather than the game's requested Off **did not keep FG running**.
 
-### The Witcher 3 Remastered
+### The Witcher 3 Remastered (GOG / D3D12 / Proprietary Engine)
 
 D3D12, modern Streamline. Reflex probing previously observed repeated Off/On/On + Boost settings with zero explicit interval.
 
@@ -115,9 +118,9 @@ Successful game requests included **2X** (`numFramesToGenerate=1`), **3X** (`=2`
 
 Entering/leaving menus produced explicit `Off` / `On` SetOptions calls. Fullscreen menu detection remained **unset** (`flags=0x00000000`) in the captures. UI recomposition was Yes when FG-On and No when FG-Off; updated multipliers appeared on returning to gameplay. Tens of thousands of identical SetOptions submissions were compressed as repetitions, separately from GetState and Reflex. Transient GetState presented-frame counts were not treated as persistent state changes.
 
-**FG Off override outcome:** in the commonly used gameplay menus, forwarding On over Off **did not keep FG running**. Not every specialized menu was evaluated. A monitor's ~225 FPS indicator from an earlier test was insufficient to identify actual rendered-versus-generated cadence; further output-rate measurement would require a suitable independent display metric.
+**FG Off override outcome:** in gameplay menus, forwarding On over Off **did not keep FG running**. A monitor's ~225 FPS indicator from an earlier test was insufficient to identify actual rendered-versus-generated cadence; further output-rate measurement would require a suitable independent display metric.
 
-### A Plague Tale: Requiem (GOG)
+### A Plague Tale: Requiem (GOG / D3D12 / Proprietary Engine)
 
 D3D12, legacy Streamline **1.0** plugin gateway. Setter calls roughly follow frame cadence and natively request zero interval in the tested modes. Reflex observation and explicit interval override work.
 
@@ -138,7 +141,7 @@ D3D12, legacy Streamline **1.0** plugin gateway. Setter calls roughly follow fra
 
 The immediate recovery when the game itself selected native On + Boost is particularly important: a visibly equivalent forwarded On + Boost mode and interval **did not produce equivalent runtime behavior** under interception. This is an SL1 Force Boost caveat, not a universal result for newer Streamline.
 
-### Blood of the Dawnwalker (GOG)
+### Blood of the Dawnwalker (GOG / D3D12 / UE5)
 
 UE5.5.3 local build, D3D12, modern dynamically resolved Streamline. Frame Generation enabled caused an Off -> On pair with zero intervals; Frame Generation disabled caused one Off call. With G-SYNC + forced VSync, the FG/Reflex-On case exhibited the familiar ~225 FPS at 240 Hz. **Watch + Inject is runtime-confirmed through GOG Galaxy**: the watcher detected the launcher-created executable, injected successfully, and caught the later sparse Reflex startup calls.
 
@@ -146,13 +149,13 @@ UE5.5.3 local build, D3D12, modern dynamically resolved Streamline. Frame Genera
 
 The game-local `sl.interposer.dll` reported **2.7.30.0**, while the NVIDIA NGX-loaded **`sl_dlss_g`** (and `sl_reflex`) plugin reported **2.14.0.0**. Tests used an **RTX 5090**, with the tester reporting NVIDIA driver **610.47**. **GetState interception was disabled**, so there is no captured `numFramesToGenerateMax` for Dawnwalker. The observed working ceiling of 4X suggests a title/runtime constraint, but file versions and result code 38 alone do not identify the exact cause. Do not generalize this title's FG-disengagement behavior to every game. **Normal tested Dawnwalker menus already kept FG running**, independently of an Off-to-On override; that is not evidence of a successful override.
 
-### No Man's Sky (GOG)
+### No Man's Sky (GOG / Vulkan / Proprietary Engine)
 
 Vulkan + modern Streamline with an independent Reflex control. ReflexProbe successfully intercepted **10,674** settings calls in one state interval while counting **0 `slReflexSleep` calls**. A forced nonzero `frameLimitUs` was accepted with a successful result but did not impose the requested presentation limit. The game's own limiter is separate and pre-FG. Zero Streamline sleeps is therefore a concrete difference from Indiana Jones, although it does not by itself prove why the limiter is ineffective.
 
-### Indiana Jones and the Great Circle (GOG)
+### Indiana Jones and the Great Circle (GOG / Vulkan / Motor)
 
-Vulkan + modern Streamline. Reflex/Frame Generation behavior is gated behind DLSS as the selected upscaler: when DLSS is not selected, the Frame Generation option is hidden and the observed Reflex path is effectively absent. With DLSS active, the game repeatedly submits Reflex On with a zero interval at high frequency. In one 158 FPS run ReflexProbe observed **3,856 settings calls and 3,854 `slReflexSleep` calls**, consistent with approximately one setter and one sleep call per rendered frame during the active gameplay interval. Force Boost and frame-limit override both work, while the game's own limiter remains a separate pre-FG limiter.
+Vulkan + modern Streamline, running MachineGames' **Motor** engine (a customized id Tech 7 fork). Reflex/Frame Generation behavior is gated behind DLSS as the selected upscaler: when DLSS is not selected, the Frame Generation option is hidden and the observed Reflex path is effectively absent. With DLSS active, the game repeatedly submits Reflex On with a zero interval at high frequency. In one 158 FPS run ReflexProbe observed **3,856 settings calls and 3,854 `slReflexSleep` calls**, consistent with approximately one setter and one sleep call per rendered frame during the active gameplay interval. Force Boost and frame-limit override both work, while the game's own limiter remains a separate pre-FG limiter.
 
 **October 11, 2026 — fixed FG multiplier override and GetState capture:** In the DRM-free GOG build, the game's selected multiplier was left at **2X** while ReflexProbe substituted 2X, 3X, 4X, 5X, and 6X. The local `sl.interposer.dll` reported **2.7.32.0**; NVIDIA NGX-loaded `sl_dlss_g` and `sl_reflex` plugins reported **2.14.0.0**. With optional `slDLSSGGetState` interception enabled, **every captured GetState call reported `numFramesToGenerateMax=3` (4X maximum)**, `status=OK`, and `result=0`. Raw capture retained **1,904 GetState calls and 1,904 SetOptions calls** with no missing ordinals. GetState's `numFramesActuallyPresented` (shown in ReflexProbe as `framesPresentedSincePreviousGetState`) followed accepted 2X/3X/4X SetOptions overrides with values **2/3/4**, even though the game's own GetState *input options* continued to say `framesToGenerate=1` (the selected 2X). The returned presentation statistic, not that caller-supplied input field, is the relevant evidence of effective output.
 
@@ -162,15 +165,15 @@ Forwarding **5X** (`numFramesToGenerate=4`) and **6X** (`=5`) returned **`38` (`
 
 **Scope:** `38` identifies invalid Streamline state; it is not a universal instruction to turn FG off. Indiana Jones's explicitly reported maximum of three generated frames explains why a request for four or five is unsupported in this tested integration, while Dawnwalker's precise limit remains unmeasured. Both games used an NGX feature plugin reporting 2.14.0.0; that common version is diagnostic context, not proof that the plugin version by itself imposes this limit.
 
-### God of War (2018)
+### God of War (2018) (GOG / D3D11 / Proprietary Engine)
 
 D3D11 + native NVAPI Reflex, independent of whether DLSS is enabled. Runtime-confirmed Off / On / On + Boost observation, with `NvAPI_D3D_SetSleepMode` called only when the menu setting changes. While Reflex was On, `NvAPI_D3D_Sleep` counts tracked approximately frame cadence; during the captured Reflex-Off interval the sleep count was **0**, yet the forced `minimumIntervalUs` limiter remained effective. This demonstrates that, in this shipped native-NVAPI integration on the tested driver, application-observed per-frame sleep calls are not required for the explicit limiter to remain active while low-latency mode is Off. Force Boost and `minimumIntervalUs` override both work.
 
-### Shadow Warrior 3 (GOG)
+### Shadow Warrior 3 (GOG / D3D11 / UE4)
 
 native NVAPI D3D Reflex. The outer `SW3.exe` is an Epic `BootstrapPackagedGame` wrapper, so Launch + Inject targets the wrong process and finds no Reflex path. Watch + Inject against the exact full path `SW3\Binaries\Win64\SW3.exe` catches the real game. SetSleepMode is submitted only on Reflex state changes; frame-limit override and Force Boost work. With Reflex Off, the captured Sleep count was **0** while the forced 6329 us (~158 FPS) limiter still worked. With Reflex On / On + Boost, Sleep counts were approximately frame-cadence. No Frame Generation path is present in the tested title.
 
-### Pragmata (Steam)
+### Pragmata (Steam / D3D12 / RE Engine)
 
 D3D12 + modern Streamline 2.8.0. Watch + Inject acquired the Steam-launched executable successfully on the tested Denuvo-protected build, the frame-limit override worked, and Reflex settings were submitted only on option changes while `slReflexSleep` continued at approximately rendered-frame cadence. The tested DRM configuration did not block ReflexProbe's injection/interception path; that observation is specific to this build and is not a claim about every Denuvo integration.
 
@@ -178,7 +181,7 @@ D3D12 + modern Streamline 2.8.0. Watch + Inject acquired the Steam-launched exec
 
 Pragmata also submitted an **initial Off call containing a nonzero native frame count** before any qualifying active state. The later **Always** policy permits forcing that first call On immediately rather than waiting for previous successful On/Auto history, and aggressive initial activation was also reported successful. That observation does not imply other games will behave the same way.
 
-### Resident Evil Requiem (Steam; D3D12 / RE Engine)
+### Resident Evil Requiem (Steam / D3D12 / RE Engine)
 
 **October 14, 2026 — successful FG Off-to-On continuation.** In the tested Steam release, **Watch + Inject** acquired `re9.exe` by its exact path and hooked the modern `slGetFeatureFunction` resolver through `re9.exe GetProcAddress IAT`. The game's `sl.interposer.dll`, `sl.reflex.dll`, and `sl.dlss_g.dll` reported **2.8.0.0**, the same reported Streamline version as the tested Pragmata integration. That version match alone does **not** establish identical RE Engine internals or explain their similar behavior.
 
@@ -198,15 +201,15 @@ Pragmata also submitted an **initial Off call containing a nonzero native frame 
 
 The independent fixed **3X** multiplier, **Force Auto to On**, **fullscreen-menu detection forced Off**, and **resource retention forced On** remained enabled; the fixed Reflex limit and Force Boost were also active. This comparison specifically demonstrates that the **Off checkbox changed the forwarded mode while the other selected policies remained constant**, rather than attributing continued generation to an untested single setting. All quoted setters returned success, but the tester's separate observations are what establish the **realized FG-continuation outcome**.
 
-**Observed result:** FG continued successfully when forcing On in the main menu, map, an inventory menu occupying roughly 30% of the screen, and multiple additional menus **including video playback**, with behavior comparable to Pragmata. This is a **successful FG Off override across the tested menu transitions**, not a claim that every possible screen or game build was exercised. Unlike the negative results in Cyberpunk 2077 and The Witcher 3 Remastered, ordinary game-requested menu Off calls could be overridden here while maintaining FG. This run establishes success for **After success**; it does **not** separately validate the aggressive **Always** startup mode.
+**Observed result:** FG continued successfully when forcing On in the main menu, map, an inventory menu occupying roughly 30% of the screen, and multiple additional menus **including video playback**, with behavior comparable to Pragmata. This is a **successful FG Off override across the observed menu transitions**. Unlike the negative results in Cyberpunk 2077 and The Witcher 3 Remastered, ordinary game-requested menu Off calls could be overridden here while maintaining FG. This run establishes success for **After success**; it does **not** separately validate the aggressive **Always** startup mode.
 
 **Additional diagnostics:** The first captured FG setter was game `mode=Off, framesToGenerate=1` (**2X**) while the fixed multiplier forwarded **2 generated frames (3X)**; mode remained Off because the Off override was not yet enabled. At **12:56:45**, another game `Off` call with native **2X** was forwarded as **On, 3X**, with the menu flag already Off and the retention flag changed from Off to On; it returned `result=0`. The session ended cleanly (`exit code 0`). The final diagnostics recorded **22,675 FG SetOptions calls**, **22,673 Reflex Sleep calls** since the first Reflex state, and a large GetState repetition run (**22,670 repeats since call #5**). Those high call counts are diagnostic context, **not** independent measurements of actual generated frames or their presentation rate. Transient GetState presentation counts were suppressed in State changes mode and must not be interpreted as a continuous FG presentation measurement.
 
-### Deadzone: Rogue
+### Deadzone: Rogue (Steam / D3D12 / UE5)
 
 **FG Off override failure despite `result=0`.** Intercepted game-requested `Off` was forwarded as `On` and the API accepted the call, but generation **stopped**. GetState's presented-frame statistic dropped from **three** during active FG to **one** after the disabling transition; other tester-observed performance/display behavior agreed. Accepted SetOptions does not guarantee a corresponding generated output. The exact engine or resource-lifecycle cause was not established.
 
-### DOOM: The Dark Ages (Steam; Vulkan / Streamline 2.11.1)
+### DOOM: The Dark Ages (Steam / Vulkan / id Tech 8)
 
 DOOM is now one of the strongest modern Streamline/Vulkan reference integrations.
 
@@ -238,7 +241,7 @@ That is nearly a 2X relationship, matching the separate Dawnwalker evidence and 
 
 The current interpretation is therefore **not** “Path Tracing breaks Reflex.” The better model is that Frame Generation / renderer / presentation state determines whether the explicit Reflex limiter visibly governs final output, while PT can expose a delayed or state-transition “grace window.” Direct FG telemetry is needed to distinguish those states cleanly instead of inferring them from output FPS alone.
 
-### Satisfactory (Steam; modern Streamline)
+### Satisfactory (Steam / D3D12 / UE5)
 
 Satisfactory exposed a real resolver-coverage hole in ReflexProbe rather than an environmental failure. The real engine process must be acquired through **Watch + Inject** because launching `FactoryGameSteam-Win64-Shipping.exe` directly fails; the bootstrapper is required even though the actual Reflex integration lives in the child engine process.
 
@@ -282,7 +285,7 @@ Captured Reflex-Off intervals produced **0 sleeps**. The active rates are consis
 
 **Later FG experiments:** Satisfactory's fixed multiplier override demonstrated **3X and 4X** working despite an exposed default 2X setting. Similar multipliers may also be selectable through Unreal Engine configuration files; the API intervention remains useful diagnostically. In contrast, forcing a game-requested **FG Off** to **On** **did not keep generation running**, even though the forwarded request was accepted. The game also changed Reflex mode during the transition, complicating attribution. An NVIDIA driver-profile override initially interfered with multiplier testing and was reset before the successful 3X/4X results were attributed to the forwarded settings.
 
-### The Talos Principle 2 (Steam; UE5 / modern Streamline)
+### The Talos Principle 2 (Steam / D3D12 / UE5)
 
 **October 12, 2026 — Reflex frame-limit override works.** The tested UE5 build accepted ReflexProbe's `frameLimitUs=6329` override (approximately **158.003 FPS**), and the tester confirmed that the **explicit Reflex frame limit actually governs the frame rate**. This is the original primary purpose of ReflexProbe, distinct from the later Frame Generation experiments. The captured Reflex transition from the game's `mode=Off, frameLimitUs=0` to `mode=On, frameLimitUs=0` was forwarded with the requested 6329 µs interval and, for On, Force Boost; both setter calls returned `result=0`.
 
@@ -292,7 +295,7 @@ The game originally shipped on **Unreal Engine 5**; its earlier Multi Frame Gene
 
 Watch + Inject acquired `Talos2-Win64-Shipping.exe` via the game's main `GetProcAddress` IAT. SetOptions used viewport **1**, while the intercepted GetState calls reported viewport **0**; that distinction prevents equating the displayed GetState transient presentation count with direct confirmation of the configured viewport's output.
 
-### Hogwarts Legacy (Steam; D3D12 / modern Streamline)
+### Hogwarts Legacy (Steam / D3D12 / UE4)
 
 Hogwarts Legacy is a useful historical bridge specimen: it shipped as a **heavily customized late Unreal Engine 4** title in February 2023 with the original RTX 40-series style of ordinary 2X Frame Generation, then later received modern Multi Frame Generation support after the RTX 50-series launch. The current tested build supports 2X / 3X / 4X Frame Generation once FG has been enabled; turning the user-facing FG setting from Off to On or fully back Off requires a restart, while switching between active multipliers does not. This settings-menu restart requirement is separate from the temporary FG Off requests the game issues around menus.
 
@@ -318,7 +321,26 @@ Despite those zero Sleep calls while Reflex was Off, ReflexProbe's forced nonzer
 
 Changing the exposed 2X / 3X / 4X Frame Generation multiplier did not itself produce a Reflex state change. This is consistent with FG policy changing independently while Reflex remains enabled.
 
-**FG Off override success:** in the user's testing, overriding the game's temporary **FG Off** requests to **On** successfully kept DLSS Frame Generation operating throughout **all tested menus**, just as observed in Pragmata. Hogwarts is therefore a second concrete positive example of choosing to keep FG active during ordinary menu navigation. The game's **heavily customized UE4 integration** is substantially unlike a stock UE4 implementation, so this result must **not** be generalized to UE4 titles as a group. This records the observed continued FG operation; it does not imply that every possible scene, every build, or the aggressive **Always** policy was separately validated.
+**FG Off override success:** in the user's testing, overriding the game's temporary **FG Off** requests to **On** successfully kept DLSS Frame Generation operating throughout **all tested menus**, just as observed in Pragmata. Hogwarts is therefore a second concrete positive example of choosing to keep FG active during ordinary menu navigation. The game's **heavily customized UE4 integration** is substantially unlike a stock UE4 implementation, so this result must **not** be generalized to UE4 titles as a group. This records continued FG operation throughout the tested menus; **Always** was not separately exercised.
+
+### Marvel's Spider-Man 2 (Steam / D3D12 / Proprietary Engine)
+
+**October 14, 2026 — native FG continuation, working Reflex limiter and 3X override.** The Steam PC release launched **January 30, 2025** without Multi Frame Generation, although ordinary DLSS Frame Generation and Ray Reconstruction were supported. [Patch 10, May 22, 2025](https://steamcommunity.com/ogg/2651280/announcements/detail/530973313390870871), added NVIDIA DLSS 4 Transformer support, **Multi Frame Generation**, and the **Max Generated Frames** setting for supported RTX 50-series GPUs. The tested later Windows executable reports version **2.810.0.0** in Event Viewer. The PC port uses Insomniac's proprietary engine, and a launcher is integrated into the same `Spider-Man2.exe` as the renderer.
+
+**Acquisition and capability:** Steam **Watch + Inject** captured the D3D12 process through `Spider-Man2.exe GetProcAddress IAT`. `sl.interposer.dll`, `sl.reflex.dll`, and `sl.dlss_g.dll` all reported **2.7.2.0**. Both FG SetOptions and optional GetState were intercepted; GetState on viewport **0**, `stateVersion=3`, returned **status OK**, `maxFramesToGenerate=3` (**4X maximum**) and `result=0`.
+
+**FG remains On natively in menus:** The game submitted **`mode=On` throughout the captured gameplay and menus**, with **no FG Off requests**; **Override FG Off was disabled**. FG therefore stayed active without needing an Off-to-On intervention. The game also submitted **`fullscreenMenuDetection=Off`** and **`retainResourcesWhenOff=Off`**. ReflexProbe independently forced resource retention On, but no game Off request occurred, so retention is not required to explain the observed continuity. The tester observed **no visual artifacts or menu-related FG stutter**.
+
+**Working overrides:** The initial game Reflex request `mode=On, frameLimitUs=0` was forwarded as **On + Boost** with **6329 µs (~158.003 FPS)**, returned `result=0`, and the explicit limiter worked. The FG fixed **3X** multiplier also worked, including while the game's requested multiplier changed from 2X to 4X:
+
+```text
+13:07:30  FG SetOptions #1:    mode=On, framesToGenerate=1 (2X) -> 2 (3X),
+                             fullscreenMenuDetection=Off, retainResourcesWhenOff=Off -> On, result=0
+13:08:54  FG SetOptions #4351: mode=On, framesToGenerate=3 (4X) -> 2 (3X),
+                             fullscreenMenuDetection=Off, retainResourcesWhenOff=Off -> On, result=0
+```
+
+**Reproducible shutdown access violation:** After a delayed **3–4-second** exit with no prior visual artifacts, the initial run exited with **3221225477 (`0xC0000005`)**. Windows Event Viewer identified **`sl.interposer.dll_unloaded`** version **2.7.2.0**, fault offset **`0x0003A8F1`**, in process **6532 (`0x1984`)**, matching the Watch-acquired game. Two further runs also crashed on shutdown: **Reflex probing and overrides enabled, FG probing disabled**, followed by **Reflex probing alone with no overrides and FG probing disabled**. Thus, **neither FG probing nor active overrides is necessary** for this shutdown crash. All runs still involved ReflexProbe injection, so the results do not isolate the cause to the uninstrumented game, Streamline, or the probe. The unloaded-module association is compatible with a module-lifetime/shutdown-order problem but does not prove one.
 
 ## Resolver discovery and regression
 
@@ -430,7 +452,7 @@ Earlier diagnostic builds had startup-global `--wrap-reflex-sleep` and `--no-wra
 
 ### Remaining experimental questions
 
-ReflexProbe's direct `slDLSSGSetOptions` and optional `slDLSSGGetState` interception is **implemented**, not future work. Outstanding questions concern why **Pragmata, Hogwarts Legacy, and Resident Evil Requiem** maintain FG after forced active requests while **Deadzone: Rogue, Satisfactory, Cyberpunk 2077, and The Witcher 3 Remastered** do not in the tested scenarios. Independent Reflex state changes, game-managed resource lifetime, and actual presentation remain difficult to isolate from an accepted configuration call alone. Overriding retention does not block `slFreeResources()`.
+ReflexProbe's direct `slDLSSGSetOptions` and optional `slDLSSGGetState` interception is **implemented**, not future work. Outstanding questions concern why **Pragmata, Hogwarts Legacy, and Resident Evil Requiem** maintain FG after forced active requests while **Deadzone: Rogue, Satisfactory, Cyberpunk 2077, and The Witcher 3 Remastered** do not. **Dawnwalker, The Talos Principle 2, and Marvel's Spider-Man 2** form a separate group that never requested FG Off during tested menu navigation. Independent Reflex state changes, game-managed resource lifetime, and actual presentation remain difficult to isolate from an accepted configuration call alone. Overriding retention does not block `slFreeResources()`.
 
 Additional tests could investigate 5X/6X support limits, NVIDIA driver-profile interference, and genuine capabilities of legacy Streamline implementations. Native Vulkan `VK_NV_low_latency2` interception and SL1 Sleep counting are not currently implemented.
 
