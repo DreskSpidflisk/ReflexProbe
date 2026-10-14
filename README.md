@@ -4,7 +4,7 @@ ReflexProbe is a Windows x64 tool for **observing and overriding NVIDIA Reflex a
 
 **Reflex probing** supports modern Streamline (2.x+), legacy Streamline 1.x, and native NVAPI D3D. It can override an explicit frame limit, force Reflex Boost, and optionally count application-level Reflex Sleep calls.
 
-**DLSS Frame Generation probing** supports modern Streamline, including Multi Frame Generation (MFG). It can inspect FG configuration and optional state queries, override fixed 2X–6X multipliers and selected flags, and experimentally **force FG On when a game requests Off**. The Off override can wait for an established successful active configuration or try immediately. **Accepted calls are not proof of generated output:** Pragmata continued FG when Off was overridden, but several other games did not.
+**DLSS Frame Generation probing** supports modern Streamline, including Multi Frame Generation (MFG). It can inspect FG configuration and optional state queries, override fixed 2X–6X multipliers and selected flags, and experimentally **force FG On when a game requests Off**. The Off override can wait for an established successful active configuration or try immediately. **Accepted calls are not proof of generated output:** both Pragmata and Hogwarts Legacy continued FG when Off was overridden, but several other games did not.
 
 ReflexProbe has **no overlay and writes no capture data to disk**. Its results are game- and integration-dependent; see [Test Findings](docs/TestFindings.md) for measurements, successes, failures, and limitations.
 
@@ -67,7 +67,7 @@ All override checkboxes start **unchecked**. Unknown future options structure ve
 
 Once history exists, **both modes reuse the last successful active configuration** for subsequent Off requests. Successful native Auto/On calls refresh it; later Off calls and failed calls do not. History remembers the **game's original mode and `numFramesToGenerate`**, including zero, rather than the override's selected multiplier. Other enabled overrides take precedence on forwarding; there is **no fallback multiplier, synthetic call, or retry**.
 
-This is an experimental interception technique, **not a universal menu workaround**: [Pragmata kept FG running](docs/TestFindings.md#pragmata-steam) with Off overridden, whereas [other games did not](docs/TestFindings.md#fg-off-override-cross-title-outcomes). NVIDIA [documents](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideDLSS_G.md#64-disabling-frame-generation) that disabling FG can release resources; ReflexProbe does **not** intercept `slFreeResources()`. See [resource-retention and memory caveats](docs/TestFindings.md#fg-resource-retention-and-its-limits).
+This is an experimental interception technique, **not a universal menu workaround**: [Pragmata](docs/TestFindings.md#pragmata-steam) and [Hogwarts Legacy](docs/TestFindings.md#hogwarts-legacy-steam-d3d12--modern-streamline) kept FG running with Off overridden, whereas [other games did not](docs/TestFindings.md#fg-off-override-cross-title-outcomes). NVIDIA [documents](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideDLSS_G.md#64-disabling-frame-generation) that disabling FG can release resources; ReflexProbe does **not** intercept `slFreeResources()`. See [resource-retention and memory caveats](docs/TestFindings.md#fg-resource-retention-and-its-limits).
 
 ## Requirements and building
 
@@ -97,7 +97,7 @@ Reflex FPS targets use `frameLimitUs = round(1,000,000 / FPS)` (165 FPS → 6061
 
 - **Explicit Reflex limits can outlast Reflex mode:** God of War, Shadow Warrior 3, and Hogwarts Legacy obeyed forced limits with Reflex **Off** and **zero observed Sleep calls** in those intervals. The downstream mechanism remains unidentified.
 - **Hidden limits exist:** Satisfactory requested **16,666 µs (~60 FPS)** in its main menu, which ReflexProbe overrode.
-- **Forced FG continuation can work:** Pragmata kept FG running through game-requested Off transitions forwarded as On; Steam's overlay showed generated output continuing without observed visual artifacts.
+- **Forced FG continuation can work:** Pragmata kept FG running through game-requested Off transitions forwarded as On; Steam's overlay showed generated output continuing without observed visual artifacts. **Hogwarts Legacy is another success:** the Off override kept FG active across all menus tested in its heavily customized UE4 integration.
 - **It can also fail:** Deadzone: Rogue and Satisfactory stopped FG despite accepted overridden requests. **Cyberpunk 2077 and The Witcher 3 Remastered did not retain FG in their commonly used gameplay menus** with Off overridden.
 - **Sometimes there is nothing to override:** Dawnwalker and The Talos Principle 2 have tested menus where the game already keeps FG running, independently of ReflexProbe's Off override.
 - **MFG multiplier overrides are a separate capability:** Satisfactory and other games accepted multipliers beyond exposed menu choices; unsupported requests can be rejected or disengage FG, with differing fallback behavior.
@@ -122,7 +122,7 @@ Observations below are specific to tested builds, not guarantees of compatibilit
 | DOOM: The Dark Ages | Vulkan / Streamline | Reflex CVar and PT/FG pacing transitions. |
 | Shadow Warrior 3 | Native NVAPI D3D | Exact-path Watch acquisition; working limiter with Reflex Off. |
 | Satisfactory | Streamline | Hidden menu 60 FPS limiter; multiplier override works; Off override did not preserve FG. |
-| Hogwarts Legacy | D3D12 / Streamline | Late UE4 MFG retrofit and working limiter with Reflex Off. |
+| Hogwarts Legacy | D3D12 / Streamline | **FG Off override successfully kept FG running across all tested menus** in its heavily customized UE4 integration; explicit limiter also worked with Reflex Off. |
 | Pragmata | D3D12 / Streamline | **FG continued operating through overridden game-requested Off calls.** |
 | Deadzone: Rogue | Modern Streamline | **FG stopped despite Off → On returning success.** |
 | The Talos Principle 2 | UE5 / Streamline | Explicit limiter works; usual menus keep FG enabled without the Off override. |
@@ -147,4 +147,4 @@ Modern Streamline FG probing uses the existing module-wide resolver and can be s
 
 **FG presentation filtering:** Compact State changes mode still compares the complete captured FG state, suppressing changes only to fields hidden from the compact view. Repetition summaries reference the previous displayed API call number (plus viewport for FG), not necessarily identical full states throughout. Changing detailed FG display while running flushes pending counts and prints a snapshot without issuing another Streamline call.
 
-Further experiments concern why FG Off → On succeeds in Pragmata but fails to keep generation running in other integrations, along with the resource lifecycle and actual presentation behavior beyond accepted API calls. See [Test Findings](docs/TestFindings.md).
+Further experiments concern why FG Off → On succeeds in Pragmata and Hogwarts Legacy but fails to keep generation running in other integrations, along with the resource lifecycle and actual presentation behavior beyond accepted API calls. See [Test Findings](docs/TestFindings.md).

@@ -64,7 +64,8 @@ Modern Streamline FG probing can convert a game's `slDLSSGSetOptions` `Off` requ
 
 | Game | FG Off override outcome | Qualification |
 | --- | --- | --- |
-| **Pragmata** | **Success:** Off requests forwarded as On returned `result=0`; Steam's overlay showed continued generation without visible artifacts. Aggressive initial activation also reportedly succeeded. | Strongest observed positive case, specific to this integration. |
+| **Pragmata** | **Success:** Off requests forwarded as On returned `result=0`; Steam's overlay showed continued generation without visible artifacts. Aggressive initial activation also reportedly succeeded. | Verified positive case with overlay observation, specific to this integration. |
+| **Hogwarts Legacy** | **Success:** overriding FG Off to On kept DLSS FG running throughout the tested menus. | User-observed success in a heavily customized UE4 integration; not a general statement about UE4 games or proof that the aggressive **Always** policy was needed. |
 | **Deadzone: Rogue** | **Failure despite `result=0`:** FG stopped; GetState presented-frame count dropped from three to one. | An accepted request did not preserve generated output. |
 | **Satisfactory** | **Failure:** forced On did not keep FG running; the game also changed Reflex state. | Cannot attribute the result to one mechanism alone. |
 | **Cyberpunk 2077** | **Failure in commonly used gameplay menus.** FG did not continue under forced On. | Not an exhaustive test of every possible scene or menu. |
@@ -72,7 +73,7 @@ Modern Streamline FG probing can convert a game's `slDLSSGSetOptions` `Off` requ
 | **Blood of the Dawnwalker** | Normal tested menu navigation already kept FG active. | Not an Off-override success. |
 | **The Talos Principle 2** | Menus ordinarily kept FG active with the Off override disabled. | Not an Off-override success. |
 
-The intercepted boundary is a game-requested FG configuration call, **not** complete control of resource lifetime, engine enablement, and presentation. Different observed outcomes do not establish NVIDIA internal mechanisms.
+The intercepted boundary is a game-requested FG configuration call, **not** complete control of resource lifetime, engine enablement, and presentation. **Pragmata and Hogwarts Legacy are the two documented FG-continuation successes** in this test set; their different integrations and the other failures do not establish NVIDIA internal mechanisms or an engine-wide compatibility rule.
 
 ### Fixed MFG multiplier limits: Dawnwalker and Indiana Jones (October 11, 2026)
 
@@ -268,7 +269,7 @@ Watch + Inject acquired `Talos2-Win64-Shipping.exe` via the game's main `GetProc
 
 ### Hogwarts Legacy (Steam; D3D12 / modern Streamline)
 
-Hogwarts Legacy is a useful historical bridge specimen: it shipped as a **late Unreal Engine 4** title in February 2023 with the original RTX 40-series style of ordinary 2X Frame Generation, then later received modern Multi Frame Generation support after the RTX 50-series launch. The current tested build supports 2X / 3X / 4X Frame Generation once FG has been enabled; enabling FG from Off requires a restart, while changing between the active multipliers does not. Turning FG fully Off again also requires a restart.
+Hogwarts Legacy is a useful historical bridge specimen: it shipped as a **heavily customized late Unreal Engine 4** title in February 2023 with the original RTX 40-series style of ordinary 2X Frame Generation, then later received modern Multi Frame Generation support after the RTX 50-series launch. The current tested build supports 2X / 3X / 4X Frame Generation once FG has been enabled; turning the user-facing FG setting from Off to On or fully back Off requires a restart, while switching between active multipliers does not. This settings-menu restart requirement is separate from the temporary FG Off requests the game issues around menus.
 
 The current build uses D3D12 and resolves modern Streamline through the main executable:
 
@@ -290,7 +291,9 @@ The more important Reflex behavior is the Off state. During a long captured Refl
 
 Despite those zero Sleep calls while Reflex was Off, ReflexProbe's forced nonzero `frameLimitUs` remained effective. This independently reproduces the same key result already seen in God of War's native NVAPI D3D11 path: **application-observed per-frame Reflex Sleep calls are not required for an already-configured explicit Reflex limiter to keep governing frame cadence**. Hogwarts extends that result to modern Streamline on D3D12.
 
-Changing the exposed 2X / 3X / 4X Frame Generation multiplier did not itself produce a Reflex state change. That is expected if Reflex remains continuously enabled while only DLSS-G policy changes, and makes Hogwarts a particularly valuable target for direct `slDLSSGSetOptions` / `slDLSSGGetState` observation.
+Changing the exposed 2X / 3X / 4X Frame Generation multiplier did not itself produce a Reflex state change. This is consistent with FG policy changing independently while Reflex remains enabled.
+
+**FG Off override success:** in the user's testing, overriding the game's temporary **FG Off** requests to **On** successfully kept DLSS Frame Generation operating throughout **all tested menus**, just as observed in Pragmata. Hogwarts is therefore a second concrete positive example of choosing to keep FG active during ordinary menu navigation. The game's **heavily customized UE4 integration** is substantially unlike a stock UE4 implementation, so this result must **not** be generalized to UE4 titles as a group. This records the observed continued FG operation; it does not imply that every possible scene, every build, or the aggressive **Always** policy was separately validated.
 
 ## Resolver discovery and regression
 
@@ -402,7 +405,7 @@ Earlier diagnostic builds had startup-global `--wrap-reflex-sleep` and `--no-wra
 
 ### Remaining experimental questions
 
-ReflexProbe's direct `slDLSSGSetOptions` and optional `slDLSSGGetState` interception is **implemented**, not future work. Outstanding questions concern why **Pragmata** maintains FG after a forced active request while **Deadzone: Rogue, Satisfactory, Cyberpunk 2077, and The Witcher 3 Remastered** do not in the tested scenarios. Independent Reflex state changes, game-managed resource lifetime, and actual presentation remain difficult to isolate from an accepted configuration call alone. Overriding retention does not block `slFreeResources()`.
+ReflexProbe's direct `slDLSSGSetOptions` and optional `slDLSSGGetState` interception is **implemented**, not future work. Outstanding questions concern why **Pragmata and Hogwarts Legacy** maintain FG after forced active requests while **Deadzone: Rogue, Satisfactory, Cyberpunk 2077, and The Witcher 3 Remastered** do not in the tested scenarios. Independent Reflex state changes, game-managed resource lifetime, and actual presentation remain difficult to isolate from an accepted configuration call alone. Overriding retention does not block `slFreeResources()`.
 
 Additional tests could investigate 5X/6X support limits, NVIDIA driver-profile interference, and genuine capabilities of legacy Streamline implementations. Native Vulkan `VK_NV_low_latency2` interception and SL1 Sleep counting are not currently implemented.
 
