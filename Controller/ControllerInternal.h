@@ -19,8 +19,8 @@ constexpr UINT_PTR kPollTimer = 1;
 constexpr UINT_PTR kWatchTimer = 2;
 constexpr UINT kWatchPollIntervalMs = 10;
 constexpr int kMargin = 12;
-constexpr int kStatusTop = 376;
-constexpr int kMinimumWindowHeight = 615;
+constexpr int kStatusTop = 448;
+constexpr int kMinimumWindowHeight = 687;
 constexpr WPARAM kStatusTextLimit = 16u * 1024u * 1024u;
 constexpr size_t kInitialTextBufferCapacity = 8 * 1024;
 constexpr size_t kRawDebugCapacity = 131072;
@@ -56,7 +56,8 @@ enum ControlId : int {
     IDC_FG_MULTIPLIER_OVERRIDE,
     IDC_FG_MULTIPLIER_CHOICE,
     IDC_FG_OVERRIDE_OFF_AFTER_ON,
-    IDC_FG_OFF_MODE_CHOICE
+    IDC_FG_OFF_MODE_CHOICE,
+    IDC_PRESENTATION_PROBING
 };
 
 struct FgPolicy {
@@ -88,6 +89,7 @@ struct CapturedReflexEvent {
     uint32_t requestedUs;
     uint32_t effectiveUs;
     ReflexProbeProtocol::FgEventData fg{};
+    ReflexProbeProtocol::PresentationEventData presentation{};
 };
 
 struct FgStateRun {
@@ -101,6 +103,14 @@ struct FgStateRun {
 };
 
 constexpr size_t kFgTrackedStreams = 32;
+constexpr size_t kPresentationTrackedStreams = 32;
+struct PresentationStateRun {
+    bool used = false;
+    uint64_t swapChain = 0;
+    uint32_t method = 0;
+    CapturedReflexEvent state{};
+    uint64_t repeats = 0;
+};
 
 struct TextBuffer {
     wchar_t* data = nullptr;
@@ -121,6 +131,8 @@ struct AppState {
     HWND reflexGroup = nullptr;
     HWND reflexProbing = nullptr;
     HWND fgGroup = nullptr;
+    HWND presentationGroup = nullptr;
+    HWND presentationProbing = nullptr;
     HWND fgProbing = nullptr;
     HWND fgMultiplierOverride = nullptr;
     HWND fgMultiplierChoice = nullptr;
@@ -161,6 +173,7 @@ struct AppState {
 
     LONG lastHookState = -1;
     LONG lastFgHookBits = 0;
+    LONG lastPresentationHookBits = 0;
     LONG lastEventSerial = 0;
     bool loggedInjectedBuild = false;
     bool rawUiBatchWarningShown = false;
@@ -184,6 +197,7 @@ struct AppState {
     bool watchCountReflexSleepCalls = false;
     bool watchProbeReflex = true;
     bool watchProbeDlssFg = false;
+    bool watchProbePresentation = false;
     FgPolicy watchFgPolicy{};
     LONGLONG watchStartQpc = 0;
 
@@ -205,6 +219,8 @@ struct AppState {
     uint64_t stateRepeatCount = 0;
     uint64_t stateSleepCount = 0;
     FgStateRun fgRuns[kFgTrackedStreams]{};
+    PresentationStateRun presentationRuns[kPresentationTrackedStreams]{};
+    bool presentationTrackingOverflowWarned = false;
     bool fgTrackingOverflowWarned = false;
 };
 
@@ -235,16 +251,17 @@ bool InjectDll(HANDLE process, DWORD processId, const wchar_t* dllPath,
 bool CreateSharedState(DWORD processId, const wchar_t* targetPath,
                        bool overrideEnabled, uint32_t overrideUs, bool forceBoostWhenOn,
                        bool countReflexSleepCalls, bool probeReflex, bool probeDlssFg,
+                       bool probePresentation,
                        const FgPolicy& fgPolicy, wchar_t* error, size_t errorCount);
 bool ArmProcessWatch(const wchar_t* targetPath, bool overrideEnabled, uint32_t overrideUs,
                      bool forceBoostWhenOn, bool countReflexSleepCalls,
-                     bool probeReflex, bool probeDlssFg, const FgPolicy& fgPolicy,
+                     bool probeReflex, bool probeDlssFg, bool probePresentation, const FgPolicy& fgPolicy,
                      wchar_t* error, size_t errorCount);
 void CancelProcessWatch(bool logCancellation);
 void PollProcessWatch();
 bool AttachRunningProcess(const wchar_t* targetPath, bool overrideEnabled, uint32_t overrideUs,
                           bool forceBoostWhenOn, bool countReflexSleepCalls,
-                          bool probeReflex, bool probeDlssFg, const FgPolicy& fgPolicy,
+                          bool probeReflex, bool probeDlssFg, bool probePresentation, const FgPolicy& fgPolicy,
                      wchar_t* error, size_t errorCount);
 
 void ResetLiveStateTracking();

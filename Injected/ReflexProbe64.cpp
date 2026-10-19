@@ -17,6 +17,7 @@
 #include <sl_dlss_g.h>
 
 #include "../Common/Protocol.h"
+#include "PresentationDxgi.h"
 
 #pragma comment(lib, "version.lib")
 
@@ -160,6 +161,11 @@ void RememberVerifiedFgRequest(uint32_t viewport,
 bool IsReflexProbingEnabled()
 {
     return g_shared && g_shared->probeReflexEnabled != 0;
+}
+
+bool IsPresentationProbingEnabled()
+{
+    return g_shared && g_shared->probePresentationEnabled != 0;
 }
 
 bool IsFgProbingEnabled()
@@ -974,6 +980,12 @@ FARPROC WINAPI HookApplicationGetProcAddress(HMODULE module, LPCSTR procName)
 
     const wchar_t* moduleName = PathFileName(modulePath);
 
+    if (IsPresentationProbingEnabled()) {
+        FARPROC presentation = PresentationDxgi::ResolveDynamic(module, procName, result);
+        if (presentation != result)
+            return presentation;
+    }
+
     if (IsReflexProbingEnabled() && strcmp(procName, "nvapi_QueryInterface") == 0 &&
         _wcsicmp(moduleName, L"nvapi64.dll") == 0) {
         g_realNvapiQueryInterface = reinterpret_cast<PFunNvapiQueryInterface*>(result);
@@ -1476,7 +1488,7 @@ bool PatchLoadedStreamlineImports(bool& foundAny)
             // slGetFeatureFunction through a game DLL's GetProcAddress IAT;
             // the earliest resolver calls cannot be recovered after caching.
             // Reflex-only retains its previously validated discovery order.
-            const bool probeFg = IsFgProbingEnabled();
+            const bool probeFg = IsFgProbingEnabled() || IsPresentationProbingEnabled();
             bool patched = !probeFg ||
                 PatchGetProcAddressResolverInModule(heldModule);
             bool sawTarget = false;
@@ -1484,6 +1496,9 @@ bool PatchLoadedStreamlineImports(bool& foundAny)
                 patched = PatchStreamlineImportsInModule(heldModule, sawTarget);
             if (patched && !probeFg && !sawTarget)
                 patched = PatchGetProcAddressResolverInModule(heldModule);
+            if (patched && IsPresentationProbingEnabled() &&
+                ShouldPatchGetProcAddressResolver(heldModule))
+                patched = PresentationDxgi::PatchImports(heldModule);
             FreeLibrary(heldModule);
 
             if (!patched || (g_shared && InterlockedCompareExchange(&g_shared->hookState, 0, 0) ==
@@ -1496,7 +1511,7 @@ bool PatchLoadedStreamlineImports(bool& foundAny)
                 foundAny = true;
                 // With FG enabled, keep discovering resolver imports in other
                 // modules; the FG and Reflex call sites may be in different DLLs.
-                if (!IsFgProbingEnabled())
+                if (!IsFgProbingEnabled() && !IsPresentationProbingEnabled())
                     break;
             }
         } while (Module32NextW(snapshot, &entry));
@@ -1511,8 +1526,12 @@ DWORD WINAPI WorkerThread(void*)
     if (!ConnectSharedState())
         return 1;
 
-    if (!IsReflexProbingEnabled() && !IsFgProbingEnabled())
+    if (!IsReflexProbingEnabled() && !IsFgProbingEnabled() &&
+        !IsPresentationProbingEnabled())
         return 0;
+
+    if (IsPresentationProbingEnabled())
+        PresentationDxgi::Initialize(g_shared);
 
     InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateWaitingForDll);
 
@@ -1524,7 +1543,7 @@ DWORD WINAPI WorkerThread(void*)
         if (!PatchLoadedStreamlineImports(foundStreamlineImport))
             return 1;
 
-        if (foundStreamlineImport && !IsFgProbingEnabled()) {
+        if (foundStreamlineImport && !IsFgProbingEnabled() && !IsPresentationProbingEnabled()) {
             if (InterlockedCompareExchange(&g_legacyPluginGatewayArmed, 0, 0) != 0) {
                 OutputDebugStringW(
                     L"ReflexProbe64: armed Streamline 1.x sl.reflex plugin-gateway interception; worker exiting.\n");
@@ -1542,7 +1561,7 @@ DWORD WINAPI WorkerThread(void*)
         if (IsReflexProbingEnabled() && !PatchApplicationNvapiResolver(armedNvapiResolver))
             return 1;
 
-        if (!IsFgProbingEnabled() &&
+        if (!IsFgProbingEnabled() && !IsPresentationProbingEnabled() &&
             InterlockedCompareExchange(&g_nativeNvapiCaptured, 0, 0) != 0) {
             OutputDebugStringW(
                 L"ReflexProbe64: captured native NVAPI D3D NvAPI_D3D_SetSleepMode; worker exiting.\n");
@@ -1554,14 +1573,14 @@ DWORD WINAPI WorkerThread(void*)
         // Streamline 1.x titles such as A Plague Tale: Requiem can load sl.interposer.dll later,
         // and their Reflex path lives behind the interposer's own
         // slGetPluginFunction("slSetConstants") gateway.
-        if (!IsFgProbingEnabled() &&
+        if (!IsFgProbingEnabled() && !IsPresentationProbingEnabled() &&
             InterlockedCompareExchange(&g_modernReflexCaptured, 0, 0) != 0) {
             OutputDebugStringW(
                 L"ReflexProbe64: dynamic modern Reflex resolver captured slReflexSetOptions; worker exiting.\n");
             return 0;
         }
 
-        if (IsFgProbingEnabled() &&
+        if (IsFgProbingEnabled() && !IsPresentationProbingEnabled() &&
             (InterlockedCompareExchange(&g_shared->fgHookBits, 0, 0) & 3) == 3 &&
             (!IsReflexProbingEnabled() ||
              InterlockedCompareExchange(&g_modernReflexCaptured, 0, 0) ||
@@ -1575,7 +1594,8 @@ DWORD WINAPI WorkerThread(void*)
         // Keep discovery alive for later-loaded FG modules without polling
         // a fully running game's module list at 10 Hz indefinitely.
         Sleep(attempt < 100 ? 10 :
-            (IsFgProbingEnabled() ? (attempt < 300 ? 250 : 1000) : 100));
+            ((IsFgProbingEnabled() || IsPresentationProbingEnabled())
+                ? (attempt < 300 ? 250 : 1000) : 100));
     }
 }
 

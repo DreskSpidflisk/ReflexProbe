@@ -16,6 +16,9 @@ void ResetLiveStateTracking()
     for (size_t i = 0; i < kFgTrackedStreams; ++i)
         g_app.fgRuns[i] = {};
     g_app.fgTrackingOverflowWarned = false;
+    for (size_t i = 0; i < kPresentationTrackedStreams; ++i)
+        g_app.presentationRuns[i] = {};
+    g_app.presentationTrackingOverflowWarned = false;
 }
 
 bool EnsureRawDebugBuffer()
@@ -673,9 +676,115 @@ void UpdateCurrentFgState(const CapturedReflexEvent& event)
     }
 }
 
+const wchar_t* PresentationOriginName(uint32_t method)
+{
+    switch (method) {
+    case 2: return L"CreateSwapChain";
+    case 3: return L"CreateSwapChainForHwnd";
+    case 4: return L"CreateSwapChainForCoreWindow";
+    case 5: return L"CreateSwapChainForComposition";
+    case 6: return L"D3D11CreateDeviceAndSwapChain";
+    case 7: return L"ResizeBuffers";
+    default: return L"unknown";
+    }
+}
+
+void FormatPresentationEvent(const CapturedReflexEvent& event, wchar_t* line, size_t count)
+{
+    const auto& p = event.presentation;
+    if (event.kind == ReflexProbeProtocol::PresentationEventSwapChain) {
+        swprintf_s(line, count,
+            L"DXGI swap chain 0x%llX: %s, %ux%u, %u buffers, format=%u, swapEffect=%u, flags=0x%X, GetDesc=0x%08X",
+            static_cast<unsigned long long>(p.swapChain), PresentationOriginName(p.method),
+            p.width, p.height, p.buffers, p.format, p.swapEffect,
+            p.creationFlags, static_cast<unsigned int>(event.result));
+    } else {
+        swprintf_s(line, count,
+            L"DXGI %s #%ld: chain=0x%llX, SyncInterval=%u, Flags=0x%X%s, HRESULT=0x%08X",
+            p.method == 1 ? L"Present1" : L"Present", event.sequence,
+            static_cast<unsigned long long>(p.swapChain), p.syncInterval,
+            p.presentFlags,
+            (p.presentFlags & 0x200u) != 0 ? L" (ALLOW_TEARING)" : L"",
+            static_cast<unsigned int>(event.result));
+    }
+}
+
+void AppendPresentationRepeat(const PresentationStateRun& run, LONGLONG qpc)
+{
+    if (!run.repeats)
+        return;
+    wchar_t line[224]{};
+    swprintf_s(line, L"DXGI %s: %llu repeated calls for chain=0x%llX since #%ld.",
+        run.method == 1 ? L"Present1" : L"Present",
+        static_cast<unsigned long long>(run.repeats),
+        static_cast<unsigned long long>(run.swapChain), run.state.sequence);
+    AppendDisplayLineAtQpc(line, qpc);
+}
+
+void HandlePresentationEvent(const CapturedReflexEvent& event)
+{
+    if (CurrentCaptureMode() == CaptureModeRawDebug) {
+        CaptureRawDebugEvent(event);
+        return;
+    }
+    if (event.kind == ReflexProbeProtocol::PresentationEventSwapChain) {
+        // A resized or replaced chain starts a new visible presentation interval.
+        for (auto& run : g_app.presentationRuns) {
+            if (run.used && run.swapChain == event.presentation.swapChain) {
+                AppendPresentationRepeat(run, event.qpc);
+                run = {};
+            }
+        }
+        wchar_t line[480]{};
+        FormatPresentationEvent(event, line, _countof(line));
+        AppendDisplayLineAtQpc(line, event.qpc);
+        return;
+    }
+    const auto& p = event.presentation;
+    PresentationStateRun* stream = nullptr;
+    for (auto& candidate : g_app.presentationRuns) {
+        if (candidate.used && candidate.swapChain == p.swapChain && candidate.method == p.method) {
+            stream = &candidate;
+            break;
+        }
+        if (!candidate.used && !stream)
+            stream = &candidate;
+    }
+    if (!stream) {
+        if (!g_app.presentationTrackingOverflowWarned) {
+            g_app.presentationTrackingOverflowWarned = true;
+            AppendStatusLineAtQpc(L"WARNING: DXGI tracking table full; additional swap-chain streams omitted in State changes mode.", event.qpc);
+        }
+        return;
+    }
+    if (stream->used) {
+        const auto& previous = stream->state;
+        if (previous.presentation.syncInterval == p.syncInterval &&
+            previous.presentation.presentFlags == p.presentFlags &&
+            previous.result == event.result) {
+            ++stream->repeats;
+            return;
+        }
+        AppendPresentationRepeat(*stream, event.qpc);
+    }
+    stream->used = true;
+    stream->swapChain = p.swapChain;
+    stream->method = p.method;
+    stream->state = event;
+    stream->repeats = 0;
+    wchar_t line[480]{};
+    FormatPresentationEvent(event, line, _countof(line));
+    AppendDisplayLineAtQpc(line, event.qpc);
+}
+
 bool AppendCapturedEventToBuffer(TextBuffer& buffer, const CapturedReflexEvent& event, bool newState)
 {
     wchar_t line[512]{};
+    if (event.kind == ReflexProbeProtocol::PresentationEventPresent ||
+        event.kind == ReflexProbeProtocol::PresentationEventSwapChain) {
+        FormatPresentationEvent(event, line, _countof(line));
+        return AppendTextBufferLineAtQpc(buffer, line, event.qpc);
+    }
     if (event.kind == ReflexProbeProtocol::FgEventSetOptions ||
         event.kind == ReflexProbeProtocol::FgEventGetState) {
         wchar_t fgLine[1024]{};
@@ -760,6 +869,9 @@ void FinalizeStateRun(LONGLONG eventQpc)
         if (g_app.fgRuns[i].used)
             AppendFgRepeatCount(g_app.fgRuns[i], eventQpc);
     }
+    for (const auto& run : g_app.presentationRuns)
+        if (run.used)
+            AppendPresentationRepeat(run, eventQpc);
     ResetLiveStateTracking();
 }
 
@@ -797,6 +909,9 @@ bool SetCaptureMode(CaptureMode mode)
             AppendSleepCount(g_app.stateSleepCount, g_app.stateEvent, qpc.QuadPart);
         }
         FinishFgDisplayIntervals(qpc.QuadPart, true);
+        for (const auto& run : g_app.presentationRuns)
+            if (run.used)
+                AppendPresentationRepeat(run, qpc.QuadPart);
     }
 
     // Reset Reflex presentation, not the last observed complete FG state.
@@ -804,6 +919,9 @@ bool SetCaptureMode(CaptureMode mode)
     g_app.haveStateEvent = false;
     g_app.stateRepeatCount = 0;
     g_app.stateSleepCount = 0;
+    for (auto& run : g_app.presentationRuns)
+        run = {};
+    g_app.presentationTrackingOverflowWarned = false;
     if (mode == CaptureModeRawDebug)
         ResetRawDebugCapture();
 
@@ -836,6 +954,11 @@ bool SetCaptureMode(CaptureMode mode)
 }
 void HandleCapturedReflexEvent(const CapturedReflexEvent& event)
 {
+    if (event.kind == ReflexProbeProtocol::PresentationEventPresent ||
+        event.kind == ReflexProbeProtocol::PresentationEventSwapChain) {
+        HandlePresentationEvent(event);
+        return;
+    }
     if (event.kind == ReflexProbeProtocol::FgEventSetOptions ||
         event.kind == ReflexProbeProtocol::FgEventGetState) {
         HandleCapturedFgEvent(event);
@@ -912,7 +1035,9 @@ void PollSharedState()
         case ReflexProbeProtocol::HookStateWaitingForDll:
             wcscpy_s(line, g_app.shared->probeReflexEnabled
                 ? L"Waiting for a Reflex interception path..."
-                : L"Waiting for a Streamline 2.x DLSS FG interception path.");
+                : g_app.shared->probeDlssFgEnabled
+                    ? L"Waiting for a Streamline 2.x DLSS FG interception path."
+                    : L"Waiting for a DXGI swap-chain creation / Present path...");
             break;
         case ReflexProbeProtocol::HookStateInterceptArmed:
             swprintf_s(line, L"Interception armed: %s. Waiting for sl.reflex.dll to resolve its plugin gateway.",
@@ -958,6 +1083,23 @@ void PollSharedState()
             AppendStatusLine(L"FG hook active: slDLSSGGetState (runtime-reported state now observable).");
         }
         g_app.lastFgHookBits = fgHookBits;
+    }
+
+    const LONG presentationBits = InterlockedCompareExchange(
+        &g_app.shared->presentationHookBits, 0, 0);
+    const LONG newPresentationHooks = presentationBits & ~g_app.lastPresentationHookBits;
+    if (newPresentationHooks) {
+        if (newPresentationHooks & 1)
+            AppendStatusLine(L"DXGI factory interception active; waiting for a swap chain.");
+        if (newPresentationHooks & 2)
+            AppendStatusLine(L"DXGI Present interception active (observation only).");
+        if (newPresentationHooks & 4)
+            AppendStatusLine(L"DXGI Present1 interception active (observation only).");
+        if (newPresentationHooks & 8)
+            AppendStatusLine(L"DXGI ResizeBuffers interception active (observation only).");
+        if (newPresentationHooks & 16)
+            AppendStatusLine(L"D3D11 direct device-and-swap-chain creation intercepted.");
+        g_app.lastPresentationHookBits = presentationBits;
     }
 
     const LONG currentSerial = InterlockedCompareExchange(&g_app.shared->eventSerial, 0, 0);
@@ -1007,6 +1149,9 @@ void PollSharedState()
             if (captured.kind == ReflexProbeProtocol::FgEventSetOptions)
                 UpdateCurrentFgState(captured);
         }
+        if (captured.kind == ReflexProbeProtocol::PresentationEventPresent ||
+            captured.kind == ReflexProbeProtocol::PresentationEventSwapChain)
+            captured.presentation = event.presentation;
         if (captured.kind == ReflexProbeProtocol::ReflexEventSettings)
             UpdateCurrentEffectiveState(captured);
         if (captured.kind == ReflexProbeProtocol::ReflexEventSleep &&

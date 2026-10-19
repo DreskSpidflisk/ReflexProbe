@@ -10,7 +10,7 @@
 namespace ReflexProbeProtocol {
 
 constexpr uint32_t kMagic = 0x31505246; // "FRP1" little-endian.
-constexpr uint32_t kVersion = 14;
+constexpr uint32_t kVersion = 15;
 constexpr uint32_t kEventCapacity = 4096;
 constexpr uint32_t kPathChars = 1024;
 constexpr uint32_t kVersionChars = 64;
@@ -18,7 +18,7 @@ constexpr uint32_t kErrorChars = 512;
 
 // Human-readable source tag for rapid local rebuild/testing. The controller also hashes the
 // actual EXE and DLL on disk, so a stale or mismatched binary is obvious in copied logs.
-constexpr wchar_t kBuildTag[] = L"2026-10-12.32-fg-off-history";
+constexpr wchar_t kBuildTag[] = L"2026-10-18.34-experiment-dxgi-present";
 
 constexpr wchar_t kMappingPrefix[] = L"Local\\ReflexProbe.";
 
@@ -42,7 +42,9 @@ enum ReflexEventKind : LONG {
     ReflexEventSettings = 0,
     ReflexEventSleep = 1,
     FgEventSetOptions = 2,
-    FgEventGetState = 3
+    FgEventGetState = 3,
+    PresentationEventSwapChain = 4,
+    PresentationEventPresent = 5
 };
 
 // Only POD values cross the shared-memory boundary. FG-specific fields are
@@ -83,6 +85,21 @@ struct FgEventData {
     uint32_t dynamicMfgAvailable; // state v4+
 };
 
+// DXGI only in this experiment. Identifiers are opaque swap-chain addresses
+// in the injected process, not COM pointers for the controller to dereference.
+struct PresentationEventData {
+    uint64_t swapChain;
+    uint32_t method; // 0 = Present, 1 = Present1; creation method for SwapChain event.
+    uint32_t syncInterval;
+    uint32_t presentFlags;
+    uint32_t width;
+    uint32_t height;
+    uint32_t buffers;
+    uint32_t format;
+    uint32_t swapEffect;
+    uint32_t creationFlags;
+};
+
 struct ReflexEvent {
     volatile LONG sequence;
     LONGLONG qpc;
@@ -94,6 +111,7 @@ struct ReflexEvent {
     uint32_t effectiveUs;
     LONG result;
     FgEventData fg;
+    PresentationEventData presentation;
 };
 
 struct SharedState {
@@ -110,6 +128,7 @@ struct SharedState {
     // Feature selection is immutable for the lifetime of the acquired target.
     LONG probeReflexEnabled;
     LONG probeDlssFgEnabled;
+    LONG probePresentationEnabled;
     LONG wrapFgGetState; // acquisition-time, original pointer when false
     volatile LONG fgForceOnWhenAuto;
     volatile LONG fgForceOffAfterOn; // enables Off override; mode selected below
@@ -128,6 +147,8 @@ struct SharedState {
     volatile LONG sleepCallSerial;
     volatile LONG fgSetCallSerial;
     volatile LONG fgGetCallSerial;
+    volatile LONG presentationCallSerial;
+    volatile LONG presentationHookBits; // 1 = DXGI factory resolver, 2 = Present, 4 = Present1, 8 = D3D11 direct helper.
     volatile LONG fgHookBits; // 1 = SetOptions resolved; 2 = GetState resolved.
 
     wchar_t targetPath[kPathChars];
