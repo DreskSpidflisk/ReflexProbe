@@ -441,7 +441,7 @@ bool PatchImports(HMODULE module)
             void* current = reinterpret_cast<void*>(
                 static_cast<uintptr_t>(thunk->u1.Function));
             for (size_t i = 0; i < count; ++i) {
-                if (!exports[i].target || current != exports[i].target)
+                if (!exports[i].target || current != reinterpret_cast<void*>(exports[i].target))
                     continue;
                 DWORD oldProtection = 0;
                 if (!VirtualProtect(&thunk->u1.Function, sizeof(thunk->u1.Function),
