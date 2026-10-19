@@ -264,6 +264,9 @@ bool AttachRunningProcess(const wchar_t* targetPath, bool overrideEnabled, uint3
                           bool probeReflex, bool probeDlssFg, bool probePresentation, const FgPolicy& fgPolicy,
                      wchar_t* error, size_t errorCount);
 
+void FormatPresentationEvent(const CapturedReflexEvent& event, wchar_t* line, size_t count);
+void AppendPresentationRepeat(const PresentationStateRun& run, LONGLONG qpc);
+void HandlePresentationEvent(const CapturedReflexEvent& event);
 void ResetLiveStateTracking();
 bool EnsureRawDebugBuffer();
 void ResetRawDebugCapture();
