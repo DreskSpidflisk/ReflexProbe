@@ -10,6 +10,8 @@
 #include <d3d11.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdio.h>
+#include <wchar.h>
 
 #include "PresentationDxgi.h"
 
@@ -53,6 +55,67 @@ struct SlotHook {
 constexpr size_t kHookCapacity = 128;
 SlotHook g_slots[kHookCapacity]{};
 SRWLOCK g_slotsLock = SRWLOCK_INIT;
+
+// Do not wrap an overlay's DXGI imports: its factory trampoline can call back
+// into an IAT entry we replaced, while our saved DXGI export routes into the
+// overlay's trampoline. Steam demonstrated precisely such a recursion cycle.
+// This intentionally limits discovery to the game executable and its own DLLs.
+bool ShouldProbeModule(HMODULE module)
+{
+    if (!module)
+        return false;
+    if (module == GetModuleHandleW(nullptr))
+        return true;
+
+    wchar_t executable[MAX_PATH]{};
+    wchar_t candidate[MAX_PATH]{};
+    const DWORD exeChars = GetModuleFileNameW(nullptr, executable, _countof(executable));
+    const DWORD moduleChars = GetModuleFileNameW(module, candidate, _countof(candidate));
+    if (!exeChars || exeChars >= _countof(executable) ||
+        !moduleChars || moduleChars >= _countof(candidate))
+        return false;
+
+    const wchar_t* separator = wcsrchr(executable, L'\\');
+    if (!separator)
+        return false;
+    const size_t directoryLength = static_cast<size_t>(separator - executable + 1);
+    return _wcsnicmp(executable, candidate, directoryLength) == 0;
+}
+
+// A guard is a diagnostic safety net, not a substitute for correct chaining.
+thread_local unsigned int g_factoryDepth = 0;
+volatile LONG g_recursionReported = 0;
+struct FactoryScope {
+    FactoryScope() { ++g_factoryDepth; }
+    ~FactoryScope() { --g_factoryDepth; }
+};
+
+bool RefuseRecursiveFactory()
+{
+    if (g_factoryDepth < 8)
+        return false;
+    if (g_shared) InterlockedOr(&g_shared->presentationHookBits, 32);
+    if (InterlockedCompareExchange(&g_recursionReported, 1, 0) == 0)
+        OutputDebugStringW(L"ReflexProbe64: ERROR: recursive DXGI factory forwarding; aborting nested factory call.\\n");
+    return true;
+}
+
+void TraceFactoryImport(HMODULE importer, const char* exportName, void* previous)
+{
+    wchar_t importerPath[MAX_PATH]{};
+    wchar_t ownerPath[MAX_PATH]{};
+    GetModuleFileNameW(importer, importerPath, _countof(importerPath));
+    HMODULE owner = nullptr;
+    if (GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(previous), &owner)) {
+        GetModuleFileNameW(owner, ownerPath, _countof(ownerPath));
+    }
+    wchar_t message[2 * MAX_PATH + 160]{};
+    swprintf_s(message, L"ReflexProbe64: DXGI IAT patched in %s: %hs, previous=%p in %s\\n",
+        importerPath, exportName, previous, ownerPath[0] ? ownerPath : L"(unknown)");
+    OutputDebugStringW(message);
+}
 
 void* Original(void* instance, size_t index)
 {
@@ -306,6 +369,9 @@ void HookFactory(IUnknown* factory)
 
 HRESULT WINAPI HookFactory0(REFIID iid, void** out)
 {
+    if (RefuseRecursiveFactory())
+        return E_FAIL;
+    FactoryScope scope;
     if (!g_factory0)
         return E_FAIL;
     const HRESULT result = g_factory0(iid, out);
@@ -315,6 +381,9 @@ HRESULT WINAPI HookFactory0(REFIID iid, void** out)
 }
 HRESULT WINAPI HookFactory1(REFIID iid, void** out)
 {
+    if (RefuseRecursiveFactory())
+        return E_FAIL;
+    FactoryScope scope;
     if (!g_factory1)
         return E_FAIL;
     const HRESULT result = g_factory1(iid, out);
@@ -324,6 +393,9 @@ HRESULT WINAPI HookFactory1(REFIID iid, void** out)
 }
 HRESULT WINAPI HookFactory2(UINT flags, REFIID iid, void** out)
 {
+    if (RefuseRecursiveFactory())
+        return E_FAIL;
+    FactoryScope scope;
     if (!g_factory2)
         return E_FAIL;
     const HRESULT result = g_factory2(flags, iid, out);
@@ -393,6 +465,23 @@ void Initialize(ReflexProbeProtocol::SharedState* shared)
     g_shared = shared;
 }
 
+bool IsApplicationModule(HMODULE module)
+{
+    return ShouldProbeModule(module);
+}
+
+bool IsApplicationCaller(const void* address)
+{
+    if (!address)
+        return false;
+    HMODULE callerModule = nullptr;
+    if (!GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(address), &callerModule))
+        return false;
+    return ShouldProbeModule(callerModule);
+}
+
 FARPROC ResolveDynamic(HMODULE module, LPCSTR name, FARPROC original)
 {
     if (!g_shared || !module || !name || !original)
@@ -408,7 +497,7 @@ FARPROC ResolveDynamic(HMODULE module, LPCSTR name, FARPROC original)
 
 bool PatchImports(HMODULE module)
 {
-    if (!g_shared || !module)
+    if (!g_shared || !ShouldProbeModule(module))
         return true;
     auto* base = reinterpret_cast<unsigned char*>(module);
     auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
@@ -447,12 +536,14 @@ bool PatchImports(HMODULE module)
                 if (!VirtualProtect(&thunk->u1.Function, sizeof(thunk->u1.Function),
                         PAGE_READWRITE, &oldProtection))
                     return false;
-                InterlockedCompareExchangePointer(
+                const void* prior = InterlockedCompareExchangePointer(
                     reinterpret_cast<PVOID volatile*>(&thunk->u1.Function),
                     exports[i].hook, current);
                 DWORD ignored = 0;
                 VirtualProtect(&thunk->u1.Function, sizeof(thunk->u1.Function),
                     oldProtection, &ignored);
+                if (prior == current)
+                    TraceFactoryImport(module, exports[i].name, current);
                 break;
             }
         }

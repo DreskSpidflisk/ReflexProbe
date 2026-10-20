@@ -980,7 +980,8 @@ FARPROC WINAPI HookApplicationGetProcAddress(HMODULE module, LPCSTR procName)
 
     const wchar_t* moduleName = PathFileName(modulePath);
 
-    if (IsPresentationProbingEnabled()) {
+    if (IsPresentationProbingEnabled() &&
+        PresentationDxgi::IsApplicationCaller(_ReturnAddress())) {
         FARPROC presentation = PresentationDxgi::ResolveDynamic(module, procName, result);
         if (presentation != result)
             return presentation;
@@ -1488,16 +1489,19 @@ bool PatchLoadedStreamlineImports(bool& foundAny)
             // slGetFeatureFunction through a game DLL's GetProcAddress IAT;
             // the earliest resolver calls cannot be recovered after caching.
             // Reflex-only retains its previously validated discovery order.
-            const bool probeFg = IsFgProbingEnabled() || IsPresentationProbingEnabled();
+            // In presentation-only mode, do not alter overlay DLL resolvers:
+            // a DXGI factory hook can recurse if an overlay calls through its IAT.
+            const bool probePresentationHere = IsPresentationProbingEnabled() &&
+                PresentationDxgi::IsApplicationModule(heldModule);
+            const bool probeFg = IsFgProbingEnabled() || probePresentationHere;
             bool patched = !probeFg ||
                 PatchGetProcAddressResolverInModule(heldModule);
             bool sawTarget = false;
             if (patched)
                 patched = PatchStreamlineImportsInModule(heldModule, sawTarget);
-            if (patched && !probeFg && !sawTarget)
+            if (patched && !probeFg && !sawTarget && IsReflexProbingEnabled())
                 patched = PatchGetProcAddressResolverInModule(heldModule);
-            if (patched && IsPresentationProbingEnabled() &&
-                ShouldPatchGetProcAddressResolver(heldModule))
+            if (patched && probePresentationHere)
                 patched = PresentationDxgi::PatchImports(heldModule);
             FreeLibrary(heldModule);
 

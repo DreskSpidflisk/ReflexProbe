@@ -1001,6 +1001,8 @@ void PollSharedState()
             AppendStatusLine(L"DXGI ResizeBuffers interception active (observation only).");
         if (newPresentationHooks & 16)
             AppendStatusLine(L"D3D11 direct device-and-swap-chain creation intercepted.");
+        if (newPresentationHooks & 32)
+            AppendStatusLine(L"WARNING: Recursive DXGI factory forwarding detected; aborted a nested call. Check Steam overlay chaining.");
         g_app.lastPresentationHookBits = presentationBits;
     }
 

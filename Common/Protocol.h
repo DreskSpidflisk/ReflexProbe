@@ -18,7 +18,7 @@ constexpr uint32_t kErrorChars = 512;
 
 // Human-readable source tag for rapid local rebuild/testing. The controller also hashes the
 // actual EXE and DLL on disk, so a stale or mismatched binary is obvious in copied logs.
-constexpr wchar_t kBuildTag[] = L"2026-10-18.34-experiment-dxgi-present";
+constexpr wchar_t kBuildTag[] = L"2026-10-19.35-dxgi-factory-loop-guard";
 
 constexpr wchar_t kMappingPrefix[] = L"Local\\ReflexProbe.";
 
@@ -148,7 +148,7 @@ struct SharedState {
     volatile LONG fgSetCallSerial;
     volatile LONG fgGetCallSerial;
     volatile LONG presentationCallSerial;
-    volatile LONG presentationHookBits; // 1 = DXGI factory resolver, 2 = Present, 4 = Present1, 8 = D3D11 direct helper.
+    volatile LONG presentationHookBits; // 1=factory, 2=Present, 4=Present1, 8=ResizeBuffers, 16=D3D11 helper, 32=factory recursion detected.
     volatile LONG fgHookBits; // 1 = SetOptions resolved; 2 = GetState resolved.
 
     wchar_t targetPath[kPathChars];
