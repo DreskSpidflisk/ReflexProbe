@@ -1586,8 +1586,12 @@ DWORD WINAPI WorkerThread(void*)
             return 0;
         }
 
+        // GetState is optional: requiring its hook when unchecked would keep
+        // the discovery worker scanning modules indefinitely in normal FG mode.
+        const LONG requiredFgHooks = 1 | (g_shared->wrapFgGetState ? 2 : 0);
         if (IsFgProbingEnabled() && !IsPresentationProbingEnabled() &&
-            (InterlockedCompareExchange(&g_shared->fgHookBits, 0, 0) & 3) == 3 &&
+            (InterlockedCompareExchange(&g_shared->fgHookBits, 0, 0) & requiredFgHooks) ==
+                requiredFgHooks &&
             (!IsReflexProbingEnabled() ||
              InterlockedCompareExchange(&g_modernReflexCaptured, 0, 0) ||
              InterlockedCompareExchange(&g_nativeNvapiCaptured, 0, 0) ||
