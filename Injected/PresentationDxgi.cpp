@@ -123,6 +123,20 @@ void* Original(void* instance, size_t index)
         return nullptr;
     void** vtable = *reinterpret_cast<void***>(instance);
     void** slot = &vtable[index];
+
+    // The predecessor associated with a hooked slot does not change. Reuse
+    // successful lookups per calling thread to avoid a table lock each Present.
+    struct CachedOriginal {
+        void** slot;
+        void* predecessor;
+    };
+    thread_local CachedOriginal cache[4] = {};
+    const size_t cacheIndex = index == 8 ? 0 : index == 13 ? 1 :
+        index == 22 ? 2 : 3;
+    CachedOriginal& cached = cache[cacheIndex];
+    if (cached.slot == slot)
+        return cached.predecessor;
+
     void* result = nullptr;
     AcquireSRWLockShared(&g_slotsLock);
     for (const SlotHook& entry : g_slots) {
@@ -132,6 +146,10 @@ void* Original(void* instance, size_t index)
         }
     }
     ReleaseSRWLockShared(&g_slotsLock);
+    if (result) {
+        cached.predecessor = result;
+        cached.slot = slot;
+    }
     return result;
 }
 

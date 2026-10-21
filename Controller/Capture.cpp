@@ -467,12 +467,12 @@ void AppendFgRepeatCount(const FgStateRun& run, LONGLONG eventQpc)
         // Exact complete-state repetitions, potentially across multiple
         // hidden state transitions; do not claim a single state persisted.
         swprintf_s(line,
-            L"FG SetOptions: %llu repeated calls since %s #%ld (viewport=%u).",
+            L"PREVIOUS FG SetOptions: %llu repeated calls since %s #%ld (viewport=%u).",
             static_cast<unsigned long long>(count),
             callName, run.displayed.sequence, run.viewport);
     } else {
         swprintf_s(line,
-            L"FG %s: %llu repeated calls since %s #%ld (viewport=%u).",
+            L"PREVIOUS FG %s: %llu repeated calls since %s #%ld (viewport=%u).",
             isSetOptions ? L"SetOptions" : L"GetState",
             static_cast<unsigned long long>(count),
             callName, run.displayed.sequence, run.viewport);
@@ -710,7 +710,7 @@ bool SameReflexState(const CapturedReflexEvent& a, const CapturedReflexEvent& b)
 void FormatRepeatCount(uint64_t repeatCount, const CapturedReflexEvent& state,
                        wchar_t* line, size_t lineCount)
 {
-    swprintf_s(line, lineCount, L"Reflex State: %llu repeated calls since %s #%ld.",
+    swprintf_s(line, lineCount, L"PREVIOUS Reflex State: %llu repeated calls since %s #%ld.",
         static_cast<unsigned long long>(repeatCount),
         BackendCallName(state.backend), state.sequence);
 }

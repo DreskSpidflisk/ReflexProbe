@@ -41,7 +41,7 @@ void AppendPresentationRepeat(const PresentationStateRun& run, LONGLONG qpc)
     if (!run.repeats)
         return;
     wchar_t line[224]{};
-    swprintf_s(line, L"DXGI %s: %llu repeated calls for chain=0x%llX since #%ld.",
+    swprintf_s(line, L"PREVIOUS DXGI %s: %llu repeated calls for chain=0x%llX since #%ld.",
         run.method == 1 ? L"Present1" : L"Present",
         static_cast<unsigned long long>(run.repeats),
         static_cast<unsigned long long>(run.swapChain), run.state.sequence);
@@ -95,8 +95,10 @@ void HandlePresentationEvent(const CapturedReflexEvent& event)
     stream->method = p.method;
     stream->state = event;
     stream->repeats = 0;
-    wchar_t line[480]{};
-    FormatPresentationEvent(event, line, _countof(line));
+    wchar_t details[480]{};
+    FormatPresentationEvent(event, details, _countof(details));
+    wchar_t line[512]{};
+    swprintf_s(line, L"NEW %s", details);
     AppendDisplayLineAtQpc(line, event.qpc);
 }
 
