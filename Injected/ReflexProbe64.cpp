@@ -214,8 +214,7 @@ void SetSharedError(const wchar_t* text)
 {
     if (g_shared) {
         wcsncpy_s(g_shared->lastError, _countof(g_shared->lastError), text ? text : L"", _TRUNCATE);
-        MemoryBarrier();
-        InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateError);
+            InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateError);
     }
 
     if (text) {
@@ -367,16 +366,16 @@ void SetBackend(ReflexProbeProtocol::ReflexBackend backend)
 
 uint32_t ApplyConfiguredOverride(uint32_t requestedUs)
 {
-    if (!g_shared || InterlockedCompareExchange(&g_shared->overrideEnabled, 0, 0) == 0)
+    if (!g_shared || ReadAcquire(&g_shared->overrideEnabled) == 0)
         return requestedUs;
 
-    const LONG configured = InterlockedCompareExchange(&g_shared->overrideUs, 0, 0);
+    const LONG configured = ReadAcquire(&g_shared->overrideUs);
     return static_cast<uint32_t>(configured);
 }
 
 LONG ApplyConfiguredModeOverride(LONG requestedMode)
 {
-    if (!g_shared || InterlockedCompareExchange(&g_shared->forceBoostWhenOn, 0, 0) == 0)
+    if (!g_shared || ReadAcquire(&g_shared->forceBoostWhenOn) == 0)
         return requestedMode;
 
     return requestedMode == 1 ? 2 : requestedMode;
@@ -406,7 +405,6 @@ void PublishSettingsEvent(LONG requestedMode, LONG effectiveMode,
     event.effectiveUs = effectiveUs;
     event.result = result;
 
-    MemoryBarrier();
     InterlockedExchange(&event.sequence, serial);
 }
 
@@ -434,7 +432,6 @@ void PublishSleepEvent(LONG result)
     event.effectiveUs = 0;
     event.result = result;
 
-    MemoryBarrier();
     InterlockedExchange(&event.sequence, serial);
 }
 
@@ -464,7 +461,6 @@ void PublishFgEvent(LONG kind, const ReflexProbeProtocol::FgEventData& data, LON
     event.result = result;
     event.fg = data;
 
-    MemoryBarrier();
     InterlockedExchange(&event.sequence, serial);
 }
 
@@ -513,21 +509,21 @@ sl::Result HookFgSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
     const uint32_t version = static_cast<uint32_t>(options.structVersion);
     const bool knownVersion = version >= 1 && version <= 5;
     const bool forceAuto = g_shared &&
-        InterlockedCompareExchange(&g_shared->fgForceOnWhenAuto, 0, 0) != 0;
+        ReadAcquire(&g_shared->fgForceOnWhenAuto) != 0;
     const bool forceOffAfterOn = g_shared &&
-        InterlockedCompareExchange(&g_shared->fgForceOffAfterOn, 0, 0) != 0;
+        ReadAcquire(&g_shared->fgForceOffAfterOn) != 0;
     const bool forceOffAlways = g_shared &&
-        InterlockedCompareExchange(&g_shared->fgOffOverrideAlways, 0, 0) != 0;
+        ReadAcquire(&g_shared->fgOffOverrideAlways) != 0;
     const bool overrideMultiplier = g_shared &&
-        InterlockedCompareExchange(&g_shared->fgMultiplierOverrideEnabled, 0, 0) != 0;
+        ReadAcquire(&g_shared->fgMultiplierOverrideEnabled) != 0;
     const bool overrideMenu = g_shared &&
-        InterlockedCompareExchange(&g_shared->fgMenuOverrideEnabled, 0, 0) != 0;
+        ReadAcquire(&g_shared->fgMenuOverrideEnabled) != 0;
     const bool menuOn = g_shared &&
-        InterlockedCompareExchange(&g_shared->fgMenuOverrideOn, 0, 0) != 0;
+        ReadAcquire(&g_shared->fgMenuOverrideOn) != 0;
     const bool overrideRetention = g_shared &&
-        InterlockedCompareExchange(&g_shared->fgRetentionOverrideEnabled, 0, 0) != 0;
+        ReadAcquire(&g_shared->fgRetentionOverrideEnabled) != 0;
     const bool retainResources = g_shared &&
-        InterlockedCompareExchange(&g_shared->fgRetentionOverrideOn, 0, 0) != 0;
+        ReadAcquire(&g_shared->fgRetentionOverrideOn) != 0;
     uint32_t mode = data.mode;
     uint32_t flags = data.flags;
     uint32_t frames = data.generatedFrames;
@@ -554,8 +550,7 @@ sl::Result HookFgSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
             (options.mode == sl::DLSSGMode::eOff ||
              options.mode == sl::DLSSGMode::eOn ||
              options.mode == sl::DLSSGMode::eAuto)) {
-            const LONG selected = InterlockedCompareExchange(
-                &g_shared->fgMultiplierFrames, 0, 0);
+            const LONG selected = ReadAcquire(&g_shared->fgMultiplierFrames);
             if (selected >= 1 && selected <= 5)
                 frames = static_cast<uint32_t>(selected);
         }
@@ -663,7 +658,6 @@ void PublishFgFunction(void* function, LONG bit)
     }
     wcsncpy_s(g_shared->fgMethod, _countof(g_shared->fgMethod),
         g_modernInterceptionMethod, _TRUNCATE);
-    MemoryBarrier();
     InterlockedOr(&g_shared->fgHookBits, bit);
 }
 
@@ -685,7 +679,6 @@ void PublishReflexModule(HMODULE module, ReflexProbeProtocol::HookState state,
     _snwprintf_s(g_shared->reflexPath, _countof(g_shared->reflexPath), _TRUNCATE,
         L"%s\r\nInterception method: %s", modulePath, method);
 
-    MemoryBarrier();
     InterlockedExchange(&g_shared->hookState, static_cast<LONG>(state));
 }
 
@@ -705,8 +698,7 @@ void PublishReflexFunction(void* function, const wchar_t* interceptionMethod)
         _snwprintf_s(g_shared->reflexPath, _countof(g_shared->reflexPath), _TRUNCATE,
             L"Reflex module\r\nInterception method: %s", method);
         g_shared->reflexVersion[0] = 0;
-        MemoryBarrier();
-        InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateHooked);
+            InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateHooked);
     }
 }
 
@@ -740,7 +732,7 @@ int32_t __cdecl HookNvapiD3DSetSleepMode(void* device, void* params)
 
     const LONG requestedMode = NvapiModeFromSleepParams(*requested);
     if (g_shared &&
-        InterlockedCompareExchange(&g_shared->forceBoostWhenOn, 0, 0) != 0 &&
+        ReadAcquire(&g_shared->forceBoostWhenOn) != 0 &&
         forwarded->lowLatencyMode && !forwarded->lowLatencyBoost) {
         forwarded->lowLatencyBoost = 1;
     }

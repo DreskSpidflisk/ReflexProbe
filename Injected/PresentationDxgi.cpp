@@ -262,7 +262,6 @@ void Publish(LONG kind, const ReflexProbeProtocol::PresentationEventData& data, 
     event.effectiveUs = 0;
     event.result = static_cast<LONG>(result);
     event.presentation = data;
-    MemoryBarrier();
     InterlockedExchange(&event.sequence, serial);
 }
 
