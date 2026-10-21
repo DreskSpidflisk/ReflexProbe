@@ -60,6 +60,9 @@ void ClearCaptureHistory()
     FreeRawDebugBuffer();
     ResetLiveStateTracking();
     ResetCurrentEffectiveState();
+    g_app.statusLimitWarningShown = false;
+    if (g_app.statusLabel)
+        SetWindowTextW(g_app.statusLabel, L"Status / API requests");
 
     if (g_app.status) {
         SetWindowTextW(g_app.status, L"");

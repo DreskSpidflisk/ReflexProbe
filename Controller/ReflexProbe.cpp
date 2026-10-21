@@ -1269,6 +1269,18 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
+        case IDC_STATUS:
+            if (HIWORD(wParam) == EN_MAXTEXT &&
+                !g_app.statusLimitWarningShown) {
+                // Normally the log rolls well before this happens. Report
+                // the exceptional case without a modal dialog over the game.
+                g_app.statusLimitWarningShown = true;
+                if (g_app.statusLabel)
+                    SetWindowTextW(g_app.statusLabel, L"Status (display limit reached!)");
+                OutputDebugStringW(
+                    L"ReflexProbe: WARNING: status EDIT display limit reached; one or more lines may be truncated.\n");
+            }
+            return 0;
         case IDC_BROWSE:
             BrowseForGame();
             return 0;

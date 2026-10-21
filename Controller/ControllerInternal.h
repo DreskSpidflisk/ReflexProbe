@@ -177,6 +177,7 @@ struct AppState {
     LONG lastEventSerial = 0;
     bool loggedInjectedBuild = false;
     bool rawUiBatchWarningShown = false;
+    bool statusLimitWarningShown = false;
 
     bool haveEffectiveState = false;
     LONG currentEffectiveMode = 0;
