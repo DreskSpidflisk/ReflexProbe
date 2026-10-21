@@ -487,6 +487,12 @@ struct ExportHook {
     void* hook;
 };
 
+// Share the exact export-name vocabulary with the GetProcAddress early filter.
+constexpr const char* kDynamicExports[] = {
+    "CreateDXGIFactory", "CreateDXGIFactory1",
+    "CreateDXGIFactory2", "D3D11CreateDeviceAndSwapChain"
+};
+
 size_t Exports(HMODULE module, ExportHook* hooks, size_t capacity)
 {
     if (!module || capacity < 4)
@@ -504,20 +510,30 @@ size_t Exports(HMODULE module, ExportHook* hooks, size_t capacity)
             g_factory1 = reinterpret_cast<Factory0*>(GetProcAddress(module, "CreateDXGIFactory1"));
         if (!g_factory2)
             g_factory2 = reinterpret_cast<Factory2*>(GetProcAddress(module, "CreateDXGIFactory2"));
-        hooks[count++] = {"CreateDXGIFactory", reinterpret_cast<FARPROC>(g_factory0), reinterpret_cast<void*>(&HookFactory0)};
-        hooks[count++] = {"CreateDXGIFactory1", reinterpret_cast<FARPROC>(g_factory1), reinterpret_cast<void*>(&HookFactory1)};
-        hooks[count++] = {"CreateDXGIFactory2", reinterpret_cast<FARPROC>(g_factory2), reinterpret_cast<void*>(&HookFactory2)};
+        hooks[count++] = {kDynamicExports[0], reinterpret_cast<FARPROC>(g_factory0), reinterpret_cast<void*>(&HookFactory0)};
+        hooks[count++] = {kDynamicExports[1], reinterpret_cast<FARPROC>(g_factory1), reinterpret_cast<void*>(&HookFactory1)};
+        hooks[count++] = {kDynamicExports[2], reinterpret_cast<FARPROC>(g_factory2), reinterpret_cast<void*>(&HookFactory2)};
     } else if (_stricmp(basename, "d3d11.dll") == 0) {
         if (!g_d3d11Create)
             g_d3d11Create = reinterpret_cast<D3D11WithSwapChain*>(
                 GetProcAddress(module, "D3D11CreateDeviceAndSwapChain"));
-        hooks[count++] = {"D3D11CreateDeviceAndSwapChain",
+        hooks[count++] = {kDynamicExports[3],
             reinterpret_cast<FARPROC>(g_d3d11Create), reinterpret_cast<void*>(&HookD3D11WithSwapChain)};
     }
     return count;
 }
 
 } // namespace
+
+bool IsDynamicExportName(const char* name)
+{
+    if (!name)
+        return false;
+    for (const char* candidate : kDynamicExports)
+        if (strcmp(name, candidate) == 0)
+            return true;
+    return false;
+}
 
 bool Initialize(ReflexProbeProtocol::SharedState* shared)
 {

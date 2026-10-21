@@ -974,6 +974,18 @@ FARPROC WINAPI HookApplicationGetProcAddress(HMODULE module, LPCSTR procName)
     if (reinterpret_cast<uintptr_t>(procName) <= 0xFFFFu)
         return result;
 
+    // Most GetProcAddress calls are unrelated to Reflex/FG/DXGI. Do not
+    // query loader paths or caller modules until an interesting name appears.
+    const bool streamlineName = strcmp(procName, "slGetFeatureFunction") == 0;
+    const bool nvapiName = IsReflexProbingEnabled() &&
+        (strcmp(procName, "nvapi_QueryInterface") == 0 ||
+         (g_shared->countReflexSleepCalls &&
+          strcmp(procName, "NvAPI_D3D_Sleep") == 0));
+    const bool presentationName = IsPresentationProbingEnabled() &&
+        PresentationDxgi::IsDynamicExportName(procName);
+    if (!streamlineName && !nvapiName && !presentationName)
+        return result;
+
     wchar_t modulePath[ReflexProbeProtocol::kPathChars]{};
     if (!GetModulePath(module, modulePath, _countof(modulePath)))
         return result;

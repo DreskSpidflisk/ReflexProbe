@@ -11,6 +11,7 @@ bool Initialize(ReflexProbeProtocol::SharedState* shared);
 // The resolver caller check excludes Steam / GOG overlay code.
 bool IsApplicationModule(HMODULE module);
 bool IsApplicationCaller(const void* returnAddress);
+bool IsDynamicExportName(const char* name);
 bool PatchImports(HMODULE module);
 FARPROC ResolveDynamic(HMODULE module, LPCSTR name, FARPROC original);
 }
