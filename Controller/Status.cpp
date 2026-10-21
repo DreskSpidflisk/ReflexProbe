@@ -21,6 +21,49 @@ void SetStatusCaretToEnd()
         static_cast<WPARAM>(textLength), static_cast<LPARAM>(textLength));
 }
 
+// Keep the existing EDIT log continuously useful in intensive Raw sessions.
+// Trimming is rare (every few MiB), removes whole lines, and never touches
+// the controller's separately retained binary Raw ring.
+size_t TrimStatusHistory(size_t incomingChars)
+{
+    if (!g_app.status)
+        return 0;
+
+    constexpr size_t kHeadroom = 512u * 1024u;
+    constexpr size_t kTrimTarget = 4u * 1024u * 1024u;
+    const int length = GetWindowTextLengthW(g_app.status);
+    if (length <= 0 || static_cast<size_t>(length) + incomingChars <
+            kStatusTextLimit - kHeadroom)
+        return 0;
+
+    const SIZE_T bytes = (static_cast<SIZE_T>(length) + 1) * sizeof(wchar_t);
+    wchar_t* snapshot = static_cast<wchar_t*>(HeapAlloc(GetProcessHeap(), 0, bytes));
+    if (!snapshot)
+        return 0;
+    const int copied = GetWindowTextW(g_app.status, snapshot, length + 1);
+    if (copied <= 0) {
+        HeapFree(GetProcessHeap(), 0, snapshot);
+        return 0;
+    }
+
+    const size_t seekFrom = kTrimTarget < static_cast<size_t>(copied)
+        ? kTrimTarget : static_cast<size_t>(copied) / 2;
+    // A newline *after* the trim target ensures no diagnostic is cut in half.
+    const wchar_t* newline = wcschr(snapshot + seekFrom, L'\n');
+    const size_t removeChars = newline
+        ? static_cast<size_t>(newline - snapshot + 1) : 0;
+    HeapFree(GetProcessHeap(), 0, snapshot);
+    if (!removeChars)
+        return 0;
+
+    SendMessageW(g_app.status, EM_SETSEL, 0, static_cast<LPARAM>(removeChars));
+    SendMessageW(g_app.status, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(L""));
+    SendMessageW(g_app.status, EM_SETSEL, 0, 0);
+    SendMessageW(g_app.status, EM_REPLACESEL, FALSE,
+        reinterpret_cast<LPARAM>(L"[Earlier log lines discarded to keep the live display rolling.]\r\n"));
+    return removeChars;
+}
+
 void AppendStatus(const wchar_t* text)
 {
     if (!g_app.status || !text)
@@ -32,6 +75,18 @@ void AppendStatus(const wchar_t* text)
     if (preserveSelection) {
         SendMessageW(g_app.status, EM_GETSEL,
             reinterpret_cast<WPARAM>(&selectionStart), reinterpret_cast<LPARAM>(&selectionEnd));
+    }
+
+    const size_t discarded = TrimStatusHistory(wcslen(text));
+    if (preserveSelection && discarded) {
+        const DWORD removed = static_cast<DWORD>(discarded);
+        selectionStart = selectionStart > removed ? selectionStart - removed : 0;
+        selectionEnd = selectionEnd > removed ? selectionEnd - removed : 0;
+        constexpr DWORD kNoticeLength =
+            static_cast<DWORD>(sizeof(L"[Earlier log lines discarded to keep the live display rolling.]\r\n") /
+                    sizeof(wchar_t) - 1);
+        selectionStart += kNoticeLength;
+        selectionEnd += kNoticeLength;
     }
 
     SetStatusCaretToEnd();
