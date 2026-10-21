@@ -1026,6 +1026,9 @@ void PollSharedState()
     }
 
     LONG processedSerial = g_app.lastEventSerial;
+    LONG exitedSkipped = 0;
+    LONG exitedSkippedStart = 0;
+    bool gapOpen = false;
     for (LONG serial = first; serial <= currentSerial; ++serial) {
         if (serial <= 0)
             continue;
@@ -1034,8 +1037,23 @@ void PollSharedState()
         const ReflexProbeProtocol::ReflexEvent& event = g_app.shared->events[index];
         const LONG storedSerial = InterlockedCompareExchange(
             const_cast<volatile LONG*>(&event.sequence), 0, 0);
-        if (storedSerial != serial)
-            break;
+        if (storedSerial != serial) {
+            if (!targetExited)
+                break; // A writer may still be finishing this event.
+
+            // No writers can finish after process termination. Skip isolated
+            // gaps rather than losing every valid event behind one dead writer.
+            if (!gapOpen) {
+                LARGE_INTEGER qpc{};
+                QueryPerformanceCounter(&qpc);
+                RecordRunBoundary(qpc.QuadPart);
+                exitedSkippedStart = serial;
+                gapOpen = true;
+            }
+            ++exitedSkipped;
+            processedSerial = serial;
+            continue;
+        }
 
         CapturedReflexEvent captured{};
         captured.qpc = event.qpc;
@@ -1048,14 +1066,43 @@ void PollSharedState()
         captured.requestedUs = event.requestedUs;
         captured.effectiveUs = event.effectiveUs;
         if (captured.kind == ReflexProbeProtocol::FgEventSetOptions ||
-            captured.kind == ReflexProbeProtocol::FgEventGetState) {
+            captured.kind == ReflexProbeProtocol::FgEventGetState)
             captured.fg = event.fg;
-            if (captured.kind == ReflexProbeProtocol::FgEventSetOptions)
-                UpdateCurrentFgState(captured);
-        }
         if (captured.kind == ReflexProbeProtocol::PresentationEventPresent ||
             captured.kind == ReflexProbeProtocol::PresentationEventSwapChain)
             captured.presentation = event.presentation;
+        // A ring writer can lap this slot while we copy the payload.
+        // Do not consume a mixed event even if the first sequence matched.
+        const LONG copiedSerial = InterlockedCompareExchange(
+            const_cast<volatile LONG*>(&event.sequence), 0, 0);
+        if (copiedSerial != serial) {
+            LARGE_INTEGER qpc{};
+            QueryPerformanceCounter(&qpc);
+            RecordRunBoundary(qpc.QuadPart);
+            if (!targetExited)
+                break;
+            if (!gapOpen) {
+                exitedSkippedStart = serial;
+                gapOpen = true;
+            }
+            ++exitedSkipped;
+            processedSerial = serial;
+            continue;
+        }
+        if (gapOpen) {
+            wchar_t message[224]{};
+            swprintf_s(message,
+                L"WARNING: final probe drain skipped %ld unavailable event(s) starting at serial #%ld.",
+                exitedSkipped, exitedSkippedStart);
+            AppendStatusLineAtQpc(message, captured.qpc);
+            gapOpen = false;
+            exitedSkipped = 0;
+        }
+        if (captured.kind == ReflexProbeProtocol::FgEventSetOptions ||
+            captured.kind == ReflexProbeProtocol::FgEventGetState) {
+            if (captured.kind == ReflexProbeProtocol::FgEventSetOptions)
+                UpdateCurrentFgState(captured);
+        }
         if (captured.kind == ReflexProbeProtocol::ReflexEventSettings)
             UpdateCurrentEffectiveState(captured);
         if (captured.kind == ReflexProbeProtocol::ReflexEventSleep &&
@@ -1071,6 +1118,13 @@ void PollSharedState()
         processedSerial = serial;
     }
 
+    if (gapOpen) {
+        wchar_t message[224]{};
+        swprintf_s(message,
+            L"WARNING: final probe drain skipped %ld unavailable event(s) starting at serial #%ld.",
+            exitedSkipped, exitedSkippedStart);
+        AppendStatusLine(message);
+    }
     if (processedSerial > g_app.lastEventSerial)
         g_app.lastEventSerial = processedSerial;
 
