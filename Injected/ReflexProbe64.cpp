@@ -1164,18 +1164,18 @@ bool PatchApplicationNvapiResolver(bool& armedAny)
     return true;
 }
 
+// Loaded once by the discovery worker; the Windows directory does not change
+// within the lifetime of the injected process. No hot-path initialization.
+wchar_t g_windowsDirectory[MAX_PATH]{};
+size_t g_windowsDirectoryLength = 0;
+
 bool IsPathUnderWindowsDirectory(const wchar_t* path)
 {
-    if (!path || !path[0])
+    if (!path || !path[0] || !g_windowsDirectoryLength)
         return false;
 
-    wchar_t windowsDirectory[MAX_PATH]{};
-    const UINT chars = GetWindowsDirectoryW(
-        windowsDirectory, static_cast<UINT>(_countof(windowsDirectory)));
-    if (!chars || chars >= _countof(windowsDirectory))
-        return false;
-
-    const size_t length = wcslen(windowsDirectory);
+    const wchar_t* windowsDirectory = g_windowsDirectory;
+    const size_t length = g_windowsDirectoryLength;
     if (_wcsnicmp(path, windowsDirectory, length) != 0)
         return false;
 
@@ -1241,24 +1241,12 @@ bool PatchGetProcAddressResolverInModule(HMODULE module)
             continue;
 
         auto* thunk = reinterpret_cast<IMAGE_THUNK_DATA64*>(base + descriptor->FirstThunk);
-        auto* names = descriptor->OriginalFirstThunk
-            ? reinterpret_cast<IMAGE_THUNK_DATA64*>(base + descriptor->OriginalFirstThunk)
-            : nullptr;
-
         for (size_t index = 0; thunk[index].u1.Function; ++index) {
             void* current =
                 reinterpret_cast<void*>(static_cast<uintptr_t>(thunk[index].u1.Function));
-            bool nameMatches = false;
-
-            if (names && names[index].u1.AddressOfData &&
-                !IMAGE_SNAP_BY_ORDINAL64(names[index].u1.Ordinal)) {
-                auto* imported = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(
-                    base + names[index].u1.AddressOfData);
-                nameMatches =
-                    strcmp(reinterpret_cast<const char*>(imported->Name), "GetProcAddress") == 0;
-            }
-
-            if (!nameMatches && current != expectedGetProcAddress &&
+            // The canonical function pointer, not the import-name hint,
+            // decides ownership. Never replace another injector's trampoline.
+            if (current != expectedGetProcAddress &&
                 current != reinterpret_cast<void*>(&HookApplicationGetProcAddress)) {
                 continue;
             }
@@ -1287,13 +1275,20 @@ bool PatchGetProcAddressResolverInModule(HMODULE module)
     return true;
 }
 
-bool PatchLegacyPluginGatewayResolver(HMODULE module, bool& sawTarget)
+struct StreamlineScanContext {
+    HMODULE interposer = nullptr;
+    void* modernResolver = nullptr;
+    void* legacySetConstants = nullptr;
+    bool legacy = false;
+};
+
+bool PatchLegacyPluginGatewayResolver(HMODULE module, bool& sawTarget,
+                                      const StreamlineScanContext& context)
 {
     sawTarget = false;
 
-    HMODULE interposer = GetModuleHandleW(L"sl.interposer.dll");
-    if (!IsReflexProbingEnabled() || !interposer || module != interposer ||
-        !IsLegacyStreamlineInterposer(interposer))
+    if (!IsReflexProbingEnabled() || !context.interposer ||
+        module != context.interposer || !context.legacy)
         return true;
 
     auto* base = reinterpret_cast<unsigned char*>(module);
@@ -1362,14 +1357,15 @@ bool PatchLegacyPluginGatewayResolver(HMODULE module, bool& sawTarget)
     return true;
 }
 
-bool PatchStreamlineImportsInModule(HMODULE module, bool& sawTarget)
+bool PatchStreamlineImportsInModule(HMODULE module, bool& sawTarget,
+                                    const StreamlineScanContext& context)
 {
     sawTarget = false;
     if (!module)
         return false;
 
     bool sawLegacyGateway = false;
-    if (!PatchLegacyPluginGatewayResolver(module, sawLegacyGateway))
+    if (!PatchLegacyPluginGatewayResolver(module, sawLegacyGateway, context))
         return false;
     if (sawLegacyGateway) {
         sawTarget = true;
@@ -1390,14 +1386,13 @@ bool PatchStreamlineImportsInModule(HMODULE module, bool& sawTarget)
     if (!imports.VirtualAddress || !imports.Size)
         return true;
 
-    HMODULE interposer = GetModuleHandleW(L"sl.interposer.dll");
-    if (!interposer)
+    if (!context.interposer)
         return true;
 
-    void* modernResolver = reinterpret_cast<void*>(GetProcAddress(interposer, "slGetFeatureFunction"));
-    void* legacySetConstants = reinterpret_cast<void*>(GetProcAddress(interposer, "slSetFeatureConstants"));
+    void* modernResolver = context.modernResolver;
+    void* legacySetConstants = context.legacySetConstants;
     const bool useLegacyPublicPath = IsReflexProbingEnabled() &&
-        IsLegacyStreamlineInterposer(interposer) && legacySetConstants != nullptr;
+        context.legacy && legacySetConstants != nullptr;
 
     auto* descriptor = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + imports.VirtualAddress);
     for (; descriptor->Name; ++descriptor) {
@@ -1472,6 +1467,19 @@ bool PatchLoadedStreamlineImports(bool& foundAny)
     if (snapshot == INVALID_HANDLE_VALUE)
         return false;
 
+    // A scan is short; recompute on each pass so late-loaded/unloaded
+    // Streamline instances cannot leave us with stale module pointers.
+    StreamlineScanContext context{};
+    context.interposer = GetModuleHandleW(L"sl.interposer.dll");
+    if (context.interposer) {
+        context.modernResolver = reinterpret_cast<void*>(
+            GetProcAddress(context.interposer, "slGetFeatureFunction"));
+        context.legacySetConstants = reinterpret_cast<void*>(
+            GetProcAddress(context.interposer, "slSetFeatureConstants"));
+        if (IsReflexProbingEnabled())
+            context.legacy = IsLegacyStreamlineInterposer(context.interposer);
+    }
+
     MODULEENTRY32W entry{};
     entry.dwSize = sizeof(entry);
 
@@ -1498,7 +1506,7 @@ bool PatchLoadedStreamlineImports(bool& foundAny)
                 PatchGetProcAddressResolverInModule(heldModule);
             bool sawTarget = false;
             if (patched)
-                patched = PatchStreamlineImportsInModule(heldModule, sawTarget);
+                patched = PatchStreamlineImportsInModule(heldModule, sawTarget, context);
             if (patched && !probeFg && !sawTarget && IsReflexProbingEnabled())
                 patched = PatchGetProcAddressResolverInModule(heldModule);
             if (patched && probePresentationHere)
@@ -1533,6 +1541,14 @@ DWORD WINAPI WorkerThread(void*)
     if (!IsReflexProbingEnabled() && !IsFgProbingEnabled() &&
         !IsPresentationProbingEnabled())
         return 0;
+
+    // Discovery-only cache: avoid querying the system directory for every
+    // module on every pass, including long-running Presentation sessions.
+    const UINT dirChars = GetWindowsDirectoryW(
+        g_windowsDirectory, static_cast<UINT>(_countof(g_windowsDirectory)));
+    g_windowsDirectoryLength =
+        dirChars > 0 && dirChars < _countof(g_windowsDirectory)
+            ? static_cast<size_t>(dirChars) : 0;
 
     if (IsPresentationProbingEnabled() && !PresentationDxgi::Initialize(g_shared)) {
         SetSharedError(L"Could not initialize presentation thread-local cache.");
