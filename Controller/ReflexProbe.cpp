@@ -346,6 +346,11 @@ void CleanupTarget()
         g_app.process = nullptr;
     }
 
+    // The 50 ms controller poll is useful only while a target is attached.
+    // Watch acquisition retains its independent 10 ms watch timer.
+    if (g_app.window)
+        KillTimer(g_app.window, kPollTimer);
+
     g_app.processId = 0;
     g_app.lastHookState = -1;
     g_app.lastFgHookBits = 0;
@@ -464,8 +469,23 @@ bool LaunchAndInject()
     uintptr_t remoteOwner = 0;
     bool resumed = false;
 
-    if (!loadLibrary || !GetLocalFunctionOwner(reinterpret_cast<void*>(loadLibrary), owner, ownerName, _countof(ownerName)) ||
-        !WaitForRemoteFunctionOwner(process.dwProcessId, ownerName, remoteOwner, 50)) {
+    const ULONGLONG ownerWaitStart = GetTickCount64();
+    const bool ownerReady =
+        loadLibrary &&
+        GetLocalFunctionOwner(reinterpret_cast<void*>(loadLibrary),
+            owner, ownerName, _countof(ownerName)) &&
+        WaitForRemoteFunctionOwner(process.dwProcessId, ownerName, remoteOwner, 50);
+    {
+        wchar_t launchDiagnostic[224]{};
+        swprintf_s(launchDiagnostic,
+            L"Launch: remote LoadLibraryW owner %s after %llu ms; %s.",
+            ownerReady ? L"found" : L"not found",
+            static_cast<unsigned long long>(GetTickCount64() - ownerWaitStart),
+            ownerReady ? L"target remains suspended during injection"
+                       : L"resuming primary thread before injection");
+        AppendStatusLine(launchDiagnostic);
+    }
+    if (!ownerReady) {
         ResumeThread(process.hThread);
         resumed = true;
     }
@@ -488,6 +508,7 @@ bool LaunchAndInject()
     g_app.lastEventSerial = 0;
     g_app.loggedInjectedBuild = false;
     g_app.rawUiBatchWarningShown = false;
+    SetTimer(g_app.window, kPollTimer, kPollIntervalMs, nullptr);
     UpdateAcquisitionControls();
 
     wchar_t line[512]{};
@@ -1231,7 +1252,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         AppendStatusLine(L"Capture mode defaults to State changes. Raw debug retains at most 131072 calls in RAM. ReflexProbe never writes capture data to disk.");
         LogBinaryIdentity();
         g_app.capturingStartupDiagnostics = false;
-        SetTimer(window, kPollTimer, kPollIntervalMs, nullptr);
+        // No idle 20 Hz wakeups; the timer starts on successful injection.
         return 0;
     }
 

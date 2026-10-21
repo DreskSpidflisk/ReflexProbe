@@ -715,6 +715,7 @@ bool InjectMatchedProcess(const ProcessMatch& match,
     g_app.lastEventSerial = 0;
     g_app.loggedInjectedBuild = false;
     g_app.rawUiBatchWarningShown = false;
+    SetTimer(g_app.window, kPollTimer, kPollIntervalMs, nullptr);
     UpdateAcquisitionControls();
 
     swprintf_s(line,
