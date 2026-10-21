@@ -1534,8 +1534,10 @@ DWORD WINAPI WorkerThread(void*)
         !IsPresentationProbingEnabled())
         return 0;
 
-    if (IsPresentationProbingEnabled())
-        PresentationDxgi::Initialize(g_shared);
+    if (IsPresentationProbingEnabled() && !PresentationDxgi::Initialize(g_shared)) {
+        SetSharedError(L"Could not initialize presentation thread-local cache.");
+        return 1;
+    }
 
     InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateWaitingForDll);
 

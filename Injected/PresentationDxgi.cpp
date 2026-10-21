@@ -56,6 +56,42 @@ constexpr size_t kHookCapacity = 128;
 SlotHook g_slots[kHookCapacity]{};
 SRWLOCK g_slotsLock = SRWLOCK_INIT;
 
+// Created only when presentation probing is enabled. FLS avoids unconditional
+// static TLS in an injected DLL, including runs with all probes unchecked.
+// Thread exit frees any lazily allocated cache; no per-Present heap operations.
+struct ThreadContext {
+    struct CachedOriginal {
+        void** slot;
+        void* predecessor;
+    } cache[8];
+    unsigned int factoryDepth;
+};
+DWORD g_threadContextSlot = FLS_OUT_OF_INDEXES;
+
+VOID CALLBACK FreeThreadContext(PVOID context)
+{
+    if (context)
+        HeapFree(GetProcessHeap(), 0, context);
+}
+
+ThreadContext* GetThreadContext()
+{
+    if (g_threadContextSlot == FLS_OUT_OF_INDEXES)
+        return nullptr;
+    auto* context = static_cast<ThreadContext*>(FlsGetValue(g_threadContextSlot));
+    if (context)
+        return context;
+    context = static_cast<ThreadContext*>(
+        HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(ThreadContext)));
+    if (!context)
+        return nullptr;
+    if (!FlsSetValue(g_threadContextSlot, context)) {
+        HeapFree(GetProcessHeap(), 0, context);
+        return nullptr;
+    }
+    return context;
+}
+
 // Do not wrap an overlay's DXGI imports: its factory trampoline can call back
 // into an IAT entry we replaced, while our saved DXGI export routes into the
 // overlay's trampoline. Steam demonstrated precisely such a recursion cycle.
@@ -83,20 +119,29 @@ bool ShouldProbeModule(HMODULE module)
 }
 
 // A guard is a diagnostic safety net, not a substitute for correct chaining.
-thread_local unsigned int g_factoryDepth = 0;
 volatile LONG g_recursionReported = 0;
 struct FactoryScope {
-    FactoryScope() { ++g_factoryDepth; }
-    ~FactoryScope() { --g_factoryDepth; }
+    ThreadContext* context;
+    FactoryScope() : context(GetThreadContext()) {
+        if (context)
+            ++context->factoryDepth;
+    }
+    ~FactoryScope() {
+        if (context)
+            --context->factoryDepth;
+    }
 };
 
 bool RefuseRecursiveFactory()
 {
-    if (g_factoryDepth < 8)
+    ThreadContext* context = GetThreadContext();
+    // Never forward an unguarded factory trampoline if its per-thread
+    // recursion state could not be obtained.
+    if (context && context->factoryDepth < 8)
         return false;
     if (g_shared) InterlockedOr(&g_shared->presentationHookBits, 32);
     if (InterlockedCompareExchange(&g_recursionReported, 1, 0) == 0)
-        OutputDebugStringW(L"ReflexProbe64: ERROR: recursive DXGI factory forwarding; aborting nested factory call.\\n");
+        OutputDebugStringW(L"ReflexProbe64: ERROR: recursive DXGI factory forwarding or thread context unavailable; aborting nested factory call.\\n");
     return true;
 }
 
@@ -124,18 +169,14 @@ void* Original(void* instance, size_t index)
     void** vtable = *reinterpret_cast<void***>(instance);
     void** slot = &vtable[index];
 
-    // The predecessor associated with a hooked slot does not change. Reuse
-    // successful lookups per calling thread to avoid a table lock each Present.
-    struct CachedOriginal {
-        void** slot;
-        void* predecessor;
-    };
-    thread_local CachedOriginal cache[4] = {};
+    // Only enabled presentation hooks touch this lazy thread cache.
+    // Hooked predecessor mappings remain stable once installed.
+    ThreadContext* context = GetThreadContext();
     const size_t cacheIndex = index == 8 ? 0 : index == 13 ? 1 :
-        index == 22 ? 2 : 3;
-    CachedOriginal& cached = cache[cacheIndex];
-    if (cached.slot == slot)
-        return cached.predecessor;
+        index == 22 ? 2 : index == 10 ? 3 : index == 15 ? 4 :
+        index == 16 ? 5 : index == 17 ? 6 : 7;
+    if (context && context->cache[cacheIndex].slot == slot)
+        return context->cache[cacheIndex].predecessor;
 
     void* result = nullptr;
     AcquireSRWLockShared(&g_slotsLock);
@@ -146,9 +187,9 @@ void* Original(void* instance, size_t index)
         }
     }
     ReleaseSRWLockShared(&g_slotsLock);
-    if (result) {
-        cached.predecessor = result;
-        cached.slot = slot;
+    if (result && context) {
+        context->cache[cacheIndex].predecessor = result;
+        context->cache[cacheIndex].slot = slot;
     }
     return result;
 }
@@ -478,9 +519,16 @@ size_t Exports(HMODULE module, ExportHook* hooks, size_t capacity)
 
 } // namespace
 
-void Initialize(ReflexProbeProtocol::SharedState* shared)
+bool Initialize(ReflexProbeProtocol::SharedState* shared)
 {
+    // Do not allocate an FLS slot or touch thread caches unless this probe
+    // was explicitly enabled during acquisition.
+    const DWORD slot = FlsAlloc(&FreeThreadContext);
+    if (slot == FLS_OUT_OF_INDEXES)
+        return false;
+    g_threadContextSlot = slot;
     g_shared = shared;
+    return true;
 }
 
 bool IsApplicationModule(HMODULE module)
