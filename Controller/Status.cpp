@@ -62,53 +62,68 @@ void AppendStatusCount(const wchar_t* text, size_t count)
     }
 }
 
+// UI-thread-only conversion cache. System clock and QPC are re-anchored
+// periodically; repeated events in the same local second reuse one conversion.
 void FormatTimestamp(LONGLONG eventQpc, wchar_t* out, size_t outCount)
 {
     if (!out || !outCount)
         return;
 
-    SYSTEMTIME localTime{};
-    bool converted = false;
+    static LARGE_INTEGER frequency{};
+    static LONGLONG anchorQpc = 0;
+    static ULONGLONG anchorUtc = 0;
+    static ULONGLONG lastConvertedSecond = ~0ULL;
+    static SYSTEMTIME cachedLocal{};
 
-    if (eventQpc > 0) {
-        LARGE_INTEGER nowQpc{};
-        LARGE_INTEGER frequency{};
-        FILETIME nowUtc{};
-        if (QueryPerformanceCounter(&nowQpc) && QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0) {
-            GetSystemTimeAsFileTime(&nowUtc);
+    if (!frequency.QuadPart && !QueryPerformanceFrequency(&frequency))
+        frequency.QuadPart = 0;
 
-            ULARGE_INTEGER eventUtc{};
-            eventUtc.LowPart = nowUtc.dwLowDateTime;
-            eventUtc.HighPart = nowUtc.dwHighDateTime;
+    LARGE_INTEGER now{};
+    if (frequency.QuadPart > 0 && QueryPerformanceCounter(&now)) {
+        if (!anchorQpc || now.QuadPart < anchorQpc ||
+            now.QuadPart - anchorQpc >= frequency.QuadPart) {
+            FILETIME utc{};
+            GetSystemTimeAsFileTime(&utc);
+            ULARGE_INTEGER value{};
+            value.LowPart = utc.dwLowDateTime;
+            value.HighPart = utc.dwHighDateTime;
+            anchorUtc = value.QuadPart;
+            anchorQpc = now.QuadPart;
+        }
 
-            if (eventQpc < nowQpc.QuadPart) {
-                const LONGLONG deltaQpc = nowQpc.QuadPart - eventQpc;
-                const double delta100nsDouble =
-                    (static_cast<double>(deltaQpc) * 10000000.0) /
-                    static_cast<double>(frequency.QuadPart);
-                const ULONGLONG delta100ns = static_cast<ULONGLONG>(delta100nsDouble);
-                if (delta100ns < eventUtc.QuadPart)
-                    eventUtc.QuadPart -= delta100ns;
-            }
+        const LONGLONG chosenQpc = eventQpc > 0 ? eventQpc : now.QuadPart;
+        const double offset =
+            (static_cast<double>(chosenQpc - anchorQpc) * 10000000.0) /
+            static_cast<double>(frequency.QuadPart);
+        const LONGLONG offsetTicks = static_cast<LONGLONG>(offset);
+        const ULONGLONG utcTicks = offsetTicks < 0 &&
+            static_cast<ULONGLONG>(-offsetTicks) > anchorUtc
+            ? 0 : static_cast<ULONGLONG>(static_cast<LONGLONG>(anchorUtc) + offsetTicks);
+        const ULONGLONG second = utcTicks / 10000000ULL;
 
-            FILETIME eventUtcFile{};
-            eventUtcFile.dwLowDateTime = eventUtc.LowPart;
-            eventUtcFile.dwHighDateTime = eventUtc.HighPart;
-            FILETIME eventLocalFile{};
-            if (FileTimeToLocalFileTime(&eventUtcFile, &eventLocalFile) &&
-                FileTimeToSystemTime(&eventLocalFile, &localTime)) {
-                converted = true;
+        if (second != lastConvertedSecond) {
+            FILETIME utc{};
+            utc.dwLowDateTime = static_cast<DWORD>(utcTicks);
+            utc.dwHighDateTime = static_cast<DWORD>(utcTicks >> 32);
+            FILETIME local{};
+            SYSTEMTIME converted{};
+            if (FileTimeToLocalFileTime(&utc, &local) &&
+                FileTimeToSystemTime(&local, &converted)) {
+                cachedLocal = converted;
+                lastConvertedSecond = second;
+            } else {
+                GetLocalTime(&cachedLocal);
+                lastConvertedSecond = second;
             }
         }
+    } else {
+        GetLocalTime(&cachedLocal);
     }
 
-    if (!converted)
-        GetLocalTime(&localTime);
-
     swprintf_s(out, outCount, L"[%02u:%02u:%02u] ",
-        static_cast<unsigned int>(localTime.wHour),
-        static_cast<unsigned int>(localTime.wMinute),
-        static_cast<unsigned int>(localTime.wSecond));
+        static_cast<unsigned int>(cachedLocal.wHour),
+        static_cast<unsigned int>(cachedLocal.wMinute),
+        static_cast<unsigned int>(cachedLocal.wSecond));
 }
 
 bool EnsureTextBufferCapacity(TextBuffer& buffer, size_t requiredChars)
@@ -200,21 +215,14 @@ void AppendDisplayLineAtQpc(const wchar_t* text, LONGLONG eventQpc)
     if (!text)
         return;
 
-    const wchar_t* cursor = text;
-    for (;;) {
-        const wchar_t* newline = wcsstr(cursor, L"\r\n");
-        const size_t lineLength = newline ? static_cast<size_t>(newline - cursor) : wcslen(cursor);
-
-        wchar_t timestamp[32]{};
-        FormatTimestamp(eventQpc, timestamp, _countof(timestamp));
-        AppendStatus(timestamp);
-        AppendStatusCount(cursor, lineLength);
-        AppendStatus(L"\r\n");
-
-        if (!newline)
-            break;
-        cursor = newline + 2;
-    }
+    // Build one contiguous append instead of three EDIT operations per line.
+    // The scratch buffer is reusable and lives in the controller only.
+    TextBuffer& scratch = g_app.displayScratch;
+    scratch.length = 0;
+    if (scratch.data)
+        scratch.data[0] = 0;
+    if (AppendTextBufferLineAtQpc(scratch, text, eventQpc) && scratch.data)
+        AppendStatus(scratch.data);
 }
 
 void AppendDisplayLine(const wchar_t* text)

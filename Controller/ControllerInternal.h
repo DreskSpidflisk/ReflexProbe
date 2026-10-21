@@ -212,6 +212,7 @@ struct AppState {
 
     // RAM-only startup banner, stored without timestamps for Clear replay.
     TextBuffer startupDiagnostics{};
+    TextBuffer displayScratch{}; // reused UI-thread-only line assembly
     bool capturingStartupDiagnostics = false;
 
     bool haveStateEvent = false;

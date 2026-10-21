@@ -1387,6 +1387,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         CleanupTarget();
         FreeRawDebugBuffer();
         FreeTextBuffer(g_app.startupDiagnostics);
+        FreeTextBuffer(g_app.displayScratch);
         PostQuitMessage(0);
         return 0;
     }
