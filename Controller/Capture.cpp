@@ -1003,6 +1003,8 @@ void PollSharedState()
             AppendStatusLine(L"D3D11 direct device-and-swap-chain creation intercepted.");
         if (newPresentationHooks & 32)
             AppendStatusLine(L"WARNING: Recursive DXGI factory forwarding detected; aborted a nested call. Check Steam overlay chaining.");
+        if (newPresentationHooks & 64)
+            AppendStatusLine(L"WARNING: DXGI Present predecessor lookup failed; no safe forwarding pointer for this vtable.");
         g_app.lastPresentationHookBits = presentationBits;
     }
 

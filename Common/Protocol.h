@@ -148,7 +148,7 @@ struct SharedState {
     volatile LONG fgSetCallSerial;
     volatile LONG fgGetCallSerial;
     volatile LONG presentationCallSerial;
-    volatile LONG presentationHookBits; // 1=factory, 2=Present, 4=Present1, 8=ResizeBuffers, 16=D3D11 helper, 32=factory recursion detected.
+    volatile LONG presentationHookBits; // 1=factory, 2=Present, 4=Present1, 8=ResizeBuffers, 16=D3D11 helper, 32=factory recursion detected, 64=missing Present predecessor.
     volatile LONG fgHookBits; // 1 = SetOptions resolved; 2 = GetState resolved.
 
     wchar_t targetPath[kPathChars];

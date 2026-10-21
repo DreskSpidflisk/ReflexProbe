@@ -55,6 +55,7 @@ struct SlotHook {
 constexpr size_t kHookCapacity = 128;
 SlotHook g_slots[kHookCapacity]{};
 SRWLOCK g_slotsLock = SRWLOCK_INIT;
+volatile LONG g_missingPresentPredecessorReported = 0;
 
 // Created only when presentation probing is enabled. FLS avoids unconditional
 // static TLS in an injected DLL, including runs with all probes unchecked.
@@ -187,6 +188,12 @@ void* Original(void* instance, size_t index)
         }
     }
     ReleaseSRWLockShared(&g_slotsLock);
+    if (!result && (index == 8 || index == 22)) {
+        if (g_shared)
+            InterlockedOr(&g_shared->presentationHookBits, 64);
+        if (InterlockedCompareExchange(&g_missingPresentPredecessorReported, 1, 0) == 0)
+            OutputDebugStringW(L"ReflexProbe64: ERROR: DXGI Present predecessor lookup failed; no safe hook-chain fallback.\n");
+    }
     if (result && context) {
         context->cache[cacheIndex].predecessor = result;
         context->cache[cacheIndex].slot = slot;
