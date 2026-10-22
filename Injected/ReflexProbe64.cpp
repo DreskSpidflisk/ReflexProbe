@@ -997,10 +997,13 @@ FARPROC WINAPI HookApplicationGetProcAddress(HMODULE module, LPCSTR procName)
     // is shared plumbing; individual feature substitution is NOT shared.
     const bool streamlineName = (IsReflexProbingEnabled() || IsFgProbingEnabled()) &&
         strcmp(procName, "slGetFeatureFunction") == 0;
-    const bool nvapiName = IsReflexProbingEnabled() && !HasStreamlineReflexBoundary() &&
+    // Reject unrelated exports before consulting the Streamline backend state.
+    // GetProcAddress can be common even when no NVAPI function is requested.
+    const bool nvapiName = IsReflexProbingEnabled() &&
         (strcmp(procName, "nvapi_QueryInterface") == 0 ||
          (g_shared->countReflexSleepCalls &&
-          strcmp(procName, "NvAPI_D3D_Sleep") == 0));
+          strcmp(procName, "NvAPI_D3D_Sleep") == 0)) &&
+        !HasStreamlineReflexBoundary();
     const bool presentationName = IsPresentationProbingEnabled() &&
         PresentationDxgi::IsDynamicExportName(procName);
     if (!streamlineName && !nvapiName && !presentationName)
@@ -1635,8 +1638,22 @@ DWORD WINAPI WorkerThread(void*)
     bool streamlineReflexSelected = false;
     for (uint32_t attempt = 0;; ++attempt) {
         bool foundStreamlineImport = false;
-        if (!PatchLoadedStreamlineImports(foundStreamlineImport))
+        // No Streamline module inspection in Presentation-only mode, and no
+        // repeated Reflex scan after its selected backend is established.
+        // An enabled FG probe independently continues until its requested
+        // SetOptions / optional GetState interception is available.
+        const LONG requiredFgHooks = 1 | (g_shared->wrapFgGetState ? 2 : 0);
+        const bool fgPending = IsFgProbingEnabled() &&
+            (InterlockedCompareExchange(&g_shared->fgHookBits, 0, 0) &
+                requiredFgHooks) != requiredFgHooks;
+        const bool reflexPending = IsReflexProbingEnabled() &&
+            !streamlineReflexSelected &&
+            InterlockedCompareExchange(&g_nativeNvapiCaptured, 0, 0) == 0 &&
+            InterlockedCompareExchange(&g_modernReflexCaptured, 0, 0) == 0;
+        if ((fgPending || reflexPending) &&
+            !PatchLoadedStreamlineImports(foundStreamlineImport))
             return 1;
+        // Always perform Presentation discovery *after* Reflex/FG discovery.
         if (IsPresentationProbingEnabled() && !PatchLoadedPresentationImports())
             return 1;
 
@@ -1644,7 +1661,8 @@ DWORD WINAPI WorkerThread(void*)
             (HasStreamlineReflexBoundary() || (!IsFgProbingEnabled() && foundStreamlineImport)))
             streamlineReflexSelected = true;
 
-        if (streamlineReflexSelected && !IsPresentationProbingEnabled()) {
+        if (streamlineReflexSelected && !IsFgProbingEnabled() &&
+            !IsPresentationProbingEnabled()) {
             if (InterlockedCompareExchange(&g_legacyPluginGatewayArmed, 0, 0) != 0) {
                 OutputDebugStringW(
                     L"ReflexProbe64: armed Streamline 1.x sl.reflex plugin-gateway interception; worker exiting.\n");
