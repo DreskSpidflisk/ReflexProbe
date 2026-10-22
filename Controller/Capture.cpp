@@ -675,6 +675,32 @@ void UpdateCurrentFgState(const CapturedReflexEvent& event)
     }
 }
 
+// The status row shows the last successful Present's effective arguments,
+// not the game's request or the display's actual scanout mode. Cache exactly
+// what is visible: changing unrelated Present flags/results must not redraw.
+void UpdateCurrentPresentState(const CapturedReflexEvent& event)
+{
+    if (event.kind != ReflexProbeProtocol::PresentationEventPresent ||
+        !g_app.presentState || event.result < 0)
+        return;
+
+    const auto& present = event.presentation;
+    const bool allowTearing = (present.forwardedPresentFlags & 0x200u) != 0;
+    if (g_app.havePresentLabelState &&
+        g_app.presentLabelSyncInterval == present.forwardedSyncInterval &&
+        g_app.presentLabelAllowTearing == allowTearing)
+        return;
+
+    wchar_t label[160]{};
+    swprintf_s(label, L"Present: SyncInterval %u | Allow Tearing: %s",
+        present.forwardedSyncInterval, allowTearing ? L"On" : L"Off");
+    if (SetWindowTextW(g_app.presentState, label)) {
+        g_app.havePresentLabelState = true;
+        g_app.presentLabelSyncInterval = present.forwardedSyncInterval;
+        g_app.presentLabelAllowTearing = allowTearing;
+    }
+}
+
 bool AppendCapturedEventToBuffer(TextBuffer& buffer, const CapturedReflexEvent& event, bool newState)
 {
     wchar_t line[512]{};
@@ -1108,6 +1134,8 @@ void PollSharedState()
         }
         if (captured.kind == ReflexProbeProtocol::ReflexEventSettings)
             UpdateCurrentEffectiveState(captured);
+        if (captured.kind == ReflexProbeProtocol::PresentationEventPresent)
+            UpdateCurrentPresentState(captured);
         if (captured.kind == ReflexProbeProtocol::ReflexEventSleep &&
             captured.sequence == 1) {
             wchar_t line[192]{};
