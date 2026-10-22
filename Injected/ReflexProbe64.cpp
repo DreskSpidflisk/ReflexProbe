@@ -1682,6 +1682,7 @@ DWORD WINAPI WorkerThread(void*)
         // The prior Reflex-only branch exited here; maintain that ownership
         // when DXGI forces this worker to keep scanning.
         if (IsReflexProbingEnabled() && !streamlineReflexSelected &&
+            InterlockedCompareExchange(&g_nativeNvapiCaptured, 0, 0) == 0 &&
             !HasStreamlineReflexBoundary() &&
             !PatchApplicationNvapiResolver(armedNvapiResolver))
             return 1;
@@ -1705,9 +1706,7 @@ DWORD WINAPI WorkerThread(void*)
             return 0;
         }
 
-        // GetState is optional: requiring its hook when unchecked would keep
-        // the discovery worker scanning modules indefinitely in normal FG mode.
-        const LONG requiredFgHooks = 1 | (g_shared->wrapFgGetState ? 2 : 0);
+        // Reuse the acquisition-time GetState requirement computed above.
         if (IsFgProbingEnabled() && !IsPresentationProbingEnabled() &&
             (InterlockedCompareExchange(&g_shared->fgHookBits, 0, 0) & requiredFgHooks) ==
                 requiredFgHooks &&

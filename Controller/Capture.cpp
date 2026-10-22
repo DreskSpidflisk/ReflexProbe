@@ -999,9 +999,9 @@ void PollSharedState()
         if (newPresentationHooks & 1)
             AppendStatusLine(L"DXGI factory interception active; waiting for a swap chain.");
         if (newPresentationHooks & 2)
-            AppendStatusLine(L"DXGI Present interception active (observation only).");
+            AppendStatusLine(L"DXGI Present interception active (policy overrides optional).");
         if (newPresentationHooks & 4)
-            AppendStatusLine(L"DXGI Present1 interception active (observation only).");
+            AppendStatusLine(L"DXGI Present1 interception active (policy overrides optional).");
         if (newPresentationHooks & 8)
             AppendStatusLine(L"DXGI ResizeBuffers interception active (observation only).");
         if (newPresentationHooks & 16)
