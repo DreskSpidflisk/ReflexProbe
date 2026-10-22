@@ -6,7 +6,9 @@ ReflexProbe is a Windows x64 tool for **observing and overriding NVIDIA Reflex a
 
 **DLSS Frame Generation probing** supports modern Streamline, including Multi Frame Generation (MFG). It can inspect FG configuration and optional state queries, override fixed 2X–6X multipliers and selected flags, and experimentally **force FG On when a game requests Off**. The Off override can wait for an established successful active configuration or try immediately. **Accepted calls are not proof of generated output:** Pragmata, Hogwarts Legacy, and Resident Evil Requiem continued FG when Off was overridden, but several other games did not.
 
-ReflexProbe has **no overlay and writes no capture data to disk**. Its results are game- and integration-dependent; see [Test Findings](docs/TestFindings.md) for measurements, successes, failures, and limitations.
+**Experimental DXGI Presentation probing** observes swap-chain creation and Present/Present1 requests, with independent opt-in live SyncInterval and ALLOW_TEARING overrides. This is not Vulkan presentation interception or proof of physical tearing.
+
+ReflexProbe has **no overlay and writes no capture data to disk**. Its results are game- and integration-dependent; see [Test Findings](docs/TestFindings.md) for measurements, successes, failures, and limitations, and [Architecture](docs/Architecture.md) for interception boundaries and invariants.
 
 ## Why ReflexProbe exists
 
@@ -30,11 +32,11 @@ Full measurements, exceptions, and per-game evidence: **[Test findings](docs/Tes
 
 | Capability | Behavior |
 | --- | --- |
-| **Select probes** | Reflex probing starts enabled; DLSS FG probing starts disabled. Choose either or both before acquisition; probe selection is fixed for that target. |
+| **Select probes** | Reflex starts enabled; DLSS FG and DXGI Presentation start disabled. Select any combination before acquisition; probe selection is fixed for that target. |
 | **Acquisition** | **Launch + Inject**, exact-path **Watch + Inject** for launcher-driven games, and **Attach**. |
 | **Capture modes** | **State changes** compresses repeated calls with numbered-call references. **Raw debug** retains the last **131,072** raw events in RAM. Reflex, FG SetOptions and FG GetState histories are separate. |
 | **Diagnostics** | Original **requested → forwarded** values, results, module/backend information, repeated-call and Sleep-count references, build timestamps, protocol tag, and EXE/DLL SHA-256 hashes. |
-| **Live override controls** | Reflex frame-limit/Boost and FG Auto/Off/multiplier/menu/retention policies can change during a session; selected interception options are acquisition-time only. |
+| **Live override controls** | Reflex frame-limit/Boost, FG Auto/Off/multiplier/menu/retention, and DXGI SyncInterval/ALLOW_TEARING policies can change live; selected interception options are acquisition-time only. |
 
 ### NVIDIA Reflex probing
 
@@ -60,6 +62,12 @@ Full measurements, exceptions, and per-game evidence: **[Test findings](docs/Tes
 | **FG status label** | Displays last **forwarded** FG mode, multiplier and menu flag; GetState calls do not change it. |
 
 All override checkboxes start **unchecked**. Unknown future options structure versions pass through unchanged. Setter `result=0` indicates the forwarded API request was accepted, **not** that frames were actually generated.
+
+### Experimental DXGI Presentation probing
+
+An acquisition-time checkbox enables DXGI factory/swap-chain, Present/Present1 and ResizeBuffers observation. Two independent live overrides are **unchecked by default**: SyncInterval dropdown 0–4 (initial selection 0) and ALLOW_TEARING Off/On (initial selection Off). Unchecked forwards the game request. Forcing a nonzero SyncInterval clears the incompatible tearing bit; Force On skips ineligible chains rather than changing swap-chain creation.
+
+DXGI's ALLOW_TEARING (0x200) needs an eligible swap chain created with flag 0x800, cannot be used in exclusive fullscreen, and **does not prove actual tearing** or override driver synchronization. Vulkan presentation is separate and not implemented. See [architecture invariants](docs/Architecture.md#feature-gates-and-non-regression-invariants).
 
 ### Experimental FG Off override
 
@@ -134,9 +142,13 @@ Observations below are specific to tested builds, not guarantees of compatibilit
 
 ## Interception architecture
 
+Read [Architecture](docs/Architecture.md) before changing discovery or capture: an enabled DXGI probe must not silently expand an already-selected Reflex interception path.
+
 **Modern Streamline:** intercept normal `slGetFeatureFunction` imports and selected `GetProcAddress` IAT lookups in loaded non-system modules, then wrap selected Reflex functions (`slReflexSetOptions`, optional `slReflexSleep`) and/or DLSS FG functions (`slDLSSGSetOptions`, optionally `slDLSSGGetState`). Without FG overrides, SetOptions forwards unchanged. With overrides, it copies only recognized-version caller fields, changes the selected mode/flag bits, forwards the modified structure, and logs both original and forwarded values. With GetState interception disabled, the original function pointer is returned without a wrapper. The scan preserves Streamline's legacy gateway and skips already-hooked resolver slots.
 
 **Legacy Streamline 1.x:** intercept the `sl.reflex.dll` plugin gateway `slGetPluginFunction("slSetConstants")`, with an older `slSetFeatureConstants` fallback. Its Sleep path is not currently counted.
+
+**DXGI Presentation:** only when selected, intercept eligible game-local DXGI modules and swap chains. Presentation-only runs do not wrap Streamline resolvers. A combined run continues DXGI discovery without selecting a second native NVAPI Reflex path merely because the worker stays active.
 
 **Native NVAPI D3D:** intercept the `nvapi_QueryInterface` / direct `NvAPI_D3D_SetSleepMode` resolution seam; optionally count `NvAPI_D3D_Sleep`. This does not patch code inside `nvapi64.dll`.
 
