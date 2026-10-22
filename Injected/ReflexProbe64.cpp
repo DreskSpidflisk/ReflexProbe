@@ -1637,8 +1637,11 @@ DWORD WINAPI WorkerThread(void*)
         bool foundStreamlineImport = false;
         if (!PatchLoadedStreamlineImports(foundStreamlineImport))
             return 1;
+        if (IsPresentationProbingEnabled() && !PatchLoadedPresentationImports())
+            return 1;
 
-        if (IsReflexProbingEnabled() && !IsFgProbingEnabled() && foundStreamlineImport)
+        if (IsReflexProbingEnabled() &&
+            (HasStreamlineReflexBoundary() || (!IsFgProbingEnabled() && foundStreamlineImport)))
             streamlineReflexSelected = true;
 
         if (streamlineReflexSelected && !IsPresentationProbingEnabled()) {
