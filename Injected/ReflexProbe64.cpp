@@ -1227,10 +1227,7 @@ bool ShouldPatchGetProcAddressResolver(HMODULE module)
 
     // The SL1 interposer has its own plugin-gateway hook. Do not replace that
     // GetProcAddress slot with the modern/application resolver hook.
-    // Streamline plugin DLLs are backend implementations, not application
-    // resolver owners. The SL1 interposer has its own dedicated gateway hook.
-    // DXGI-enabled scans must not add a generic resolver inside those plugins.
-    if (_wcsnicmp(moduleName, L"sl.", 3) == 0 ||
+    if (_wcsicmp(moduleName, L"sl.interposer.dll") == 0 ||
         _wcsicmp(moduleName, L"ReflexProbe64.dll") == 0) {
         return false;
     }
