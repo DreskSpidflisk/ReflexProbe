@@ -263,6 +263,7 @@ void Publish(LONG kind, const ReflexProbeProtocol::PresentationEventData& data, 
     event.qpc = qpc.QuadPart;
     event.kind = kind;
     event.callSequence = count;
+    event.backend = ReflexProbeProtocol::ReflexBackendUnknown;
     event.requestedMode = 0;
     event.effectiveMode = 0;
     event.requestedUs = 0;

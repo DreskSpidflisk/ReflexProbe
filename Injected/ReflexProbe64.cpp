@@ -394,7 +394,8 @@ LONG ApplyConfiguredModeOverride(LONG requestedMode)
     return requestedMode == 1 ? 2 : requestedMode;
 }
 
-void PublishSettingsEvent(LONG requestedMode, LONG effectiveMode,
+void PublishSettingsEvent(ReflexProbeProtocol::ReflexBackend backend,
+                          LONG requestedMode, LONG effectiveMode,
                           uint32_t requestedUs, uint32_t effectiveUs, LONG result)
 {
     if (!g_shared)
@@ -412,6 +413,7 @@ void PublishSettingsEvent(LONG requestedMode, LONG effectiveMode,
     event.qpc = qpc.QuadPart;
     event.kind = ReflexProbeProtocol::ReflexEventSettings;
     event.callSequence = callSequence;
+    event.backend = backend;
     event.requestedMode = requestedMode;
     event.effectiveMode = effectiveMode;
     event.requestedUs = requestedUs;
@@ -421,7 +423,7 @@ void PublishSettingsEvent(LONG requestedMode, LONG effectiveMode,
     InterlockedExchange(&event.sequence, serial);
 }
 
-void PublishSleepEvent(LONG result)
+void PublishSleepEvent(ReflexProbeProtocol::ReflexBackend backend, LONG result)
 {
     if (!g_shared)
         return;
@@ -439,6 +441,7 @@ void PublishSleepEvent(LONG result)
     event.qpc = qpc.QuadPart;
     event.kind = ReflexProbeProtocol::ReflexEventSleep;
     event.callSequence = sleepSequence;
+    event.backend = backend;
     event.requestedMode = 0;
     event.effectiveMode = 0;
     event.requestedUs = 0;
@@ -467,6 +470,7 @@ void PublishFgEvent(LONG kind, const ReflexProbeProtocol::FgEventData& data, LON
     event.qpc = qpc.QuadPart;
     event.kind = kind;
     event.callSequence = callSequence;
+    event.backend = ReflexProbeProtocol::ReflexBackendUnknown;
     event.requestedMode = 0;
     event.effectiveMode = 0;
     event.requestedUs = 0;
@@ -755,8 +759,9 @@ int32_t __cdecl HookNvapiD3DSetSleepMode(void* device, void* params)
     forwarded->minimumIntervalUs = effectiveUs;
 
     const int32_t result = real(device, forwarded);
-    PublishSettingsEvent(requestedMode, effectiveMode,
-        requested->minimumIntervalUs, effectiveUs, static_cast<LONG>(result));
+    PublishSettingsEvent(ReflexProbeProtocol::ReflexBackendNativeNvapiD3D,
+        requestedMode, effectiveMode, requested->minimumIntervalUs,
+        effectiveUs, static_cast<LONG>(result));
 
     InterlockedExchange(&g_nativeNvapiCaptured, 1);
     return result;
@@ -769,7 +774,8 @@ int32_t __cdecl HookNvapiD3DSleep(void* device)
         return -4; // NVAPI_API_NOT_INITIALIZED
 
     const int32_t result = real(device);
-    PublishSleepEvent(static_cast<LONG>(result));
+    PublishSleepEvent(ReflexProbeProtocol::ReflexBackendNativeNvapiD3D,
+        static_cast<LONG>(result));
     return result;
 }
 
@@ -809,7 +815,8 @@ sl::Result HookReflexSleep(const sl::FrameToken& frame)
         return sl::Result::eErrorNotInitialized;
 
     const sl::Result result = real(frame);
-    PublishSleepEvent(static_cast<LONG>(result));
+    PublishSleepEvent(ReflexProbeProtocol::ReflexBackendModernSetOptions,
+        static_cast<LONG>(result));
     return result;
 }
 
@@ -827,8 +834,9 @@ sl::Result HookReflexSetOptions(const sl::ReflexOptions& options)
     forwarded.frameLimitUs = effectiveUs;
 
     const sl::Result result = real(forwarded);
-    PublishSettingsEvent(requestedMode, effectiveMode,
-        options.frameLimitUs, effectiveUs, static_cast<LONG>(result));
+    PublishSettingsEvent(ReflexProbeProtocol::ReflexBackendModernSetOptions,
+        requestedMode, effectiveMode, options.frameLimitUs, effectiveUs,
+        static_cast<LONG>(result));
     return result;
 }
 
@@ -851,7 +859,8 @@ bool HookLegacySetFeatureConstants(uint32_t feature, const void* constants,
     forwarded.frameLimitUs = effectiveUs;
 
     const bool result = real(feature, &forwarded, frameIndex, id);
-    PublishSettingsEvent(requestedMode, effectiveMode, requested->frameLimitUs,
+    PublishSettingsEvent(ReflexProbeProtocol::ReflexBackendLegacyFeatureConstants,
+        requestedMode, effectiveMode, requested->frameLimitUs,
         effectiveUs, result ? 0 : 1);
     return result;
 }
@@ -874,7 +883,8 @@ bool HookLegacyPluginSetConstants(const void* constants, uint32_t frameIndex, ui
     forwarded.frameLimitUs = effectiveUs;
 
     const bool result = real(&forwarded, frameIndex, id);
-    PublishSettingsEvent(requestedMode, effectiveMode, requested->frameLimitUs,
+    PublishSettingsEvent(ReflexProbeProtocol::ReflexBackendLegacyPluginConstants,
+        requestedMode, effectiveMode, requested->frameLimitUs,
         effectiveUs, result ? 0 : 1);
     return result;
 }

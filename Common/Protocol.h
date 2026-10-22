@@ -10,7 +10,7 @@
 namespace ReflexProbeProtocol {
 
 constexpr uint32_t kMagic = 0x31505246; // "FRP1" little-endian.
-constexpr uint32_t kVersion = 16;
+constexpr uint32_t kVersion = 17;
 constexpr uint32_t kEventCapacity = 4096;
 constexpr uint32_t kPathChars = 1024;
 constexpr uint32_t kVersionChars = 64;
@@ -18,7 +18,7 @@ constexpr uint32_t kErrorChars = 512;
 
 // Human-readable source tag for rapid local rebuild/testing. The controller also hashes the
 // actual EXE and DLL on disk, so a stale or mismatched binary is obvious in copied logs.
-constexpr wchar_t kBuildTag[] = L"2026-10-22.39-live-dxgi-overrides";
+constexpr wchar_t kBuildTag[] = L"2026-10-22.40-reflex-probe-isolation";
 
 constexpr wchar_t kMappingPrefix[] = L"Local\\ReflexProbe.";
 
@@ -108,6 +108,9 @@ struct ReflexEvent {
     LONGLONG qpc;
     LONG kind;
     LONG callSequence;
+    // Historical event identity. SharedState::backend is only discovery status
+    // and must not be used to label buffered events after a later hook resolves.
+    LONG backend;
     LONG requestedMode;
     LONG effectiveMode;
     uint32_t requestedUs;

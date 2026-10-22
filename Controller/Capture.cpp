@@ -744,9 +744,11 @@ void AppendSleepCount(uint64_t sleepCount, const CapturedReflexEvent& state,
     if (!g_app.shared)
         return;
 
-    const LONG backend = InterlockedCompareExchange(&g_app.shared->backend, 0, 0);
-    if (backend == ReflexProbeProtocol::ReflexBackendLegacyFeatureConstants ||
-        backend == ReflexProbeProtocol::ReflexBackendLegacyPluginConstants)
+    // An unrelated resolver may change the global discovery label while this
+    // Reflex run is active. Only the captured event's backend controls whether
+    // Sleep counts are supported for this run.
+    if (state.backend == ReflexProbeProtocol::ReflexBackendLegacyFeatureConstants ||
+        state.backend == ReflexProbeProtocol::ReflexBackendLegacyPluginConstants)
         return;
 
     if (!sleepCount &&
@@ -1067,7 +1069,7 @@ void PollSharedState()
         captured.requestedMode = event.requestedMode;
         captured.effectiveMode = event.effectiveMode;
         captured.result = event.result;
-        captured.backend = backend;
+        captured.backend = event.backend;
         captured.requestedUs = event.requestedUs;
         captured.effectiveUs = event.effectiveUs;
         if (captured.kind == ReflexProbeProtocol::FgEventSetOptions ||
