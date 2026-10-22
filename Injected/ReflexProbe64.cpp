@@ -1224,7 +1224,10 @@ bool ShouldPatchGetProcAddressResolver(HMODULE module)
 
     // The SL1 interposer has its own plugin-gateway hook. Do not replace that
     // GetProcAddress slot with the modern/application resolver hook.
-    if (_wcsicmp(moduleName, L"sl.interposer.dll") == 0 ||
+    // Streamline plugin DLLs are backend implementations, not application
+    // resolver owners. The SL1 interposer has its own dedicated gateway hook.
+    // DXGI-enabled scans must not add a generic resolver inside those plugins.
+    if (_wcsnicmp(moduleName, L"sl.", 3) == 0 ||
         _wcsicmp(moduleName, L"ReflexProbe64.dll") == 0) {
         return false;
     }
@@ -1523,25 +1526,18 @@ bool PatchLoadedStreamlineImports(bool& foundAny)
                 continue;
             }
 
-            // During combined/FG probing, prioritize dynamic resolution before
-            // the slower Streamline import inspection. Satisfactory resolves
-            // slGetFeatureFunction through a game DLL's GetProcAddress IAT;
-            // the earliest resolver calls cannot be recovered after caching.
-            // Reflex-only retains its previously validated discovery order.
-            // In presentation-only mode, do not alter overlay DLL resolvers:
-            // a DXGI factory hook can recurse if an overlay calls through its IAT.
-            const bool probePresentationHere = IsPresentationProbingEnabled() &&
-                PresentationDxgi::IsApplicationModule(heldModule);
-            const bool probeFg = IsFgProbingEnabled() || probePresentationHere;
+            // Restore the proven pre-DXGI Streamline/FG ordering.
+            // FG needs dynamic resolvers early (Satisfactory's game DLL);
+            // Reflex-only must reach the SL1 plugin gateway first (Requiem).
+            // The Presentation checkbox must not change either ordering.
+            const bool probeFg = IsFgProbingEnabled();
             bool patched = !probeFg ||
                 PatchGetProcAddressResolverInModule(heldModule);
             bool sawTarget = false;
-            if (patched && (IsReflexProbingEnabled() || IsFgProbingEnabled()))
+            if (patched)
                 patched = PatchStreamlineImportsInModule(heldModule, sawTarget, context);
-            if (patched && !probeFg && !sawTarget && IsReflexProbingEnabled())
+            if (patched && !probeFg && !sawTarget)
                 patched = PatchGetProcAddressResolverInModule(heldModule);
-            if (patched && probePresentationHere)
-                patched = PresentationDxgi::PatchImports(heldModule);
             FreeLibrary(heldModule);
 
             if (!patched || (g_shared && InterlockedCompareExchange(&g_shared->hookState, 0, 0) ==
@@ -1554,9 +1550,51 @@ bool PatchLoadedStreamlineImports(bool& foundAny)
                 foundAny = true;
                 // With FG enabled, keep discovering resolver imports in other
                 // modules; the FG and Reflex call sites may be in different DLLs.
-                if (!IsFgProbingEnabled() && !IsPresentationProbingEnabled())
+                if (!IsFgProbingEnabled())
                     break;
             }
+        } while (Module32NextW(snapshot, &entry));
+    }
+
+    CloseHandle(snapshot);
+    return success;
+}
+
+
+// DXGI discovery is a separate pass *after* the selected Reflex/FG discovery
+// pass. Do not interleave DXGI imports or its generic GetProcAddress wrappers
+// ahead of the legacy Streamline gateway: Requiem can cache that pointer during
+// early initialization. This pass is wholly absent when Presentation is off.
+bool PatchLoadedPresentationImports()
+{
+    if (!IsPresentationProbingEnabled())
+        return true;
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(
+        TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return false;
+
+    MODULEENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    bool success = true;
+    if (Module32FirstW(snapshot, &entry)) {
+        do {
+            HMODULE heldModule = nullptr;
+            if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                    reinterpret_cast<LPCWSTR>(entry.modBaseAddr), &heldModule))
+                continue;
+
+            if (PresentationDxgi::IsApplicationModule(heldModule)) {
+                // The app/engine may dynamically resolve DXGI factories.
+                // Streamline plugins and overlays are excluded by the module
+                // owner filters, even if installed beside the game's EXE.
+                success = PatchGetProcAddressResolverInModule(heldModule) &&
+                    PresentationDxgi::PatchImports(heldModule);
+            }
+            FreeLibrary(heldModule);
+            if (!success)
+                break;
         } while (Module32NextW(snapshot, &entry));
     }
 

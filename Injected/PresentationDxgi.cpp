@@ -104,6 +104,20 @@ bool ShouldProbeModule(HMODULE module)
     if (module == GetModuleHandleW(nullptr))
         return true;
 
+    // A vendor plugin in the game directory is still a vendor plugin, not a
+    // game-engine module. Its DXGI imports may be involved in Streamline's
+    // own initialization. Never turn on DXGI interception inside it merely
+    // because Requiem (or another game) stores the DLL beside the EXE.
+    wchar_t moduleName[MAX_PATH]{};
+    if (!GetModuleFileNameW(module, moduleName, _countof(moduleName)))
+        return false;
+    const wchar_t* basename = wcsrchr(moduleName, L'\\');
+    basename = basename ? basename + 1 : moduleName;
+    if (_wcsnicmp(basename, L"sl.", 3) == 0 ||
+        _wcsicmp(basename, L"nvapi64.dll") == 0 ||
+        _wcsicmp(basename, L"ReflexProbe64.dll") == 0)
+        return false;
+
     wchar_t executable[MAX_PATH]{};
     wchar_t candidate[MAX_PATH]{};
     const DWORD exeChars = GetModuleFileNameW(nullptr, executable, _countof(executable));
