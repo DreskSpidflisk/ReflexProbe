@@ -3,8 +3,8 @@
 #include <windows.h>
 #include "../Common/Protocol.h"
 
-// DXGI presentation observation only. These functions are compiled into the
-// existing ReflexProbe64.dll; no second injected DLL or presentation override.
+// DXGI presentation observation and independently opt-in live Present overrides.
+// Compiled into the existing ReflexProbe64.dll; no second injected DLL.
 namespace PresentationDxgi {
 bool Initialize(ReflexProbeProtocol::SharedState* shared);
 // Limit DXGI instrumentation to modules belonging to the game's installation.

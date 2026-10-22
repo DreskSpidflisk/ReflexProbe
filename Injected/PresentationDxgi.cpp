@@ -292,17 +292,81 @@ void PublishChain(IDXGISwapChain* chain, uint32_t method)
     Publish(ReflexProbeProtocol::PresentationEventSwapChain, data, result);
 }
 
+// Present policy reads use acquire semantics; disabled checkboxes preserve both arguments.
+constexpr UINT kPresentAllowTearing = 0x200u; // DXGI_PRESENT_ALLOW_TEARING
+constexpr UINT kSwapChainAllowTearing = 0x800u; // DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING
+constexpr UINT kPresentTest = 0x1u; // DXGI_PRESENT_TEST
+
+struct ForwardedPresent {
+    UINT interval;
+    UINT flags;
+    uint32_t notes = 0;
+};
+
+ForwardedPresent ApplyPresentationPolicy(IDXGISwapChain* chain, UINT interval, UINT flags)
+{
+    ForwardedPresent forwarded{ interval, flags, 0 };
+    if (!g_shared)
+        return forwarded;
+    const bool overrideSync = ReadAcquire(&g_shared->presentationSyncOverrideEnabled) != 0;
+    const bool overrideTearing = ReadAcquire(&g_shared->presentationTearingOverrideEnabled) != 0;
+    if (!overrideSync && !overrideTearing)
+        return forwarded;
+    // Preserve DXGI's non-presenting probe call; never turn an occlusion test into a present.
+    if (flags & kPresentTest) {
+        forwarded.notes = 16;
+        return forwarded;
+    }
+    if (overrideSync) {
+        const LONG selected = ReadAcquire(&g_shared->presentationSyncInterval);
+        if (selected >= 0 && selected <= 4)
+            forwarded.interval = static_cast<UINT>(selected);
+    }
+    if (overrideTearing) {
+        if (ReadAcquire(&g_shared->presentationTearingOverrideOn) == 0) {
+            forwarded.flags &= ~kPresentAllowTearing;
+        } else if (forwarded.interval != 0) {
+            forwarded.notes = 8;
+        } else if ((forwarded.flags & kPresentAllowTearing) == 0) {
+            // Only an explicitly selected Force On pays for eligibility checks.
+            // Do not change swap-chain creation flags or assume windowed mode.
+            DXGI_SWAP_CHAIN_DESC desc{};
+            if (FAILED(chain->GetDesc(&desc))) {
+                forwarded.notes = 4;
+            } else if ((desc.Flags & kSwapChainAllowTearing) == 0) {
+                forwarded.notes = 1;
+            } else {
+                BOOL fullscreen = FALSE;
+                if (FAILED(chain->GetFullscreenState(&fullscreen, nullptr)))
+                    forwarded.notes = 4;
+                else if (fullscreen)
+                    forwarded.notes = 2;
+                else
+                    forwarded.flags |= kPresentAllowTearing;
+            }
+        }
+    }
+    // A forced positive interval must never forward DXGI_PRESENT_ALLOW_TEARING.
+    if (forwarded.interval != 0)
+        forwarded.flags &= ~kPresentAllowTearing;
+    return forwarded;
+}
+
 HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* chain, UINT interval, UINT flags)
 {
     Present* real = reinterpret_cast<Present*>(Original(chain, 8));
     if (!real)
         return DXGI_ERROR_INVALID_CALL;
-    const HRESULT result = real(chain, interval, flags);
+    const ForwardedPresent forwarded = ApplyPresentationPolicy(chain, interval, flags);
+    const HRESULT result = real(chain, forwarded.interval, forwarded.flags);
     ReflexProbeProtocol::PresentationEventData data{};
     data.swapChain = reinterpret_cast<uint64_t>(chain);
     data.method = 0;
     data.syncInterval = interval;
     data.presentFlags = flags;
+    data.forwardedSyncInterval = forwarded.interval;
+    data.forwardedPresentFlags = forwarded.flags;
+    data.overrideNotes = forwarded.notes;
     Publish(ReflexProbeProtocol::PresentationEventPresent, data, result);
     return result;
 }
@@ -313,12 +377,16 @@ HRESULT STDMETHODCALLTYPE HookPresent1(
     Present1* real = reinterpret_cast<Present1*>(Original(chain, 22));
     if (!real)
         return DXGI_ERROR_INVALID_CALL;
-    const HRESULT result = real(chain, interval, flags, parameters);
+    const ForwardedPresent forwarded = ApplyPresentationPolicy(chain, interval, flags);
+    const HRESULT result = real(chain, forwarded.interval, forwarded.flags, parameters);
     ReflexProbeProtocol::PresentationEventData data{};
     data.swapChain = reinterpret_cast<uint64_t>(chain);
     data.method = 1;
     data.syncInterval = interval;
     data.presentFlags = flags;
+    data.forwardedSyncInterval = forwarded.interval;
+    data.forwardedPresentFlags = forwarded.flags;
+    data.overrideNotes = forwarded.notes;
     Publish(ReflexProbeProtocol::PresentationEventPresent, data, result);
     return result;
 }

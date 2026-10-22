@@ -131,6 +131,67 @@ bool FgProbingSelected()
     return g_app.fgProbing && Button_GetCheck(g_app.fgProbing) == BST_CHECKED;
 }
 
+PresentationPolicy ReadPresentationPolicyFromUi()
+{
+    PresentationPolicy policy{};
+    if (PresentationProbingSelected()) {
+        policy.overrideSyncInterval = Button_GetCheck(g_app.presentationSyncOverride) == BST_CHECKED;
+        const LRESULT index = SendMessageW(g_app.presentationSyncChoice, CB_GETCURSEL, 0, 0);
+        if (index >= 0 && index <= 4)
+            policy.syncInterval = static_cast<uint32_t>(index);
+        policy.overrideTearing = Button_GetCheck(g_app.presentationTearingOverride) == BST_CHECKED;
+        policy.allowTearing = Button_GetCheck(g_app.presentationTearingOn) == BST_CHECKED;
+    }
+    return policy;
+}
+
+void LogInitialPresentationPolicy(bool probingEnabled)
+{
+    if (!probingEnabled)
+        return;
+    const PresentationPolicy policy = ReadPresentationPolicyFromUi();
+    wchar_t line[160]{};
+    if (policy.overrideSyncInterval) {
+        swprintf_s(line, L"Initial DXGI SyncInterval override: %u (live).", policy.syncInterval);
+        AppendStatusLine(line);
+    } else {
+        AppendStatusLine(L"Initial DXGI SyncInterval override: disabled.");
+    }
+    AppendStatusLine(!policy.overrideTearing
+        ? L"Initial DXGI ALLOW_TEARING override: disabled."
+        : policy.allowTearing
+            ? L"Initial DXGI ALLOW_TEARING override: On (eligible swap chains only)."
+            : L"Initial DXGI ALLOW_TEARING override: Off.");
+}
+
+void ApplyPresentationPolicyToShared()
+{
+    if (!g_app.shared || !PresentationProbingSelected())
+        return;
+    const PresentationPolicy policy = ReadPresentationPolicyFromUi();
+    InterlockedExchange(&g_app.shared->presentationSyncInterval,
+        static_cast<LONG>(policy.syncInterval));
+    InterlockedExchange(&g_app.shared->presentationSyncOverrideEnabled,
+        policy.overrideSyncInterval ? 1 : 0);
+    InterlockedExchange(&g_app.shared->presentationTearingOverrideOn,
+        policy.allowTearing ? 1 : 0);
+    InterlockedExchange(&g_app.shared->presentationTearingOverrideEnabled,
+        policy.overrideTearing ? 1 : 0);
+    InterlockedIncrement(&g_app.shared->configSequence);
+    wchar_t line[180]{};
+    if (policy.overrideSyncInterval) {
+        swprintf_s(line, L"DXGI policy: SyncInterval forced to %u on the next Present/Present1.", policy.syncInterval);
+        AppendStatusLine(line);
+    } else {
+        AppendStatusLine(L"DXGI policy: SyncInterval override disabled; game requests pass through.");
+    }
+    AppendStatusLine(!policy.overrideTearing
+        ? L"DXGI policy: ALLOW_TEARING override disabled."
+        : policy.allowTearing
+            ? L"DXGI policy: ALLOW_TEARING forced On where valid (nonzero SyncInterval clears it)."
+            : L"DXGI policy: ALLOW_TEARING forced Off.");
+}
+
 FgPolicy ReadFgPolicyFromUi()
 {
     FgPolicy policy{};
@@ -276,6 +337,20 @@ void UpdateAcquisitionControls()
         EnableWindow(g_app.fgProbing, !probeSelectionLocked);
     if (g_app.presentationProbing)
         EnableWindow(g_app.presentationProbing, !probeSelectionLocked);
+    const bool presentationEnabled = PresentationProbingSelected();
+    if (g_app.presentationSyncOverride)
+        EnableWindow(g_app.presentationSyncOverride, presentationEnabled && !watching);
+    if (g_app.presentationSyncChoice)
+        EnableWindow(g_app.presentationSyncChoice, presentationEnabled && !watching &&
+            Button_GetCheck(g_app.presentationSyncOverride) == BST_CHECKED);
+    if (g_app.presentationTearingOverride)
+        EnableWindow(g_app.presentationTearingOverride, presentationEnabled && !watching);
+    const bool tearingChecked = g_app.presentationTearingOverride &&
+        Button_GetCheck(g_app.presentationTearingOverride) == BST_CHECKED;
+    if (g_app.presentationTearingOff)
+        EnableWindow(g_app.presentationTearingOff, presentationEnabled && !watching && tearingChecked);
+    if (g_app.presentationTearingOn)
+        EnableWindow(g_app.presentationTearingOn, presentationEnabled && !watching && tearingChecked);
     if (g_app.fgForceAutoOn)
         EnableWindow(g_app.fgForceAutoOn, fgEnabled && !watching);
     if (g_app.fgMultiplierOverride)
@@ -523,8 +598,9 @@ bool LaunchAndInject()
             : L"DLSS FG probing: SetOptions intercepted; GetState pointer untouched.")
         : L"DLSS FG probing: disabled; FG functions are passed through untouched.");
     AppendStatusLine(probePresentation
-        ? L"Presentation probing: DXGI factory / swap-chain Present observation enabled (no overrides)."
+        ? L"Presentation probing: DXGI Present/Present1 interception enabled; overrides independently optional."
         : L"Presentation probing: disabled.");
+    LogInitialPresentationPolicy(probePresentation);
     if (probeDlssFg) {
         AppendStatusLine(fgPolicy.forceOnWhenAuto
             ? L"Initial FG Auto-to-On override: enabled."
@@ -923,6 +999,32 @@ void LayoutControls(int clientWidth, int clientHeight)
         MoveWindow(g_app.presentationProbing, kMargin + 14, kPresentationGroupTop - 9,
             MeasureGroupHeadingWidth(g_app.presentationProbing), 22, TRUE);
 
+    // Match the FG multiplier checkbox/dropdown and the gap before FG Off.
+    int presentationX = kMargin + 18;
+    const int presentationY = kPresentationGroupTop + 20;
+    if (g_app.presentationSyncOverride) {
+        const int width = MeasureInlineCheckboxWidth(g_app.presentationSyncOverride);
+        MoveWindow(g_app.presentationSyncOverride, presentationX, presentationY, width, 22, TRUE);
+        presentationX += width + fgGroupGap;
+    }
+    if (g_app.presentationSyncChoice) {
+        MoveWindow(g_app.presentationSyncChoice, presentationX, presentationY - 2, 56, 124, TRUE);
+        presentationX += 56 + fgLowerGap;
+    }
+    if (g_app.presentationTearingOverride) {
+        const int width = MeasureInlineCheckboxWidth(g_app.presentationTearingOverride);
+        MoveWindow(g_app.presentationTearingOverride, presentationX, presentationY, width, 22, TRUE);
+        presentationX += width + fgRadioGap;
+    }
+    if (g_app.presentationTearingOff) {
+        const int width = MeasureCompactRadioWidth(g_app.presentationTearingOff);
+        MoveWindow(g_app.presentationTearingOff, presentationX, presentationY, width, 22, TRUE);
+        presentationX += width;
+    }
+    if (g_app.presentationTearingOn)
+        MoveWindow(g_app.presentationTearingOn, presentationX, presentationY,
+            MeasureCompactRadioWidth(g_app.presentationTearingOn), 22, TRUE);
+
     const int attachX = clientWidth - kMargin - kAttachWidth;
     const int watchX = attachX - kAcquisitionGap - kWatchWidth;
     const int launchX = watchX - kAcquisitionGap - kLaunchWidth;
@@ -1044,6 +1146,40 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_PRESENTATION_PROBING),
             g_app.instance, nullptr);
         SetChildFont(g_app.presentationProbing, font);
+
+        g_app.presentationSyncOverride = CreateWindowExW(0, L"BUTTON", L"Override SyncInterval",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_PRESENTATION_SYNC_OVERRIDE),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.presentationSyncOverride, font);
+        g_app.presentationSyncChoice = CreateWindowExW(0, L"COMBOBOX", L"",
+            WS_CHILD | WS_VISIBLE | WS_DISABLED | WS_VSCROLL | CBS_DROPDOWNLIST,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_PRESENTATION_SYNC_CHOICE),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.presentationSyncChoice, font);
+        constexpr const wchar_t* kSyncIntervals[] = { L"0", L"1", L"2", L"3", L"4" };
+        for (const wchar_t* text : kSyncIntervals)
+            SendMessageW(g_app.presentationSyncChoice, CB_ADDSTRING, 0,
+                reinterpret_cast<LPARAM>(text));
+        SendMessageW(g_app.presentationSyncChoice, CB_SETCURSEL, 0, 0);
+
+        g_app.presentationTearingOverride = CreateWindowExW(0, L"BUTTON",
+            L"Override ALLOW_TEARING",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_PRESENTATION_TEARING_OVERRIDE),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.presentationTearingOverride, font);
+        g_app.presentationTearingOff = CreateWindowExW(0, L"BUTTON", L"Off",
+            WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_PRESENTATION_TEARING_OFF),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.presentationTearingOff, font);
+        Button_SetCheck(g_app.presentationTearingOff, BST_CHECKED);
+        g_app.presentationTearingOn = CreateWindowExW(0, L"BUTTON", L"On",
+            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_PRESENTATION_TEARING_ON),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.presentationTearingOn, font);
 
         g_app.fgForceAutoOn = CreateWindowExW(0, L"BUTTON",
             L"Force Auto to On",
@@ -1244,7 +1380,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         g_app.capturingStartupDiagnostics = true;
         AppendStatusLine(L"ReflexProbe bootstrap: Launch, Watch or Attach selected API probes.");
         AppendStatusLine(L"State values: game request -> forwarded value. Unchanged values are shown once.");
-        AppendStatusLine(L"Reflex probing is ON by default; DLSS FG and Presentation probing are OFF. Presentation observes DXGI without overrides.");
+        AppendStatusLine(L"Reflex probing is ON by default; DLSS FG and Presentation probing are OFF. Presentation DXGI overrides are opt-in.");
         AppendStatusLine(L"FG SetOptions is observed when enabled; GetState interception is independently optional.");
         AppendStatusLine(L"Frame-limit override is OFF by default. When checked, the FPS value replaces frameLimitUs on intercepted Reflex settings calls.");
         AppendStatusLine(L"Force Boost when Reflex On is independent: plain On requests become On + Boost; Off and existing On + Boost requests are unchanged.");
@@ -1322,6 +1458,19 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
                 PollSharedState();
                 SetFgDetailedDiagnostics(
                     Button_GetCheck(g_app.fgDetailedDiagnosticsControl) == BST_CHECKED);
+            }
+            return 0;
+        case IDC_PRESENTATION_SYNC_CHOICE:
+            if (HIWORD(wParam) == CBN_SELCHANGE)
+                ApplyPresentationPolicyToShared();
+            return 0;
+        case IDC_PRESENTATION_SYNC_OVERRIDE:
+        case IDC_PRESENTATION_TEARING_OVERRIDE:
+        case IDC_PRESENTATION_TEARING_OFF:
+        case IDC_PRESENTATION_TEARING_ON:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                UpdateAcquisitionControls();
+                ApplyPresentationPolicyToShared();
             }
             return 0;
         case IDC_FG_MULTIPLIER_CHOICE:

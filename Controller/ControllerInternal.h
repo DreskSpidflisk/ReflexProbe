@@ -57,7 +57,12 @@ enum ControlId : int {
     IDC_FG_MULTIPLIER_CHOICE,
     IDC_FG_OVERRIDE_OFF_AFTER_ON,
     IDC_FG_OFF_MODE_CHOICE,
-    IDC_PRESENTATION_PROBING
+    IDC_PRESENTATION_PROBING,
+    IDC_PRESENTATION_SYNC_OVERRIDE,
+    IDC_PRESENTATION_SYNC_CHOICE,
+    IDC_PRESENTATION_TEARING_OVERRIDE,
+    IDC_PRESENTATION_TEARING_OFF,
+    IDC_PRESENTATION_TEARING_ON
 };
 
 struct FgPolicy {
@@ -71,6 +76,13 @@ struct FgPolicy {
     bool overrideRetention = false;
     bool retainResourcesWhenOff = true; // when checked, default radio is On
     bool wrapGetState = false;
+};
+
+struct PresentationPolicy {
+    bool overrideSyncInterval = false;
+    uint32_t syncInterval = 0;
+    bool overrideTearing = false;
+    bool allowTearing = false;
 };
 
 enum CaptureMode : uint32_t {
@@ -133,6 +145,11 @@ struct AppState {
     HWND fgGroup = nullptr;
     HWND presentationGroup = nullptr;
     HWND presentationProbing = nullptr;
+    HWND presentationSyncOverride = nullptr;
+    HWND presentationSyncChoice = nullptr;
+    HWND presentationTearingOverride = nullptr;
+    HWND presentationTearingOff = nullptr;
+    HWND presentationTearingOn = nullptr;
     HWND fgProbing = nullptr;
     HWND fgMultiplierOverride = nullptr;
     HWND fgMultiplierChoice = nullptr;
@@ -228,6 +245,8 @@ struct AppState {
 
 extern AppState g_app;
 
+PresentationPolicy ReadPresentationPolicyFromUi();
+void LogInitialPresentationPolicy(bool probingEnabled);
 void LayoutControls(int clientWidth, int clientHeight);
 void CleanupTarget();
 void UpdateAcquisitionControls();

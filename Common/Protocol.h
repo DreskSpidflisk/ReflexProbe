@@ -10,7 +10,7 @@
 namespace ReflexProbeProtocol {
 
 constexpr uint32_t kMagic = 0x31505246; // "FRP1" little-endian.
-constexpr uint32_t kVersion = 15;
+constexpr uint32_t kVersion = 16;
 constexpr uint32_t kEventCapacity = 4096;
 constexpr uint32_t kPathChars = 1024;
 constexpr uint32_t kVersionChars = 64;
@@ -18,7 +18,7 @@ constexpr uint32_t kErrorChars = 512;
 
 // Human-readable source tag for rapid local rebuild/testing. The controller also hashes the
 // actual EXE and DLL on disk, so a stale or mismatched binary is obvious in copied logs.
-constexpr wchar_t kBuildTag[] = L"2026-10-21.38-isolated-probe-maintenance";
+constexpr wchar_t kBuildTag[] = L"2026-10-22.39-live-dxgi-overrides";
 
 constexpr wchar_t kMappingPrefix[] = L"Local\\ReflexProbe.";
 
@@ -91,7 +91,10 @@ struct PresentationEventData {
     uint64_t swapChain;
     uint32_t method; // 0 = Present, 1 = Present1; creation method for SwapChain event.
     uint32_t syncInterval;
-    uint32_t presentFlags;
+    uint32_t presentFlags; // game request
+    uint32_t forwardedSyncInterval;
+    uint32_t forwardedPresentFlags;
+    uint32_t overrideNotes; // 1=no tearing swap-chain flag, 2=exclusive fullscreen, 4=GetDesc/FS query failure, 8=SyncInterval nonzero, 16=TEST call
     uint32_t width;
     uint32_t height;
     uint32_t buffers;
@@ -139,6 +142,10 @@ struct SharedState {
     volatile LONG fgMenuOverrideOn;
     volatile LONG fgRetentionOverrideEnabled;
     volatile LONG fgRetentionOverrideOn;
+    volatile LONG presentationSyncOverrideEnabled;
+    volatile LONG presentationSyncInterval; // 0-4
+    volatile LONG presentationTearingOverrideEnabled;
+    volatile LONG presentationTearingOverrideOn;
 
     volatile LONG hookState;
     volatile LONG backend;

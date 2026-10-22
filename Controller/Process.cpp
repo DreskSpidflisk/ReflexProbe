@@ -417,6 +417,13 @@ bool CreateSharedState(DWORD processId, const wchar_t* targetPath,
     g_app.shared->probeReflexEnabled = probeReflex ? 1 : 0;
     g_app.shared->probeDlssFgEnabled = probeDlssFg ? 1 : 0;
     g_app.shared->probePresentationEnabled = probePresentation ? 1 : 0;
+    const PresentationPolicy presentationPolicy = ReadPresentationPolicyFromUi();
+    g_app.shared->presentationSyncOverrideEnabled =
+        probePresentation && presentationPolicy.overrideSyncInterval ? 1 : 0;
+    g_app.shared->presentationSyncInterval = static_cast<LONG>(presentationPolicy.syncInterval);
+    g_app.shared->presentationTearingOverrideEnabled =
+        probePresentation && presentationPolicy.overrideTearing ? 1 : 0;
+    g_app.shared->presentationTearingOverrideOn = presentationPolicy.allowTearing ? 1 : 0;
     g_app.shared->wrapFgGetState = probeDlssFg && fgPolicy.wrapGetState ? 1 : 0;
     g_app.shared->fgForceOnWhenAuto = probeDlssFg && fgPolicy.forceOnWhenAuto ? 1 : 0;
     g_app.shared->fgForceOffAfterOn =
@@ -532,13 +539,14 @@ void LogInitialTargetPolicy(bool overrideEnabled, uint32_t overrideUs, bool forc
         ? L"Reflex probing: enabled; supported Reflex function pointers may be wrapped."
         : L"Reflex probing: disabled; Reflex function pointers pass through untouched.");
     AppendStatusLine(probePresentation
-        ? L"Presentation probing: DXGI observation enabled (no overrides)."
+        ? L"Presentation probing: DXGI Present/Present1 interception enabled; overrides independently optional."
         : L"Presentation probing: disabled.");
     AppendStatusLine(probeDlssFg
         ? (fgPolicy.wrapGetState
             ? L"DLSS FG probing: SetOptions and GetState intercepted."
             : L"DLSS FG probing: SetOptions intercepted; GetState pointer untouched.")
         : L"DLSS FG probing: disabled; FG function pointers pass through untouched.");
+    LogInitialPresentationPolicy(probePresentation);
     if (probeDlssFg) {
         AppendStatusLine(fgPolicy.forceOnWhenAuto
             ? L"Initial FG Auto-to-On override: enabled."
