@@ -95,7 +95,7 @@ Open `ReflexProbe.sln` and build **Debug x64** or **Release x64**. Both projects
 ## Usage
 
 1. Start `ReflexProbe.exe` and select the **actual x64 game executable**, not a launcher wrapper.
-2. Enable **Reflex probing**, **DLSS Frame Generation probing**, or both. Configure the desired overrides and optional Sleep counting / FG GetState interception. The FG Off dropdown defaults to **After success**; all override checkboxes begin unchecked.
+2. Enable **Reflex probing**, **DLSS Frame Generation probing**, **DXGI Presentation probing**, or any selected combination. Configure the desired overrides and optional Sleep counting / FG GetState interception. The FG Off dropdown defaults to **After success**; all override checkboxes begin unchecked.
 3. Use **Launch + Inject**, **Watch + Inject**, or **Attach**. Watch is usually best for launcher-driven games or startup-only setters; Attach cannot recover calls already made or function pointers already cached. Probe selection, Sleep counting, and FG GetState interception are locked for the acquisition; applicable override policies can change live and affect the next game SetOptions call.
 4. Observe the **requested → forwarded** values and API result codes. **State changes** is the compact default; **Raw debug** records each event in a bounded RAM ring. **Clear**, available while idle, resets the visible history, frees raw capture, and reprints startup diagnostics without disk logging.
 
