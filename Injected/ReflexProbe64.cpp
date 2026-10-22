@@ -992,7 +992,11 @@ FARPROC WINAPI HookApplicationGetProcAddress(HMODULE module, LPCSTR procName)
 
     // Most GetProcAddress calls are unrelated to Reflex/FG/DXGI. Do not
     // query loader paths or caller modules until an interesting name appears.
-    const bool streamlineName = strcmp(procName, "slGetFeatureFunction") == 0;
+    // Presentation-only users asked us to observe DXGI, not to substitute
+    // any Streamline resolver pointer. The generic GetProcAddress IAT hook
+    // is shared plumbing; individual feature substitution is NOT shared.
+    const bool streamlineName = (IsReflexProbingEnabled() || IsFgProbingEnabled()) &&
+        strcmp(procName, "slGetFeatureFunction") == 0;
     const bool nvapiName = IsReflexProbingEnabled() && !HasStreamlineReflexBoundary() &&
         (strcmp(procName, "nvapi_QueryInterface") == 0 ||
          (g_shared->countReflexSleepCalls &&
@@ -1030,8 +1034,7 @@ FARPROC WINAPI HookApplicationGetProcAddress(HMODULE module, LPCSTR procName)
         return reinterpret_cast<FARPROC>(&HookNvapiD3DSleep);
     }
 
-    if (strcmp(procName, "slGetFeatureFunction") != 0 ||
-        _wcsicmp(moduleName, L"sl.interposer.dll") != 0) {
+    if (!streamlineName || _wcsicmp(moduleName, L"sl.interposer.dll") != 0) {
         return result;
     }
 
@@ -1435,7 +1438,7 @@ bool PatchStreamlineImportsInModule(HMODULE module, bool& sawTarget,
         for (; thunk->u1.Function; ++thunk) {
             void* current = reinterpret_cast<void*>(static_cast<uintptr_t>(thunk->u1.Function));
 
-            if (modernResolver &&
+            if ((IsReflexProbingEnabled() || IsFgProbingEnabled()) && modernResolver &&
                 (current == modernResolver || current == reinterpret_cast<void*>(&HookGetFeatureFunction))) {
                 sawTarget = true;
                 if (current == reinterpret_cast<void*>(&HookGetFeatureFunction))
@@ -1499,7 +1502,7 @@ bool PatchLoadedStreamlineImports(bool& foundAny)
     // Streamline instances cannot leave us with stale module pointers.
     StreamlineScanContext context{};
     context.interposer = GetModuleHandleW(L"sl.interposer.dll");
-    if (context.interposer) {
+    if (context.interposer && (IsReflexProbingEnabled() || IsFgProbingEnabled())) {
         context.modernResolver = reinterpret_cast<void*>(
             GetProcAddress(context.interposer, "slGetFeatureFunction"));
         context.legacySetConstants = reinterpret_cast<void*>(
@@ -1533,7 +1536,7 @@ bool PatchLoadedStreamlineImports(bool& foundAny)
             bool patched = !probeFg ||
                 PatchGetProcAddressResolverInModule(heldModule);
             bool sawTarget = false;
-            if (patched)
+            if (patched && (IsReflexProbingEnabled() || IsFgProbingEnabled()))
                 patched = PatchStreamlineImportsInModule(heldModule, sawTarget, context);
             if (patched && !probeFg && !sawTarget && IsReflexProbingEnabled())
                 patched = PatchGetProcAddressResolverInModule(heldModule);
