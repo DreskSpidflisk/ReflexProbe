@@ -188,6 +188,19 @@ PFunNvapiD3DSleep* g_realNvapiD3DSleep = nullptr;
 volatile LONG g_modernReflexCaptured = 0;
 volatile LONG g_nativeNvapiCaptured = 0;
 volatile LONG g_legacyPluginGatewayArmed = 0;
+
+// A Streamline Reflex gateway selected by the application is already an
+// interception path. Continuing DXGI/FG module discovery must not acquire an
+// additional native NVAPI Reflex path merely because another probe is active.
+// This is deliberately not a global "NVAPI unsupported" rule: native-only
+// games still discover and use their normal NVAPI boundary.
+bool HasStreamlineReflexBoundary()
+{
+    return InterlockedCompareExchange(&g_legacyPluginGatewayArmed, 0, 0) != 0 ||
+        InterlockedCompareExchange(&g_modernReflexCaptured, 0, 0) != 0 ||
+        g_realLegacySetFeatureConstants != nullptr ||
+        g_realLegacyPluginSetConstants != nullptr;
+}
 wchar_t g_modernInterceptionMethodStorage[256]{};
 const wchar_t* g_modernInterceptionMethod = L"modern slGetFeatureFunction";
 const wchar_t* g_nvapiQueryInterceptionMethod =
@@ -770,7 +783,8 @@ void* __cdecl HookNvapiQueryInterface(uint32_t interfaceId)
     if (!function)
         return function;
 
-    if (interfaceId == kNvapiD3DSetSleepModeId && IsReflexProbingEnabled()) {
+    if (interfaceId == kNvapiD3DSetSleepModeId && IsReflexProbingEnabled() &&
+        !HasStreamlineReflexBoundary()) {
         g_realNvapiD3DSetSleepMode =
             reinterpret_cast<PFunNvapiD3DSetSleepMode*>(function);
         SetBackend(ReflexProbeProtocol::ReflexBackendNativeNvapiD3D);
@@ -969,7 +983,7 @@ FARPROC WINAPI HookApplicationGetProcAddress(HMODULE module, LPCSTR procName)
     // Most GetProcAddress calls are unrelated to Reflex/FG/DXGI. Do not
     // query loader paths or caller modules until an interesting name appears.
     const bool streamlineName = strcmp(procName, "slGetFeatureFunction") == 0;
-    const bool nvapiName = IsReflexProbingEnabled() &&
+    const bool nvapiName = IsReflexProbingEnabled() && !HasStreamlineReflexBoundary() &&
         (strcmp(procName, "nvapi_QueryInterface") == 0 ||
          (g_shared->countReflexSleepCalls &&
           strcmp(procName, "NvAPI_D3D_Sleep") == 0));
@@ -1564,12 +1578,19 @@ DWORD WINAPI WorkerThread(void*)
     // Prefer already-loaded/static Streamline boundaries. Also arm GetProcAddress IATs
     // across loaded non-system game/engine/plugin modules so dynamically resolved
     // slGetFeatureFunction calls are visible even when they originate outside the EXE.
+    // Presentation may require discovery for the lifetime of a target, but
+    // finishing Streamline Reflex discovery is independent of that lifetime.
+    // The selected Reflex interception boundary is sticky for this process.
+    bool streamlineReflexSelected = false;
     for (uint32_t attempt = 0;; ++attempt) {
         bool foundStreamlineImport = false;
         if (!PatchLoadedStreamlineImports(foundStreamlineImport))
             return 1;
 
-        if (foundStreamlineImport && !IsFgProbingEnabled() && !IsPresentationProbingEnabled()) {
+        if (IsReflexProbingEnabled() && !IsFgProbingEnabled() && foundStreamlineImport)
+            streamlineReflexSelected = true;
+
+        if (streamlineReflexSelected && !IsPresentationProbingEnabled()) {
             if (InterlockedCompareExchange(&g_legacyPluginGatewayArmed, 0, 0) != 0) {
                 OutputDebugStringW(
                     L"ReflexProbe64: armed Streamline 1.x sl.reflex plugin-gateway interception; worker exiting.\n");
@@ -1584,7 +1605,13 @@ DWORD WINAPI WorkerThread(void*)
         }
 
         bool armedNvapiResolver = false;
-        if (IsReflexProbingEnabled() && !PatchApplicationNvapiResolver(armedNvapiResolver))
+        // In a Reflex+Presentation session, continue finding DXGI modules,
+        // not additional Reflex backends after Streamline was selected.
+        // The prior Reflex-only branch exited here; maintain that ownership
+        // when DXGI forces this worker to keep scanning.
+        if (IsReflexProbingEnabled() && !streamlineReflexSelected &&
+            !HasStreamlineReflexBoundary() &&
+            !PatchApplicationNvapiResolver(armedNvapiResolver))
             return 1;
 
         if (!IsFgProbingEnabled() && !IsPresentationProbingEnabled() &&
