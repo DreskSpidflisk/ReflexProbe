@@ -1391,7 +1391,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 
         g_app.capturingStartupDiagnostics = true;
         AppendStatusLine(L"ReflexProbe bootstrap: Launch, Watch or Attach selected API probes.");
-        AppendStatusLine(L"State values: game request -> forwarded value. Unchanged values are shown once.");
+        AppendStatusLine(L"State values: game request -> forwarded value. State-change markers: + new state; - repeated calls for the preceding state.");
         AppendStatusLine(L"Reflex probing is ON by default; DLSS FG and Presentation probing are OFF. Presentation DXGI overrides are opt-in.");
         AppendStatusLine(L"FG SetOptions is observed when enabled; GetState interception is independently optional.");
         AppendStatusLine(L"Frame-limit override is OFF by default. When checked, the FPS value replaces frameLimitUs on intercepted Reflex settings calls.");

@@ -18,7 +18,7 @@ constexpr uint32_t kErrorChars = 512;
 
 // Human-readable source tag for rapid local rebuild/testing. The controller also hashes the
 // actual EXE and DLL on disk, so a stale or mismatched binary is obvious in copied logs.
-constexpr wchar_t kBuildTag[] = L"2026-10-22.42-present-status-ui";
+constexpr wchar_t kBuildTag[] = L"2026-10-22.43-state-markers";
 
 constexpr wchar_t kMappingPrefix[] = L"Local\\ReflexProbe.";
 

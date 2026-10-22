@@ -272,7 +272,7 @@ void FormatReflexDisplayLine(const CapturedReflexEvent& event, bool newState,
     wchar_t raw[384]{};
     FormatReflexEvent(event, raw, _countof(raw));
     if (newState)
-        swprintf_s(line, lineCount, L"NEW Reflex State: %s", raw);
+        swprintf_s(line, lineCount, L"+ Reflex State: %s", raw);
     else
         wcscpy_s(line, lineCount, raw);
 }
@@ -318,7 +318,7 @@ void FormatFgDisplayLine(const CapturedReflexEvent& event, bool newState,
     const ReflexProbeProtocol::FgEventData& fg = event.fg;
     const wchar_t* prefix = !newState ? L"" :
         (event.kind == ReflexProbeProtocol::FgEventSetOptions
-            ? L"NEW FG SetOptions: " : L"NEW FG GetState: ");
+            ? L"+ FG SetOptions: " : L"+ FG GetState: ");
     if (event.kind == ReflexProbeProtocol::FgEventSetOptions) {
         wchar_t requestedMode[64]{};
         wchar_t forwardedMode[64]{};
@@ -466,12 +466,12 @@ void AppendFgRepeatCount(const FgStateRun& run, LONGLONG eventQpc)
         // Exact complete-state repetitions, potentially across multiple
         // hidden state transitions; do not claim a single state persisted.
         swprintf_s(line,
-            L"PREVIOUS FG SetOptions: %llu repeated calls since %s #%ld (viewport=%u).",
+            L"- FG SetOptions: %llu repeated calls since %s #%ld (viewport=%u).",
             static_cast<unsigned long long>(count),
             callName, run.displayed.sequence, run.viewport);
     } else {
         swprintf_s(line,
-            L"PREVIOUS FG %s: %llu repeated calls since %s #%ld (viewport=%u).",
+            L"- FG %s: %llu repeated calls since %s #%ld (viewport=%u).",
             isSetOptions ? L"SetOptions" : L"GetState",
             static_cast<unsigned long long>(count),
             callName, run.displayed.sequence, run.viewport);
@@ -735,7 +735,7 @@ bool SameReflexState(const CapturedReflexEvent& a, const CapturedReflexEvent& b)
 void FormatRepeatCount(uint64_t repeatCount, const CapturedReflexEvent& state,
                        wchar_t* line, size_t lineCount)
 {
-    swprintf_s(line, lineCount, L"PREVIOUS Reflex State: %llu repeated calls since %s #%ld.",
+    swprintf_s(line, lineCount, L"- Reflex State: %llu repeated calls since %s #%ld.",
         static_cast<unsigned long long>(repeatCount),
         BackendCallName(state.backend), state.sequence);
 }
