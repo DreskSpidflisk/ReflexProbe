@@ -148,9 +148,8 @@ const wchar_t* ReflexModeName(LONG mode)
     }
 }
 
-// Avoid needless Win32 STATIC/title changes even when different internal
-// values round to identical display text. Hot-path Reflex events are already
-// filtered by the effective mode/interval cache before reaching this helper.
+// Avoid needless Win32 STATIC text changes even when different internal
+// values round to identical display text. The window title is fixed.
 void SetWindowTextIfChanged(HWND window, const wchar_t* desired)
 {
     if (!window || !desired)
@@ -176,11 +175,16 @@ void ResetCurrentEffectiveState()
     g_app.fgLabelMode = 0;
     g_app.fgLabelGeneratedFrames = 0;
     g_app.fgLabelMenuDetection = false;
+    g_app.havePresentLabelState = false;
+    g_app.presentLabelSyncInterval = 0;
+    g_app.presentLabelAllowTearing = false;
 
     const bool reflexEnabled = g_app.reflexProbing &&
         Button_GetCheck(g_app.reflexProbing) == BST_CHECKED;
     const bool fgEnabled = g_app.fgProbing &&
         Button_GetCheck(g_app.fgProbing) == BST_CHECKED;
+    const bool presentEnabled = g_app.presentationProbing &&
+        Button_GetCheck(g_app.presentationProbing) == BST_CHECKED;
 
     SetWindowTextIfChanged(g_app.currentState,
         reflexEnabled ? L"Reflex: Unknown | Limit: Unknown"
@@ -188,9 +192,9 @@ void ResetCurrentEffectiveState()
     SetWindowTextIfChanged(g_app.fgState,
         fgEnabled ? L"DLSS FG: Waiting for SetOptions"
             : L"DLSS FG: Probing disabled");
-    SetWindowTextIfChanged(g_app.window,
-        reflexEnabled ? L"ReflexProbe - Reflex Unknown | FPS Limit Unknown"
-            : L"ReflexProbe - No Reflex probing");
+    SetWindowTextIfChanged(g_app.presentState,
+        presentEnabled ? L"Present: Waiting for Present/Present1"
+            : L"Present: Probing disabled");
 }
 
 void UpdateCurrentEffectiveState(const CapturedReflexEvent& event)
@@ -210,27 +214,19 @@ void UpdateCurrentEffectiveState(const CapturedReflexEvent& event)
 
     const wchar_t* mode = ReflexModeName(event.effectiveMode);
     wchar_t label[320]{};
-    wchar_t title[224]{};
 
     if (event.effectiveUs) {
         const double fps = 1000000.0 / static_cast<double>(event.effectiveUs);
         swprintf_s(label,
             L"Reflex: %s | Limit: %.3f FPS",
             mode, fps);
-        swprintf_s(title,
-            L"ReflexProbe - Reflex %s | FPS Limit %.3f",
-            mode, fps);
-    } else {
+     } else {
         swprintf_s(label,
             L"Reflex: %s | Limit: None (0 us)",
             mode);
-        swprintf_s(title,
-            L"ReflexProbe - Reflex %s | FPS Limit None (0 us)",
-            mode);
-    }
+     }
 
     SetWindowTextIfChanged(g_app.currentState, label);
-    SetWindowTextIfChanged(g_app.window, title);
 }
 
 void FormatValuePair(const wchar_t* field, const wchar_t* requested,

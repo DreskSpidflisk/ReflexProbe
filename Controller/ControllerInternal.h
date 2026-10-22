@@ -174,6 +174,7 @@ struct AppState {
     HWND attach = nullptr;
     HWND currentState = nullptr;
     HWND fgState = nullptr;
+    HWND presentState = nullptr;
     HWND statusLabel = nullptr;
     HWND captureModeLabel = nullptr;
     HWND captureState = nullptr;
@@ -206,6 +207,12 @@ struct AppState {
     uint32_t fgLabelMode = 0;
     uint32_t fgLabelGeneratedFrames = 0;
     bool fgLabelMenuDetection = false;
+
+    // Only the two effective fields shown in the Present status row. This is
+    // independent of State changes / Raw capture and avoids per-Present draws.
+    bool havePresentLabelState = false;
+    uint32_t presentLabelSyncInterval = 0;
+    bool presentLabelAllowTearing = false;
 
     bool watchArmed = false;
     wchar_t watchTargetPath[ReflexProbeProtocol::kPathChars]{};
