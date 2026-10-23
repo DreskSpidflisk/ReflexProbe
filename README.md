@@ -105,45 +105,19 @@ Reflex FPS targets use `frameLimitUs = round(1,000,000 / FPS)` (165 FPS → 6061
 
 ## Observed behavior
 
-- **Explicit Reflex limits can outlast Reflex mode:** God of War, Shadow Warrior 3, and Hogwarts Legacy obeyed forced limits with Reflex **Off** and **zero observed Sleep calls** in those intervals. The downstream mechanism remains unidentified.
-- **Hidden limits exist:** Satisfactory requested **16,666 µs (~60 FPS)** in its main menu, which ReflexProbe overrode.
-- **Forced FG continuation can work:** Pragmata kept FG running through game-requested Off transitions forwarded as On; Steam's overlay showed generated output continuing without observed visual artifacts. Hogwarts Legacy also kept FG active across all tested menus in its heavily customized UE4 integration.
-- **Resident Evil Requiem is a third successful case:** the Steam D3D12/RE Engine build kept FG operating across tested main-menu, map, inventory, and video-playing menu transitions. A live **After success on → off → on** comparison captured the same game-requested `Off` forwarded as `On` when enabled and as `Off` when disabled.
-- **It can also fail:** Deadzone: Rogue and Satisfactory stopped FG despite accepted overridden requests. **Cyberpunk 2077 and The Witcher 3 Remastered did not retain FG in their commonly used gameplay menus** with Off overridden.
-- **Sometimes there is nothing to override:** Dawnwalker, The Talos Principle 2, and **Marvel's Spider-Man 2** maintain FG natively through tested menus. Spider-Man 2 never requested FG Off in its captured session; its 3X multiplier override and Reflex limiter both worked.
-- **One game can do both:** **The Last of Us Part II Remastered** leaves FG running in its animated main menu, successfully maintains FG with the Off override in the paused in-game menu, but still stops FG on loading screens despite forwarding On. Its explicit Reflex frame-limit override worked.
-- **MFG multiplier overrides are a separate capability:** Satisfactory and other games accepted multipliers beyond exposed menu choices; unsupported requests can be rejected or disengage FG, with differing fallback behavior.
-- **DXGI/VSync under-refresh experiments:** with FG active and no explicit Reflex limiter, Hogwarts and Witcher 3 Remastered ran above refresh with `SyncInterval=0` and NvCPL VSync Off; Satisfactory also ran above refresh with FG and SyncInterval 0. **Hogwarts, Dawnwalker and Satisfactory** returned to approximately **225 FPS at 240 Hz** when ReflexProbe forced `SyncInterval=1`. Both Dawnwalker and Satisfactory reported FG `VSyncAvailable=No`; Dawnwalker's GetState and SetOptions used different viewport identifiers. Driver-forced NvCPL VSync can impose pacing while ReflexProbe still sees game-submitted `SyncInterval=0`.
-- **No Man's Sky forced FG in menus:** its limiter works **pre-FG**; forced Off → On kept FG running even through the Escape-menu Off requests and kept menu interaction smooth at a 53 FPS native cap with 3X output (~159 FPS potential).
-- **API acceptance is not measured output:** No Man's Sky accepted a Reflex interval that did not govern presentation. A successful FG SetOptions call similarly does not prove continued generation.
+- **Explicit Reflex limits and VSync-associated caps are different:** God of War, Shadow Warrior 3, and Hogwarts Legacy honored explicit limits even with Reflex Off and no observed Sleep calls. Separately, Reflex + G-SYNC + effective VSync repeatedly produced an automatic ~225 FPS ceiling at 240 Hz; disabling VSync permitted output above refresh. Satisfactory also submitted a hidden 16,666 µs (~60 FPS) menu limit.
+- **DXGI overrides expose the application/driver distinction:** Hogwarts Legacy, Dawnwalker, Satisfactory, and The Talos Principle 2 responded to forced `SyncInterval=1` with ~225 FPS, even where FG GetState reported `VSyncAvailable=No` on its queried viewport. Talos 2 and The Witcher 3 Remastered independently expose working *in-game* VSync with FG. Driver-forced VSync need not appear as `SyncInterval=1` at the application-facing interception.
+- **FG continuation depends on the title and the transition:** Pragmata, Hogwarts Legacy, Resident Evil Requiem, and No Man's Sky kept generation working when requested Off was forwarded as On in their tested scenarios. Other titles did not; an accepted setter alone proves neither generation nor scanout.
+- **Native FG-On policies are distinct from successful overrides:** Dawnwalker, Spider-Man 2, and Hellraiser: Revival provided sessions without menu-related Off requests. Earlier Talos 2 menu runs likewise kept FG active natively, but a later override-enabled session captured Off requests; its precise native stopping behavior in those intervals was **not measured**.
+- **Presentation probing is observational unless independently enabled overrides are selected:** compatible Reflex+DXGI tests succeeded on native NVAPI D3D11 (God of War and Shadow Warrior 3), SL1 Requiem D3D12, and modern Streamline D3D12. No general GPU queue or physical-tearing claim follows from successful Present interception.
 
-See [FG continuation comparisons](docs/TestFindings.md#fg-off-override-cross-title-outcomes), [The Last of Us Part II Remastered's mixed FG outcome](docs/TestFindings.md#the-last-of-us-part-ii-remastered-steam--d3d12--proprietary-engine), [Spider-Man 2 testing and shutdown crash](docs/TestFindings.md#marvels-spider-man-2-steam--d3d12--proprietary-engine), [detailed game tests](docs/TestFindings.md#per-game-results), and [Requiem's PresentMon evidence](docs/TestFindings.md#a-plague-tale-requiem-gog--d3d12--proprietary-engine).
+Details and limitations: [automatic capping / DXGI experiments](docs/TestFindings.md#live-dxgi-vsync-and-presentation-experiments-october-2223-2026), [FG Off cross-title outcomes](docs/TestFindings.md#fg-off-override-cross-title-outcomes), [per-game evidence](docs/TestFindings.md#per-game-results), and [remaining questions](docs/TestFindings.md#remaining-experimental-questions).
 
-## Tested games
+## Tested games and findings
 
-Observations below are specific to tested builds, not guarantees of compatibility. Detailed evidence is in [TestFindings.md](docs/TestFindings.md#per-game-results).
+ReflexProbe has been tested across **D3D11, D3D12, and Vulkan** titles using modern Streamline, legacy Streamline 1.x, and native NVAPI Reflex. Outcomes vary by game build and interception surface; successful calls alone do not guarantee frame limiting, Frame Generation, or latency improvements.
 
-| Game / test target | Tested distribution / rendering API / engine | Distinguishing observation |
-| --- | --- | --- |
-| GSyncProbe | Local / D3D11, D3D12, Vulkan / Test Harness | Controlled 240 Hz and 165/60/30 FPS override measurements. |
-| Cyberpunk 2077 | GOG / D3D12 / Proprietary Engine | FG Off override did **not** preserve generation in normal gameplay menus. |
-| The Witcher 3 Remastered | GOG / D3D12 / Proprietary Engine | Supports in-game VSync with FG; VSync Off and no explicit Reflex limit exceeded 1,200 generated-inclusive FPS. FG Off override did **not** preserve FG in gameplay menus. |
-| A Plague Tale: Requiem | GOG / D3D12 / Proprietary Engine | SL1 Reflex + DXGI combined interception recovered after regression; live SyncInterval/tearing overrides worked. Earlier forced-Boost ~158 → ~30 FPS collapse documented using PresentMon. |
-| Blood of the Dawnwalker | GOG / D3D12 / UE5 | 2X–4X overrides work; FG GetState viewport 0 reported VSyncAvailable=No, yet forced SyncInterval 1 returned ~225 FPS with FG enabled. |
-| Indiana Jones and the Great Circle | GOG / Vulkan / Motor | GetState reports 4X maximum; rejected 5X/6X retained prior working 4X. |
-| No Man's Sky | GOG / Vulkan / Proprietary Engine | Explicit Reflex limiter did not control output; separate pre-FG limiter works and Off → On override retained FG across Escape menus. |
-| God of War (2018) | GOG / D3D11 / Proprietary Engine | Working explicit limiter with Reflex Off and zero observed Sleeps. |
-| DOOM: The Dark Ages | Steam / Vulkan / id Tech 8 | Reflex CVar and PT/FG pacing transitions. |
-| Shadow Warrior 3 | GOG / D3D11 / UE4 | Native NVAPI Reflex + DXGI Present overrides observed together; prior limiter with Reflex Off still works. |
-| Satisfactory | Steam / D3D12 / UE5 | FG GetState VSyncAvailable=No, yet forcing DXGI SyncInterval 1 restored ~225 FPS from above-refresh output. Hidden menu 60 FPS limit and FG override differences remain documented. |
-| Hogwarts Legacy | Steam / D3D12 / UE4 | FG Off override retained generation in menus; with driver VSync Off, SyncInterval 1 restored ~225 FPS without an explicit Reflex limit. |
-| Clive Barker's Hellraiser: Revival | Steam / D3D12 / UE5 | Two Reflex settings calls; 8,823 repeated FG SetOptions calls with 3X FG at ~53 native / 158 DLSS FPS. |
-| Pragmata | Steam / D3D12 / RE Engine | **FG continued operating through overridden game-requested Off calls.** |
-| Resident Evil Requiem | Steam / D3D12 / RE Engine | **FG Off → On successfully preserved generation throughout tested menus**; Watch acquisition, working Reflex cap, and GetState **4X maximum**. |
-| Deadzone: Rogue | Steam / D3D12 / UE5 | **FG stopped despite Off → On returning success.** |
-| The Talos Principle 2 | Steam / D3D12 / UE5 | Explicit limiter works; menus keep FG enabled without the Off override. |
-| Marvel's Spider-Man 2 | Steam / D3D12 / Proprietary Engine | **FG stayed On natively through menus**; 3X override and Reflex limiter worked; three shutdown access violations, including Reflex-only runs without overrides. |
-| The Last of Us Part II Remastered | Steam / D3D12 / Proprietary Engine | **Mixed FG result:** native FG in the animated main menu; Off → On preserves FG in paused gameplay menus, not loading screens. Reflex frame-limit override works; GetState reports **4X maximum**. |
+The **maintained per-game list**, with distributions, rendering APIs, engines, measured observations, failures and qualifications, is in **[Test Findings — Per-game results](docs/TestFindings.md#per-game-results)**. For comparison of FG menu behavior, see [FG Off override — cross-title outcomes](docs/TestFindings.md#fg-off-override-cross-title-outcomes).
 
 ## Interception architecture
 
