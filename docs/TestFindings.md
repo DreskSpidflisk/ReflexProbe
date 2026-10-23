@@ -29,7 +29,23 @@ Examples:
 
 This is an empirically reconstructed operational rule, not a claim about unpublished NVIDIA driver source.
 
-The pattern above comes from an observed Reflex + VSync + G-SYNC configuration, especially at 240 Hz. It is **not** a claim that Vulkan lacks explicit Reflex limiting: DOOM: The Dark Ages demonstrates working explicit limits on Vulkan. Conversely, No Man's Sky demonstrates that accepted explicit settings do not always govern output.
+The pattern above comes from an observed Reflex + VSync + G-SYNC configuration, especially at 240 Hz. **VSync On was a necessary condition in the original tests, not an effect implied by G-SYNC or Reflex alone.** This is **not** a claim that Vulkan lacks explicit Reflex limiting: DOOM: The Dark Ages demonstrates working explicit limits on Vulkan. Conversely, No Man's Sky demonstrates that accepted explicit settings do not always govern output.
+
+### Live DXGI VSync and presentation experiments (October 22–23, 2026)
+
+These D3D12 / MFG comparisons used the RTX 5090 and a **240 Hz G-SYNC Pulsar**, deliberately with **NVIDIA Control Panel VSync Off**. They distinguish an explicit Reflex `frameLimitUs` limit from the VSync-associated **automatic below-refresh ceiling**.
+
+| Game / condition | Application-facing DXGI and Reflex settings | Observed output |
+| --- | --- | --- |
+| **Hogwarts Legacy**, FG 3X | Reflex `frameLimitUs=0`, `SyncInterval=0`, `ALLOW_TEARING=On`; NvCPL VSync Off | Steam overlay approximately **304 native / 911 FG-inclusive FPS**, well above 240 Hz. |
+| **Hogwarts Legacy**, same active FG | ReflexProbe forwarded DXGI **SyncInterval 0 → 1**, cleared tearing permission; explicit Reflex limit stayed **0** | Output settled around **225 FPS** at 240 Hz; FG GetState in a separate observation reported `VSyncAvailable=Yes`. |
+| **The Witcher 3 Remastered** | Game VSync Off, `SyncInterval=0`, no explicit Reflex limit | **Over 1,200 FG-inclusive FPS**; this title separately supports in-game VSync with FG. |
+| **Blood of the Dawnwalker**, FG active | Game `SyncInterval=0`, tearing allowed; live override forced **0 → 1** and cleared tearing flag | **Over 1,000 FPS** unmodified versus **~225 FPS** with override; stable GetState capability on viewport 0 was `VSyncAvailable=No`. |
+| **A Plague Tale: Requiem**, FG Off, 60 Hz | `SyncInterval=0`, compare `ALLOW_TEARING` forced Off versus permitted | Tester reported tearing disappeared when permission was cleared and returned when restored, despite high GPU activity. Subjective visual evidence, not scanout instrumentation. |
+
+An intercepted Present returning `HRESULT=0` supports successful forwarding, **not** proof of what physical scanout did. Driver-forced VSync has historically produced a below-refresh cap in D3D and Vulkan testing, but changing the D3D12 game's `SyncInterval` is not proof of the same internal driver mechanism. The initial Hogwarts uncapped observation followed live DXGI experiments; later clean comparisons and the other games do **not** establish that earlier toggling *caused* it.
+
+**Dawnwalker viewport/capability caveat:** GetState #1 on **viewport 0** briefly reported **Yes**, then #2 reported **No**, followed by **11,378 repeated No-state queries**. SetOptions instead used **viewport 1**. Thus the successful SyncInterval override while FG remained active challenges any blanket interpretation of `VSyncAvailable=No`, but **does not establish that the flag is incorrect for the active viewport**. The newer GetState also reported `maxFramesToGenerate=3` (**4X maximum**), whereas the October 11 test did not intercept GetState.
 
 ### Explicit limit versus Reflex Low Latency
 
@@ -67,6 +83,7 @@ Modern Streamline FG probing can convert a game's `slDLSSGSetOptions` `Off` requ
 | **Pragmata** | **Success:** Off requests forwarded as On returned `result=0`; Steam's overlay showed continued generation without visible artifacts. Aggressive initial activation also reportedly succeeded. | Verified positive case with overlay observation, specific to this integration. |
 | **Resident Evil Requiem** | **Success:** with **After success** enabled, menu/map/inventory/video-playing transitions retained FG when game `Off` was forwarded as `On`; toggling the override off and on changed the forwarded mode correspondingly. | Steam D3D12/RE Engine; GetState **4X maximum**; **After success** was exercised. |
 | **Hogwarts Legacy** | **Success:** overriding FG Off to On kept DLSS FG running throughout the tested menus. | User-observed success in a heavily customized UE4 integration; not a general statement about UE4 games or proof that the aggressive **Always** policy was needed. |
+| **No Man's Sky** | **Success:** forced FG On retained generation through gameplay and Escape-menu Off requests, keeping animated, non-pausing menus smooth. | GOG/Vulkan; native 53 FPS limiter with 3X FG targeted ~159 generated-inclusive FPS. Without override the menu returned to native cadence. |
 | **Deadzone: Rogue** | **Failure despite `result=0`:** FG stopped; GetState presented-frame count dropped from three to one. | An accepted request did not preserve generated output. |
 | **Satisfactory** | **Failure:** forced On did not keep FG running; the game also changed Reflex state. | Cannot attribute the result to one mechanism alone. |
 | **Cyberpunk 2077** | **Failure in gameplay menus:** FG did not continue under forced On. | GOG/D3D12. |
@@ -76,7 +93,7 @@ Modern Streamline FG probing can convert a game's `slDLSSGSetOptions` `Off` requ
 | **Marvel's Spider-Man 2** | **FG remains On natively during menu navigation.** No FG Off requests were captured, with the experimental Off override disabled. | Steam/D3D12, proprietary engine; working Reflex limiter and 3X FG multiplier override. |
 | **The Last of Us Part II Remastered** | **Mixed result:** animated 3D main menu retains FG natively; **After success** Off → On override keeps FG active in paused gameplay menus, but not on loading screens. | Steam/D3D12/proprietary engine; GetState **4X maximum**; working Reflex limiter. Off → On setters returned `result=0` during the override-enabled interval. |
 
-The intercepted boundary is a game-requested FG configuration call, **not** complete control of resource lifetime, engine enablement, and presentation. **Pragmata, Hogwarts Legacy, and Resident Evil Requiem** maintained FG through overridden Off calls. **Dawnwalker, The Talos Principle 2, and Spider-Man 2** kept FG on natively during tested menu navigation. **The Last of Us Part II Remastered** demonstrated both native FG continuation and a scene-dependent Off override: successful in paused gameplay menus but unsuccessful during loading. Other games failed to keep FG on even with successful forwarded requests.
+The intercepted boundary is a game-requested FG configuration call, **not** complete control of resource lifetime, engine enablement, and presentation. **Pragmata, Hogwarts Legacy, Resident Evil Requiem, and No Man's Sky** maintained FG through overridden Off calls. **Dawnwalker, The Talos Principle 2, and Spider-Man 2** kept FG on natively during tested menu navigation. **The Last of Us Part II Remastered** demonstrated both native FG continuation and a scene-dependent Off override: successful in paused gameplay menus but unsuccessful during loading. Other games failed to keep FG on even with successful forwarded requests.
 
 ### Fixed MFG multiplier limits: Dawnwalker and Indiana Jones (October 11, 2026)
 
@@ -87,7 +104,7 @@ On an RTX 5090 with tester-reported driver **610.47**, ReflexProbe's fixed 2X–
 | **Blood of the Dawnwalker** | **2.7.30.0 / 2.14.0.0** | **2X–4X** confirmed, with generated-inclusive output also checked through Steam's overlay. | **6X** returned `38`; **5X** was user-observed disengaging FG but lacked a separate preserved failing setter. Unsupported requests stopped FG; 4X restored it. |
 | **Indiana Jones and the Great Circle** | **2.7.32.0 / 2.14.0.0** | **2X–4X**, with GetState reporting a **4X** maximum and presented-frame telemetry reflecting accepted values. | **5X/6X** returned `38`, while FG continued at previously accepted **4X**. |
 
-`38` means **`sl::Result::eErrorInvalidState`**, not a universal mandate to stop generation. Indiana Jones reported `numFramesToGenerateMax=3` (4X). **Dawnwalker's GetState interception was disabled**; it has no measured reported maximum. Equal FG plugin versions cannot explain the different fallbacks by themselves. GetState's transient per-call presentation counts do not define persistent state-change comparisons.
+`38` means **`sl::Result::eErrorInvalidState`**, not a universal mandate to stop generation. Indiana Jones reported `numFramesToGenerateMax=3` (4X). **Dawnwalker's October 11 GetState interception was disabled**; a separate October 23 GetState capture on viewport 0 later reported `maxFramesToGenerate=3` (**4X maximum**). Do not retroactively ascribe the later measurement to the earlier run. Equal FG plugin versions cannot explain the different fallbacks by themselves. GetState's transient per-call presentation counts do not define persistent state-change comparisons.
 
 ### FG resource retention and its limits
 
@@ -121,6 +138,8 @@ Entering/leaving menus produced explicit `Off` / `On` SetOptions calls. Fullscre
 
 **FG Off override outcome:** in gameplay menus, forwarding On over Off **did not keep FG running**. A monitor's ~225 FPS indicator from an earlier test was insufficient to identify actual rendered-versus-generated cadence; further output-rate measurement would require a suitable independent display metric.
 
+**October 23 — VSync with FG:** In-game VSync Off and `SyncInterval=0`, with no explicit Reflex limit and NvCPL VSync Off, produced **over 1,200 FG-inclusive FPS**. This game can also enable in-game VSync while FG is active; the unbounded case is specifically its VSync Off configuration.
+
 ### A Plague Tale: Requiem (GOG / D3D12 / Proprietary Engine)
 
 D3D12, legacy Streamline **1.0** plugin gateway. Setter calls roughly follow frame cadence and natively request zero interval in the tested modes. Reflex observation and explicit interval override work.
@@ -142,6 +161,8 @@ D3D12, legacy Streamline **1.0** plugin gateway. Setter calls roughly follow fra
 
 The immediate recovery when the game itself selected native On + Boost is particularly important: a visibly equivalent forwarded On + Boost mode and interval **did not produce equivalent runtime behavior** under interception. This is an SL1 Force Boost caveat, not a universal result for newer Streamline.
 
+**October 22 — SL1 Reflex + DXGI post-regression retests:** With source tag `2026-10-22.41-separated-dxgi-discovery` (protocol 17), separate Reflex-only and **Reflex + DXGI** launches successfully acquired the `sl.reflex.dll!slSetConstants` gateway, retained original `frameLimit=0` versus forwarded **6329 µs** distinction, and exited with **code 0**. The combined run captured swap-chain creation, Present/Present1 and ResizeBuffers, with successful live SyncInterval and tearing-flag substitutions and more than **42,000 Present calls**. A longer run reached beyond **135,000 Present calls** and also exited cleanly. At 60 Hz with FG Off, the tester reported visible tearing when `ALLOW_TEARING` was permitted and its apparent suppression when forced Off with SyncInterval still 0, while the GPU remained busy. This **does not** verify all three probes together in an SL1 title or prove the physical scanout path.
+
 ### Blood of the Dawnwalker (GOG / D3D12 / UE5)
 
 UE5.5.3 local build, D3D12, modern dynamically resolved Streamline. Frame Generation enabled caused an Off -> On pair with zero intervals; Frame Generation disabled caused one Off call. With G-SYNC + forced VSync, the FG/Reflex-On case exhibited the familiar ~225 FPS at 240 Hz. **Watch + Inject is runtime-confirmed through GOG Galaxy**: the watcher detected the launcher-created executable, injected successfully, and caught the later sparse Reflex startup calls.
@@ -150,9 +171,13 @@ UE5.5.3 local build, D3D12, modern dynamically resolved Streamline. Frame Genera
 
 The game-local `sl.interposer.dll` reported **2.7.30.0**, while the NVIDIA NGX-loaded **`sl_dlss_g`** (and `sl_reflex`) plugin reported **2.14.0.0**. Tests used an **RTX 5090**, with the tester reporting NVIDIA driver **610.47**. **GetState interception was disabled**, so there is no captured `numFramesToGenerateMax` for Dawnwalker. The observed working ceiling of 4X suggests a title/runtime constraint, but file versions and result code 38 alone do not identify the exact cause. Do not generalize this title's FG-disengagement behavior to every game. **Normal tested Dawnwalker menus already kept FG running**, independently of an Off-to-On override; that is not evidence of a successful override.
 
+**October 23 — DXGI/VSync/GetState:** With Reflex, FG SetOptions, optional GetState, and DXGI enabled (source tag `2026-10-22.44-shared-resolver-filter`), no explicit Reflex limiter, and NGX plugin **2.14.16.0**, FG GetState on **viewport 0** changed from `VSyncAvailable=Yes` to **No** (then **11,378** repeated calls) and reported **4X maximum**. The game's FG SetOptions called on **viewport 1**; forced 3X calls returned success. During focused FG gameplay with game `SyncInterval=0` and tearing permitted, generated-inclusive output exceeded **1,000 FPS**. Alt-tabbing also made the game submit `SyncInterval=1` / no tearing permission while disabling FG, with ~225 FPS observed. Crucially, while still **focused with FG running**, a live ReflexProbe override `SyncInterval=0 → 1`, `Flags=0x200 → 0` returned `HRESULT=0` and **~225 FPS** at 240 Hz, despite the GetState No report on another viewport. The session exited **code 0**. This documents the behavior, not a general claim about VSync support on every viewport.
+
 ### No Man's Sky (GOG / Vulkan / Proprietary Engine)
 
 Vulkan + modern Streamline with an independent Reflex control. ReflexProbe successfully intercepted **10,674** settings calls in one state interval while counting **0 `slReflexSleep` calls**. A forced nonzero `frameLimitUs` was accepted with a successful result but did not impose the requested presentation limit. The game's own limiter is separate and pre-FG. Zero Streamline sleeps is therefore a concrete difference from Indiana Jones, although it does not by itself prove why the limiter is ineffective.
+
+**October 22 — pre-FG limiter and live menu override:** The game-native frame limiter applies **before FG**. A 165 FPS native limit with 3X allows a theoretical **495 FPS** generated-inclusive rate; reducing the native limit to **53 FPS** targets **~159 FPS** with 3X. Starting the game with FG Off still allowed ReflexProbe's forced `slDLSSGSetOptions Off → On` to keep generation working in gameplay. Although the game **requests FG Off on Escape/menu entry**, the same override kept FG running and the animated, multiplayer-nonpausing menus smooth, avoiding a menu cursor running at the native 53 FPS limit. This is a successful forced Off override, not proof that the previously ineffective explicit *Reflex* limiter started working.
 
 ### Indiana Jones and the Great Circle (GOG / Vulkan / Motor)
 
@@ -173,6 +198,12 @@ D3D11 + native NVAPI Reflex, independent of whether DLSS is enabled. Runtime-con
 ### Shadow Warrior 3 (GOG / D3D11 / UE4)
 
 native NVAPI D3D Reflex. The outer `SW3.exe` is an Epic `BootstrapPackagedGame` wrapper, so Launch + Inject targets the wrong process and finds no Reflex path. Watch + Inject against the exact full path `SW3\Binaries\Win64\SW3.exe` catches the real game. SetSleepMode is submitted only on Reflex state changes; frame-limit override and Force Boost work. With Reflex Off, the captured Sleep count was **0** while the forced 6329 us (~158 FPS) limiter still worked. With Reflex On / On + Boost, Sleep counts were approximately frame-cadence. No Frame Generation path is present in the tested title.
+
+**October 22 — native NVAPI + DXGI combined:** Source tag `2026-10-22.41-separated-dxgi-discovery` captured both native `NvAPI_D3D_SetSleepMode` and a DXGI flip-model chain. Forcing DXGI `SyncInterval 0 → 1` and `ALLOW_TEARING 0x200 → 0` returned `HRESULT=0`; Reflex Off / On / Boost settings and explicit 6329 µs override were separately observed. The D3D11 game exited **code 0**. FG probing was selected but **no FG function was observed**, so this is not evidence of a working FG path.
+
+### Clive Barker's Hellraiser: Revival (Steam / D3D12 / UE5)
+
+**October 23 — modern Streamline with Presentation disabled:** Under source tag `2026-10-22.44-shared-resolver-filter` / protocol 17, Watch remained armed for about **three hours** before detecting the actual Win64 game executable, then injected successfully. The main executable's `GetProcAddress` IAT resolved modern Reflex (interposer **2.9.0.0**, NGX Reflex **2.14.16.0**) and FG SetOptions (NGX FG **2.14.16.0**). The game submitted **exactly two observed Reflex settings calls**—Off and On, with On forwarded to On + Boost and `frameLimit=0 → 6329 µs`. FG submitted an On/2X request forwarded as On/**3X**, followed by **8,823 repeated SetOptions calls** (viewport 1); the process exited **code 0**. Steam independently showed **~53 native / 158 DLSS FPS**, monitor display **153–158 Hz**. Around **8,824** FG SetOptions calls in the ~176-second active interval average **~50.1/s**, consistent with but not proving one setter per native rendered frame, given imperfectly aligned timing. DXGI was not selected.
 
 ### Pragmata (Steam / D3D12 / RE Engine)
 
@@ -324,6 +355,8 @@ Changing the exposed 2X / 3X / 4X Frame Generation multiplier did not itself pro
 
 **FG Off override success:** in the user's testing, overriding the game's temporary **FG Off** requests to **On** successfully kept DLSS Frame Generation operating throughout **all tested menus**, just as observed in Pragmata. Hogwarts is therefore a second concrete positive example of choosing to keep FG active during ordinary menu navigation. The game's **heavily customized UE4 integration** is substantially unlike a stock UE4 implementation, so this result must **not** be generalized to UE4 titles as a group. This records continued FG operation throughout the tested menus; **Always** was not separately exercised.
 
+**October 23 — D3D12 VSync/FG comparison:** With driver VSync Off, the game's DXGI chain requested `SyncInterval=0` and `ALLOW_TEARING=On`; with **3X FG** and an **explicit Reflex limit of 0**, Steam showed approximately **304 native / 911 FG-inclusive FPS** (well above 240 Hz). Forcing **SyncInterval 1** through ReflexProbe while FG remained enabled restored approximately **225 FPS**; captured Present calls forwarded `0 → 1` and `Flags 0x200 → 0` with `HRESULT=0`. A separate GetState check reported **VSyncAvailable=Yes**. Hogwarts did **not** expose an effective in-game VSync option with FG. The explicit Reflex **158 FPS** override also worked independently (`frameLimit 0 → 6329 µs`); disabling it forwarded 0 unchanged. Because uncapped output was also seen without the DXGI live override in other titles, prior SyncInterval toggling is **not established** as the cause of the uncapped behavior.
+
 ### The Last of Us Part II Remastered (Steam / D3D12 / Proprietary Engine)
 
 **October 14, 2026 — mixed FG Off override outcome, working Reflex limiter.** The PC version launched on **April 3, 2025**, with ordinary Frame Generation supported but **without native Multi Frame Generation**. Naughty Dog / Nixxes added MFG for supported RTX 50-series cards in [PC Patch 1.4, May 19, 2025](https://feedback.naughtydog.com/hc/en-us/articles/37637021167124-The-Last-of-Us-Part-II-Remastered-PC-Patch-1-4), alongside DLSS 4 Transformer upscaling and a **Max Generated Frames** setting. This preliminary experiment used the Steam build, D3D12, and the game's proprietary engine.
@@ -418,7 +451,7 @@ ReflexProbe has two **capture modes**, not a capture-versus-display filter.
 
 Intercepted calls are forwarded and examined, but identical settings calls are not individually retained in State changes mode. Reflex, FG SetOptions, and FG GetState have separate state runs and repetition counters; FG is keyed by viewport.
 
-- Reflex transitions use **`NEW Reflex State:`**; FG distinguishes **`NEW FG SetOptions:`** from **`NEW FG GetState:`**;
+- New-state lines use compact **`+ Reflex State:`**, **`+ FG SetOptions:`**, **`+ FG GetState:`**, and **`+ DXGI Present`** markers; completed repetition runs use **`-`**. The startup banner explains both;
 - repeated calls and changes confined to fields suppressed by the compact FG view do not each print a new visible state;
 - repetition summaries refer to the preceding **numbered API call** and (for FG) **viewport**; optional Reflex Sleep summaries refer to their preceding Reflex settings call;
 - no zero-repetition line is printed, and pending counts are flushed on state/display/capture changes or target exit;
@@ -483,7 +516,7 @@ Earlier diagnostic builds had startup-global `--wrap-reflex-sleep` and `--no-wra
 
 ### Remaining experimental questions
 
-ReflexProbe's direct `slDLSSGSetOptions` and optional `slDLSSGGetState` interception is **implemented**, not future work. Outstanding questions concern why **Pragmata, Hogwarts Legacy, and Resident Evil Requiem** maintain FG after forced active requests while **Deadzone: Rogue, Satisfactory, Cyberpunk 2077, and The Witcher 3 Remastered** do not. **The Last of Us Part II Remastered** adds a within-game contrast: an Off override works in paused gameplay menus but does not sustain FG during loading. **Dawnwalker, The Talos Principle 2, and Marvel's Spider-Man 2** form a separate group that never requested FG Off during tested menu navigation. Independent Reflex state changes, game-managed resource lifetime, and actual presentation remain difficult to isolate from an accepted configuration call alone. Overriding retention does not block `slFreeResources()`.
+ReflexProbe's direct `slDLSSGSetOptions` and optional `slDLSSGGetState` interception is **implemented**, not future work. Outstanding questions concern why **Pragmata, Hogwarts Legacy, Resident Evil Requiem, and No Man's Sky** maintain FG after forced active requests while **Deadzone: Rogue, Satisfactory, Cyberpunk 2077, and The Witcher 3 Remastered** do not. **The Last of Us Part II Remastered** adds a within-game contrast: an Off override works in paused gameplay menus but does not sustain FG during loading. **Dawnwalker, The Talos Principle 2, and Marvel's Spider-Man 2** form a separate group that never requested FG Off during tested menu navigation. Independent Reflex state changes, game-managed resource lifetime, and actual presentation remain difficult to isolate from an accepted configuration call alone. Overriding retention does not block `slFreeResources()`.
 
 Additional tests could investigate 5X/6X support limits, NVIDIA driver-profile interference, and genuine capabilities of legacy Streamline implementations. Native Vulkan `VK_NV_low_latency2` interception and SL1 Sleep counting are not currently implemented.
 
