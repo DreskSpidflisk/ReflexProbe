@@ -34,9 +34,11 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="ReflexProbe64.cpp" />
+    <ClCompile Include="PresentationDxgi.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\Common\Protocol.h" />
+    <ClInclude Include="PresentationDxgi.h" />
   </ItemGroup>
   <Target Name="CheckReflexProbeDependencies" BeforeTargets="PrepareForBuild">
     <Error Condition="!Exists('$(STREAMLINE_SDK)\include\sl_reflex.h')" Text="STREAMLINE_SDK must point at an NVIDIA Streamline SDK containing include\sl_reflex.h (same convention as GSyncProbe.NV)." />

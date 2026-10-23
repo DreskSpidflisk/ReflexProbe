@@ -6,7 +6,9 @@ ReflexProbe is a Windows x64 tool for **observing and overriding NVIDIA Reflex a
 
 **DLSS Frame Generation probing** supports modern Streamline, including Multi Frame Generation (MFG). It can inspect FG configuration and optional state queries, override fixed 2X–6X multipliers and selected flags, and experimentally **force FG On when a game requests Off**. The Off override can wait for an established successful active configuration or try immediately. **Accepted calls are not proof of generated output:** Pragmata, Hogwarts Legacy, and Resident Evil Requiem continued FG when Off was overridden, but several other games did not.
 
-ReflexProbe has **no overlay and writes no capture data to disk**. Its results are game- and integration-dependent; see [Test Findings](docs/TestFindings.md) for measurements, successes, failures, and limitations.
+**Experimental DXGI Presentation probing** observes swap-chain creation and Present/Present1 requests, with independent opt-in live SyncInterval and ALLOW_TEARING overrides. This is not Vulkan presentation interception or proof of physical tearing.
+
+ReflexProbe has **no overlay and writes no capture data to disk**. Its results are game- and integration-dependent; see [Test Findings](docs/TestFindings.md) for measurements, successes, failures, and limitations, and [Architecture](docs/Architecture.md) for interception boundaries and invariants.
 
 ## Why ReflexProbe exists
 
@@ -20,6 +22,8 @@ With **Reflex enabled, VSync on, and G-SYNC active**, testing at 240 Hz revealed
 
 In these tests the games generally submitted a **zero** explicit Reflex frame interval. That means the D3D below-refresh behavior was not simply the game asking for 225 FPS. The empirical D3D rule fits `cap(R) ≈ 3600R / (3600 + R)`; it is an observation, **not** a claim about NVIDIA's internal implementation.
 
+**VSync On is essential to the measured automatic below-refresh behavior; G-SYNC and Reflex alone are not sufficient.** October 23 D3D12/FG experiments deliberately disabled NVIDIA Control Panel VSync. With game `SyncInterval=0` and explicit Reflex `frameLimitUs=0`, Hogwarts exceeded **900 generated-inclusive FPS** and Witcher 3 Remastered exceeded **1,200**. In Hogwarts, forcing only the application-facing DXGI `SyncInterval=1` restored ~**225 FPS at 240 Hz**, despite NvCPL VSync staying Off. **Dawnwalker and Satisfactory** independently reproduced the same ~225 FPS result after forcing SyncInterval 1 while reporting FG `VSyncAvailable=No`. These experiments do not expose NVIDIA's internal pacing algorithm; see [DXGI findings](docs/TestFindings.md#live-dxgi-vsync-and-presentation-experiments-october-2223-2026).
+
 The original question was: **what Reflex settings does a game submit, and what happens if we change them?** ReflexProbe intercepts that boundary. Vulkan's lack of the same *automatic* cap does **not** mean it cannot honor an *explicit* Reflex limit; DOOM: The Dark Ages does. The same approach now asks whether overriding a game's DLSS FG Off request actually keeps generation running.
 
 Full measurements, exceptions, and per-game evidence: **[Test findings](docs/TestFindings.md)**.
@@ -30,11 +34,11 @@ Full measurements, exceptions, and per-game evidence: **[Test findings](docs/Tes
 
 | Capability | Behavior |
 | --- | --- |
-| **Select probes** | Reflex probing starts enabled; DLSS FG probing starts disabled. Choose either or both before acquisition; probe selection is fixed for that target. |
+| **Select probes** | Reflex starts enabled; DLSS FG and DXGI Presentation start disabled. Select any combination before acquisition; probe selection is fixed for that target. |
 | **Acquisition** | **Launch + Inject**, exact-path **Watch + Inject** for launcher-driven games, and **Attach**. |
-| **Capture modes** | **State changes** compresses repeated calls with numbered-call references. **Raw debug** retains the last **131,072** raw events in RAM. Reflex, FG SetOptions and FG GetState histories are separate. |
+| **Capture modes** | **State changes** uses `+ new state` and `- repeated calls for preceding state` markers and numbered-call references. **Raw debug** retains the last **131,072** raw events in RAM. Reflex, FG SetOptions, FG GetState and DXGI histories remain distinct. |
 | **Diagnostics** | Original **requested → forwarded** values, results, module/backend information, repeated-call and Sleep-count references, build timestamps, protocol tag, and EXE/DLL SHA-256 hashes. |
-| **Live override controls** | Reflex frame-limit/Boost and FG Auto/Off/multiplier/menu/retention policies can change during a session; selected interception options are acquisition-time only. |
+| **Live override controls** | Reflex frame-limit/Boost, FG Auto/Off/multiplier/menu/retention, and DXGI SyncInterval/ALLOW_TEARING policies can change live; selected interception options are acquisition-time only. |
 
 ### NVIDIA Reflex probing
 
@@ -60,6 +64,12 @@ Full measurements, exceptions, and per-game evidence: **[Test findings](docs/Tes
 | **FG status label** | Displays last **forwarded** FG mode, multiplier and menu flag; GetState calls do not change it. |
 
 All override checkboxes start **unchecked**. Unknown future options structure versions pass through unchanged. Setter `result=0` indicates the forwarded API request was accepted, **not** that frames were actually generated.
+
+### Experimental DXGI Presentation probing
+
+An acquisition-time checkbox enables DXGI factory/swap-chain, Present/Present1 and ResizeBuffers observation. Two independent live overrides are **unchecked by default**: SyncInterval dropdown 0–4 (initial selection 0) and ALLOW_TEARING Off/On (initial selection Off). Unchecked forwards the game request. Forcing a nonzero SyncInterval clears the incompatible tearing bit; Force On skips ineligible chains rather than changing swap-chain creation.
+
+DXGI's ALLOW_TEARING (0x200) needs an eligible swap chain created with flag 0x800, cannot be used in exclusive fullscreen, and **does not prove actual tearing** or override driver synchronization. The third status row shows the last successful *forwarded* `SyncInterval` and human-readable **Allow Tearing: On/Off**, with numeric caching to avoid redundant GUI updates. The window title is fixed at **ReflexProbe**; prior Reflex/FPS title updates and their buffers were removed. Vulkan presentation is separate and not implemented. See [architecture invariants](docs/Architecture.md#feature-gates-and-non-regression-invariants).
 
 ### Experimental FG Off override
 
@@ -87,7 +97,7 @@ Open `ReflexProbe.sln` and build **Debug x64** or **Release x64**. Both projects
 ## Usage
 
 1. Start `ReflexProbe.exe` and select the **actual x64 game executable**, not a launcher wrapper.
-2. Enable **Reflex probing**, **DLSS Frame Generation probing**, or both. Configure the desired overrides and optional Sleep counting / FG GetState interception. The FG Off dropdown defaults to **After success**; all override checkboxes begin unchecked.
+2. Enable **Reflex probing**, **DLSS Frame Generation probing**, **DXGI Presentation probing**, or any selected combination. Configure the desired overrides and optional Sleep counting / FG GetState interception. The FG Off dropdown defaults to **After success**; all override checkboxes begin unchecked.
 3. Use **Launch + Inject**, **Watch + Inject**, or **Attach**. Watch is usually best for launcher-driven games or startup-only setters; Attach cannot recover calls already made or function pointers already cached. Probe selection, Sleep counting, and FG GetState interception are locked for the acquisition; applicable override policies can change live and affect the next game SetOptions call.
 4. Observe the **requested → forwarded** values and API result codes. **State changes** is the compact default; **Raw debug** records each event in a bounded RAM ring. **Clear**, available while idle, resets the visible history, frees raw capture, and reprints startup diagnostics without disk logging.
 
@@ -95,24 +105,29 @@ Reflex FPS targets use `frameLimitUs = round(1,000,000 / FPS)` (165 FPS → 6061
 
 ## Observed behavior
 
-- **Reflex limits work independently of low-latency mode in several games:** God of War, Shadow Warrior 3, and Hogwarts Legacy honored explicit limits with Reflex **Off** and no application-observed Sleep calls. Satisfactory exposed a hidden **16,666 µs (~60 FPS)** menu cap that ReflexProbe could replace.
-- **FG Off overrides are game-dependent:** Pragmata, Hogwarts Legacy, and Resident Evil Requiem kept generation running in tested menus when Off was forwarded as On. Deadzone: Rogue, Satisfactory, Cyberpunk 2077, and The Witcher 3 Remastered did **not** sustain FG in comparable experiments, even when the runtime accepted the forwarded request.
-- **Some games keep FG on without intervention:** Blood of the Dawnwalker, The Talos Principle 2, Marvel's Spider-Man 2, and Clive Barker's Hellraiser: Revival submitted no menu-related Off requests in their reported tests. The Last of Us Part II Remastered showed mixed behavior: the Off override worked in paused gameplay menus but not during loading.
-- **Accepted requests do not guarantee results:** No Man's Sky accepted a nonzero Reflex limit without obeying it. Supported FG multipliers and fallback behavior also differ by game.
+- **Explicit Reflex limits and VSync-associated caps are different:** God of War, Shadow Warrior 3, and Hogwarts Legacy honored explicit limits even with Reflex Off and no observed Sleep calls. Separately, Reflex + G-SYNC + effective VSync repeatedly produced an automatic ~225 FPS ceiling at 240 Hz; disabling VSync permitted output above refresh. Satisfactory also submitted a hidden 16,666 µs (~60 FPS) menu limit.
+- **DXGI overrides expose the application/driver distinction:** Hogwarts Legacy, Dawnwalker, Satisfactory, and The Talos Principle 2 responded to forced `SyncInterval=1` with ~225 FPS, even where FG GetState reported `VSyncAvailable=No` on its queried viewport. Talos 2 and The Witcher 3 Remastered independently expose working *in-game* VSync with FG. Driver-forced VSync need not appear as `SyncInterval=1` at the application-facing interception.
+- **FG continuation depends on the title and the transition:** Pragmata, Hogwarts Legacy, Resident Evil Requiem, and No Man's Sky kept generation working when requested Off was forwarded as On in their tested scenarios. Other titles did not; an accepted setter alone proves neither generation nor scanout.
+- **Native FG-On policies are distinct from successful overrides:** Dawnwalker, Spider-Man 2, and Hellraiser: Revival provided sessions without menu-related Off requests. Earlier Talos 2 menu runs likewise kept FG active natively, but a later override-enabled session captured Off requests; its precise native stopping behavior in those intervals was **not measured**.
+- **Presentation probing is observational unless independently enabled overrides are selected:** compatible Reflex+DXGI tests succeeded on native NVAPI D3D11 (God of War and Shadow Warrior 3), SL1 Requiem D3D12, and modern Streamline D3D12. No general GPU queue or physical-tearing claim follows from successful Present interception.
 
-Details and qualifications: [FG continuation comparison](docs/TestFindings.md#fg-off-override-cross-title-outcomes), [per-game evidence](docs/TestFindings.md#per-game-results), and [experimental limitations](docs/TestFindings.md#remaining-experimental-questions).
+Details and limitations: [automatic capping / DXGI experiments](docs/TestFindings.md#live-dxgi-vsync-and-presentation-experiments-october-2223-2026), [FG Off cross-title outcomes](docs/TestFindings.md#fg-off-override-cross-title-outcomes), [per-game evidence](docs/TestFindings.md#per-game-results), and [remaining questions](docs/TestFindings.md#remaining-experimental-questions).
 
 ## Tested games and findings
 
-ReflexProbe has been tested across **D3D11, D3D12, and Vulkan** titles using modern Streamline, legacy Streamline 1.x, and native NVAPI Reflex. Game-specific behavior depends on the tested build and integration; a successful interception does not guarantee effective limiting or Frame Generation.
+ReflexProbe has been tested across **D3D11, D3D12, and Vulkan** titles using modern Streamline, legacy Streamline 1.x, and native NVAPI Reflex. Outcomes vary by game build and interception surface; successful calls alone do not guarantee frame limiting, Frame Generation, or latency improvements.
 
-The **complete, maintained game list**, including tested distributions, rendering APIs, engine details, Streamline versions, observations, regressions, and limitations, lives in **[Test Findings — Per-game results](docs/TestFindings.md#per-game-results)**. For an at-a-glance comparison of FG menu behavior, see [FG Off override: cross-title outcomes](docs/TestFindings.md#fg-off-override-cross-title-outcomes).
+The **maintained per-game list**, with distributions, rendering APIs, engines, measured observations, failures and qualifications, is in **[Test Findings — Per-game results](docs/TestFindings.md#per-game-results)**. For comparison of FG menu behavior, see [FG Off override — cross-title outcomes](docs/TestFindings.md#fg-off-override-cross-title-outcomes).
 
 ## Interception architecture
+
+Read [Architecture](docs/Architecture.md) before changing discovery or capture: an enabled DXGI probe must not silently expand an already-selected Reflex interception path.
 
 **Modern Streamline:** intercept normal `slGetFeatureFunction` imports and selected `GetProcAddress` IAT lookups in loaded non-system modules, then wrap selected Reflex functions (`slReflexSetOptions`, optional `slReflexSleep`) and/or DLSS FG functions (`slDLSSGSetOptions`, optionally `slDLSSGGetState`). Without FG overrides, SetOptions forwards unchanged. With overrides, it copies only recognized-version caller fields, changes the selected mode/flag bits, forwards the modified structure, and logs both original and forwarded values. With GetState interception disabled, the original function pointer is returned without a wrapper. The scan preserves Streamline's legacy gateway and skips already-hooked resolver slots.
 
 **Legacy Streamline 1.x:** intercept the `sl.reflex.dll` plugin gateway `slGetPluginFunction("slSetConstants")`, with an older `slSetFeatureConstants` fallback. Its Sleep path is not currently counted.
+
+**DXGI Presentation:** only when selected, intercept eligible game-local DXGI modules and swap chains. Presentation-only runs do not wrap Streamline resolvers. A combined run continues DXGI discovery without selecting a second native NVAPI Reflex path merely because the worker stays active. DXGI discovery is a **separate second pass**, absent when Presentation is unchecked. Its game-local provider filter remains independent of the restored pre-DXGI shared Reflex/FG resolver filter.
 
 **Native NVAPI D3D:** intercept the `nvapi_QueryInterface` / direct `NvAPI_D3D_SetSleepMode` resolution seam; optionally count `NvAPI_D3D_Sleep`. This does not patch code inside `nvapi64.dll`.
 

@@ -16,6 +16,9 @@ void ResetLiveStateTracking()
     for (size_t i = 0; i < kFgTrackedStreams; ++i)
         g_app.fgRuns[i] = {};
     g_app.fgTrackingOverflowWarned = false;
+    for (size_t i = 0; i < kPresentationTrackedStreams; ++i)
+        g_app.presentationRuns[i] = {};
+    g_app.presentationTrackingOverflowWarned = false;
 }
 
 bool EnsureRawDebugBuffer()
@@ -57,6 +60,9 @@ void ClearCaptureHistory()
     FreeRawDebugBuffer();
     ResetLiveStateTracking();
     ResetCurrentEffectiveState();
+    g_app.statusLimitWarningShown = false;
+    if (g_app.statusLabel)
+        SetWindowTextW(g_app.statusLabel, L"Status / API requests");
 
     if (g_app.status) {
         SetWindowTextW(g_app.status, L"");
@@ -142,9 +148,8 @@ const wchar_t* ReflexModeName(LONG mode)
     }
 }
 
-// Avoid needless Win32 STATIC/title changes even when different internal
-// values round to identical display text. Hot-path Reflex events are already
-// filtered by the effective mode/interval cache before reaching this helper.
+// Avoid needless Win32 STATIC text changes even when different internal
+// values round to identical display text. The window title is fixed.
 void SetWindowTextIfChanged(HWND window, const wchar_t* desired)
 {
     if (!window || !desired)
@@ -170,11 +175,16 @@ void ResetCurrentEffectiveState()
     g_app.fgLabelMode = 0;
     g_app.fgLabelGeneratedFrames = 0;
     g_app.fgLabelMenuDetection = false;
+    g_app.havePresentLabelState = false;
+    g_app.presentLabelSyncInterval = 0;
+    g_app.presentLabelAllowTearing = false;
 
     const bool reflexEnabled = g_app.reflexProbing &&
         Button_GetCheck(g_app.reflexProbing) == BST_CHECKED;
     const bool fgEnabled = g_app.fgProbing &&
         Button_GetCheck(g_app.fgProbing) == BST_CHECKED;
+    const bool presentEnabled = g_app.presentationProbing &&
+        Button_GetCheck(g_app.presentationProbing) == BST_CHECKED;
 
     SetWindowTextIfChanged(g_app.currentState,
         reflexEnabled ? L"Reflex: Unknown | Limit: Unknown"
@@ -182,9 +192,9 @@ void ResetCurrentEffectiveState()
     SetWindowTextIfChanged(g_app.fgState,
         fgEnabled ? L"DLSS FG: Waiting for SetOptions"
             : L"DLSS FG: Probing disabled");
-    SetWindowTextIfChanged(g_app.window,
-        reflexEnabled ? L"ReflexProbe - Reflex Unknown | FPS Limit Unknown"
-            : L"ReflexProbe - No Reflex probing");
+    SetWindowTextIfChanged(g_app.presentState,
+        presentEnabled ? L"Present: Waiting for Present/Present1"
+            : L"Present: Probing disabled");
 }
 
 void UpdateCurrentEffectiveState(const CapturedReflexEvent& event)
@@ -204,27 +214,19 @@ void UpdateCurrentEffectiveState(const CapturedReflexEvent& event)
 
     const wchar_t* mode = ReflexModeName(event.effectiveMode);
     wchar_t label[320]{};
-    wchar_t title[224]{};
 
     if (event.effectiveUs) {
         const double fps = 1000000.0 / static_cast<double>(event.effectiveUs);
         swprintf_s(label,
             L"Reflex: %s | Limit: %.3f FPS",
             mode, fps);
-        swprintf_s(title,
-            L"ReflexProbe - Reflex %s | FPS Limit %.3f",
-            mode, fps);
-    } else {
+     } else {
         swprintf_s(label,
             L"Reflex: %s | Limit: None (0 us)",
             mode);
-        swprintf_s(title,
-            L"ReflexProbe - Reflex %s | FPS Limit None (0 us)",
-            mode);
-    }
+     }
 
     SetWindowTextIfChanged(g_app.currentState, label);
-    SetWindowTextIfChanged(g_app.window, title);
 }
 
 void FormatValuePair(const wchar_t* field, const wchar_t* requested,
@@ -270,7 +272,7 @@ void FormatReflexDisplayLine(const CapturedReflexEvent& event, bool newState,
     wchar_t raw[384]{};
     FormatReflexEvent(event, raw, _countof(raw));
     if (newState)
-        swprintf_s(line, lineCount, L"NEW Reflex State: %s", raw);
+        swprintf_s(line, lineCount, L"+ Reflex State: %s", raw);
     else
         wcscpy_s(line, lineCount, raw);
 }
@@ -316,7 +318,7 @@ void FormatFgDisplayLine(const CapturedReflexEvent& event, bool newState,
     const ReflexProbeProtocol::FgEventData& fg = event.fg;
     const wchar_t* prefix = !newState ? L"" :
         (event.kind == ReflexProbeProtocol::FgEventSetOptions
-            ? L"NEW FG SetOptions: " : L"NEW FG GetState: ");
+            ? L"+ FG SetOptions: " : L"+ FG GetState: ");
     if (event.kind == ReflexProbeProtocol::FgEventSetOptions) {
         wchar_t requestedMode[64]{};
         wchar_t forwardedMode[64]{};
@@ -464,12 +466,12 @@ void AppendFgRepeatCount(const FgStateRun& run, LONGLONG eventQpc)
         // Exact complete-state repetitions, potentially across multiple
         // hidden state transitions; do not claim a single state persisted.
         swprintf_s(line,
-            L"FG SetOptions: %llu repeated calls since %s #%ld (viewport=%u).",
+            L"- FG SetOptions: %llu repeated calls since %s #%ld (viewport=%u).",
             static_cast<unsigned long long>(count),
             callName, run.displayed.sequence, run.viewport);
     } else {
         swprintf_s(line,
-            L"FG %s: %llu repeated calls since %s #%ld (viewport=%u).",
+            L"- FG %s: %llu repeated calls since %s #%ld (viewport=%u).",
             isSetOptions ? L"SetOptions" : L"GetState",
             static_cast<unsigned long long>(count),
             callName, run.displayed.sequence, run.viewport);
@@ -673,9 +675,40 @@ void UpdateCurrentFgState(const CapturedReflexEvent& event)
     }
 }
 
+// The status row shows the last successful Present's effective arguments,
+// not the game's request or the display's actual scanout mode. Cache exactly
+// what is visible: changing unrelated Present flags/results must not redraw.
+void UpdateCurrentPresentState(const CapturedReflexEvent& event)
+{
+    if (event.kind != ReflexProbeProtocol::PresentationEventPresent ||
+        !g_app.presentState || event.result < 0)
+        return;
+
+    const auto& present = event.presentation;
+    const bool allowTearing = (present.forwardedPresentFlags & 0x200u) != 0;
+    if (g_app.havePresentLabelState &&
+        g_app.presentLabelSyncInterval == present.forwardedSyncInterval &&
+        g_app.presentLabelAllowTearing == allowTearing)
+        return;
+
+    wchar_t label[160]{};
+    swprintf_s(label, L"Present: SyncInterval %u | Allow Tearing: %s",
+        present.forwardedSyncInterval, allowTearing ? L"On" : L"Off");
+    if (SetWindowTextW(g_app.presentState, label)) {
+        g_app.havePresentLabelState = true;
+        g_app.presentLabelSyncInterval = present.forwardedSyncInterval;
+        g_app.presentLabelAllowTearing = allowTearing;
+    }
+}
+
 bool AppendCapturedEventToBuffer(TextBuffer& buffer, const CapturedReflexEvent& event, bool newState)
 {
     wchar_t line[512]{};
+    if (event.kind == ReflexProbeProtocol::PresentationEventPresent ||
+        event.kind == ReflexProbeProtocol::PresentationEventSwapChain) {
+        FormatPresentationEvent(event, line, _countof(line));
+        return AppendTextBufferLineAtQpc(buffer, line, event.qpc);
+    }
     if (event.kind == ReflexProbeProtocol::FgEventSetOptions ||
         event.kind == ReflexProbeProtocol::FgEventGetState) {
         wchar_t fgLine[1024]{};
@@ -702,7 +735,7 @@ bool SameReflexState(const CapturedReflexEvent& a, const CapturedReflexEvent& b)
 void FormatRepeatCount(uint64_t repeatCount, const CapturedReflexEvent& state,
                        wchar_t* line, size_t lineCount)
 {
-    swprintf_s(line, lineCount, L"Reflex State: %llu repeated calls since %s #%ld.",
+    swprintf_s(line, lineCount, L"- Reflex State: %llu repeated calls since %s #%ld.",
         static_cast<unsigned long long>(repeatCount),
         BackendCallName(state.backend), state.sequence);
 }
@@ -733,9 +766,11 @@ void AppendSleepCount(uint64_t sleepCount, const CapturedReflexEvent& state,
     if (!g_app.shared)
         return;
 
-    const LONG backend = InterlockedCompareExchange(&g_app.shared->backend, 0, 0);
-    if (backend == ReflexProbeProtocol::ReflexBackendLegacyFeatureConstants ||
-        backend == ReflexProbeProtocol::ReflexBackendLegacyPluginConstants)
+    // An unrelated resolver may change the global discovery label while this
+    // Reflex run is active. Only the captured event's backend controls whether
+    // Sleep counts are supported for this run.
+    if (state.backend == ReflexProbeProtocol::ReflexBackendLegacyFeatureConstants ||
+        state.backend == ReflexProbeProtocol::ReflexBackendLegacyPluginConstants)
         return;
 
     if (!sleepCount &&
@@ -760,6 +795,9 @@ void FinalizeStateRun(LONGLONG eventQpc)
         if (g_app.fgRuns[i].used)
             AppendFgRepeatCount(g_app.fgRuns[i], eventQpc);
     }
+    for (const auto& run : g_app.presentationRuns)
+        if (run.used)
+            AppendPresentationRepeat(run, eventQpc);
     ResetLiveStateTracking();
 }
 
@@ -797,6 +835,9 @@ bool SetCaptureMode(CaptureMode mode)
             AppendSleepCount(g_app.stateSleepCount, g_app.stateEvent, qpc.QuadPart);
         }
         FinishFgDisplayIntervals(qpc.QuadPart, true);
+        for (const auto& run : g_app.presentationRuns)
+            if (run.used)
+                AppendPresentationRepeat(run, qpc.QuadPart);
     }
 
     // Reset Reflex presentation, not the last observed complete FG state.
@@ -804,6 +845,9 @@ bool SetCaptureMode(CaptureMode mode)
     g_app.haveStateEvent = false;
     g_app.stateRepeatCount = 0;
     g_app.stateSleepCount = 0;
+    for (auto& run : g_app.presentationRuns)
+        run = {};
+    g_app.presentationTrackingOverflowWarned = false;
     if (mode == CaptureModeRawDebug)
         ResetRawDebugCapture();
 
@@ -836,6 +880,14 @@ bool SetCaptureMode(CaptureMode mode)
 }
 void HandleCapturedReflexEvent(const CapturedReflexEvent& event)
 {
+    if (event.kind == ReflexProbeProtocol::PresentationEventPresent ||
+        event.kind == ReflexProbeProtocol::PresentationEventSwapChain) {
+        if (CurrentCaptureMode() == CaptureModeRawDebug)
+            CaptureRawDebugEvent(event);
+        else
+            HandlePresentationEvent(event);
+        return;
+    }
     if (event.kind == ReflexProbeProtocol::FgEventSetOptions ||
         event.kind == ReflexProbeProtocol::FgEventGetState) {
         HandleCapturedFgEvent(event);
@@ -912,7 +964,9 @@ void PollSharedState()
         case ReflexProbeProtocol::HookStateWaitingForDll:
             wcscpy_s(line, g_app.shared->probeReflexEnabled
                 ? L"Waiting for a Reflex interception path..."
-                : L"Waiting for a Streamline 2.x DLSS FG interception path.");
+                : g_app.shared->probeDlssFgEnabled
+                    ? L"Waiting for a Streamline 2.x DLSS FG interception path."
+                    : L"Waiting for a DXGI swap-chain creation / Present path...");
             break;
         case ReflexProbeProtocol::HookStateInterceptArmed:
             swprintf_s(line, L"Interception armed: %s. Waiting for sl.reflex.dll to resolve its plugin gateway.",
@@ -960,6 +1014,27 @@ void PollSharedState()
         g_app.lastFgHookBits = fgHookBits;
     }
 
+    const LONG presentationBits = InterlockedCompareExchange(
+        &g_app.shared->presentationHookBits, 0, 0);
+    const LONG newPresentationHooks = presentationBits & ~g_app.lastPresentationHookBits;
+    if (newPresentationHooks) {
+        if (newPresentationHooks & 1)
+            AppendStatusLine(L"DXGI factory interception active; waiting for a swap chain.");
+        if (newPresentationHooks & 2)
+            AppendStatusLine(L"DXGI Present interception active (policy overrides optional).");
+        if (newPresentationHooks & 4)
+            AppendStatusLine(L"DXGI Present1 interception active (policy overrides optional).");
+        if (newPresentationHooks & 8)
+            AppendStatusLine(L"DXGI ResizeBuffers interception active (observation only).");
+        if (newPresentationHooks & 16)
+            AppendStatusLine(L"D3D11 direct device-and-swap-chain creation intercepted.");
+        if (newPresentationHooks & 32)
+            AppendStatusLine(L"WARNING: Recursive DXGI factory forwarding detected; aborted a nested call. Check Steam overlay chaining.");
+        if (newPresentationHooks & 64)
+            AppendStatusLine(L"WARNING: DXGI Present predecessor lookup failed; no safe forwarding pointer for this vtable.");
+        g_app.lastPresentationHookBits = presentationBits;
+    }
+
     const LONG currentSerial = InterlockedCompareExchange(&g_app.shared->eventSerial, 0, 0);
     LONG first = g_app.lastEventSerial + 1;
     const LONG available = currentSerial - first + 1;
@@ -980,6 +1055,9 @@ void PollSharedState()
     }
 
     LONG processedSerial = g_app.lastEventSerial;
+    LONG exitedSkipped = 0;
+    LONG exitedSkippedStart = 0;
+    bool gapOpen = false;
     for (LONG serial = first; serial <= currentSerial; ++serial) {
         if (serial <= 0)
             continue;
@@ -988,8 +1066,23 @@ void PollSharedState()
         const ReflexProbeProtocol::ReflexEvent& event = g_app.shared->events[index];
         const LONG storedSerial = InterlockedCompareExchange(
             const_cast<volatile LONG*>(&event.sequence), 0, 0);
-        if (storedSerial != serial)
-            break;
+        if (storedSerial != serial) {
+            if (!targetExited)
+                break; // A writer may still be finishing this event.
+
+            // No writers can finish after process termination. Skip isolated
+            // gaps rather than losing every valid event behind one dead writer.
+            if (!gapOpen) {
+                LARGE_INTEGER qpc{};
+                QueryPerformanceCounter(&qpc);
+                RecordRunBoundary(qpc.QuadPart);
+                exitedSkippedStart = serial;
+                gapOpen = true;
+            }
+            ++exitedSkipped;
+            processedSerial = serial;
+            continue;
+        }
 
         CapturedReflexEvent captured{};
         captured.qpc = event.qpc;
@@ -998,17 +1091,51 @@ void PollSharedState()
         captured.requestedMode = event.requestedMode;
         captured.effectiveMode = event.effectiveMode;
         captured.result = event.result;
-        captured.backend = backend;
+        captured.backend = event.backend;
         captured.requestedUs = event.requestedUs;
         captured.effectiveUs = event.effectiveUs;
         if (captured.kind == ReflexProbeProtocol::FgEventSetOptions ||
-            captured.kind == ReflexProbeProtocol::FgEventGetState) {
+            captured.kind == ReflexProbeProtocol::FgEventGetState)
             captured.fg = event.fg;
+        if (captured.kind == ReflexProbeProtocol::PresentationEventPresent ||
+            captured.kind == ReflexProbeProtocol::PresentationEventSwapChain)
+            captured.presentation = event.presentation;
+        // A ring writer can lap this slot while we copy the payload.
+        // Do not consume a mixed event even if the first sequence matched.
+        const LONG copiedSerial = InterlockedCompareExchange(
+            const_cast<volatile LONG*>(&event.sequence), 0, 0);
+        if (copiedSerial != serial) {
+            LARGE_INTEGER qpc{};
+            QueryPerformanceCounter(&qpc);
+            RecordRunBoundary(qpc.QuadPart);
+            if (!targetExited)
+                break;
+            if (!gapOpen) {
+                exitedSkippedStart = serial;
+                gapOpen = true;
+            }
+            ++exitedSkipped;
+            processedSerial = serial;
+            continue;
+        }
+        if (gapOpen) {
+            wchar_t message[224]{};
+            swprintf_s(message,
+                L"WARNING: final probe drain skipped %ld unavailable event(s) starting at serial #%ld.",
+                exitedSkipped, exitedSkippedStart);
+            AppendStatusLineAtQpc(message, captured.qpc);
+            gapOpen = false;
+            exitedSkipped = 0;
+        }
+        if (captured.kind == ReflexProbeProtocol::FgEventSetOptions ||
+            captured.kind == ReflexProbeProtocol::FgEventGetState) {
             if (captured.kind == ReflexProbeProtocol::FgEventSetOptions)
                 UpdateCurrentFgState(captured);
         }
         if (captured.kind == ReflexProbeProtocol::ReflexEventSettings)
             UpdateCurrentEffectiveState(captured);
+        if (captured.kind == ReflexProbeProtocol::PresentationEventPresent)
+            UpdateCurrentPresentState(captured);
         if (captured.kind == ReflexProbeProtocol::ReflexEventSleep &&
             captured.sequence == 1) {
             wchar_t line[192]{};
@@ -1022,6 +1149,13 @@ void PollSharedState()
         processedSerial = serial;
     }
 
+    if (gapOpen) {
+        wchar_t message[224]{};
+        swprintf_s(message,
+            L"WARNING: final probe drain skipped %ld unavailable event(s) starting at serial #%ld.",
+            exitedSkipped, exitedSkippedStart);
+        AppendStatusLine(message);
+    }
     if (processedSerial > g_app.lastEventSerial)
         g_app.lastEventSerial = processedSerial;
 

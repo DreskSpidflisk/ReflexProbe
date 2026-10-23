@@ -19,8 +19,8 @@ constexpr UINT_PTR kPollTimer = 1;
 constexpr UINT_PTR kWatchTimer = 2;
 constexpr UINT kWatchPollIntervalMs = 10;
 constexpr int kMargin = 12;
-constexpr int kStatusTop = 376;
-constexpr int kMinimumWindowHeight = 615;
+constexpr int kStatusTop = 448;
+constexpr int kMinimumWindowHeight = 687;
 constexpr WPARAM kStatusTextLimit = 16u * 1024u * 1024u;
 constexpr size_t kInitialTextBufferCapacity = 8 * 1024;
 constexpr size_t kRawDebugCapacity = 131072;
@@ -56,7 +56,13 @@ enum ControlId : int {
     IDC_FG_MULTIPLIER_OVERRIDE,
     IDC_FG_MULTIPLIER_CHOICE,
     IDC_FG_OVERRIDE_OFF_AFTER_ON,
-    IDC_FG_OFF_MODE_CHOICE
+    IDC_FG_OFF_MODE_CHOICE,
+    IDC_PRESENTATION_PROBING,
+    IDC_PRESENTATION_SYNC_OVERRIDE,
+    IDC_PRESENTATION_SYNC_CHOICE,
+    IDC_PRESENTATION_TEARING_OVERRIDE,
+    IDC_PRESENTATION_TEARING_OFF,
+    IDC_PRESENTATION_TEARING_ON
 };
 
 struct FgPolicy {
@@ -70,6 +76,13 @@ struct FgPolicy {
     bool overrideRetention = false;
     bool retainResourcesWhenOff = true; // when checked, default radio is On
     bool wrapGetState = false;
+};
+
+struct PresentationPolicy {
+    bool overrideSyncInterval = false;
+    uint32_t syncInterval = 0;
+    bool overrideTearing = false;
+    bool allowTearing = false;
 };
 
 enum CaptureMode : uint32_t {
@@ -88,6 +101,7 @@ struct CapturedReflexEvent {
     uint32_t requestedUs;
     uint32_t effectiveUs;
     ReflexProbeProtocol::FgEventData fg{};
+    ReflexProbeProtocol::PresentationEventData presentation{};
 };
 
 struct FgStateRun {
@@ -101,6 +115,14 @@ struct FgStateRun {
 };
 
 constexpr size_t kFgTrackedStreams = 32;
+constexpr size_t kPresentationTrackedStreams = 32;
+struct PresentationStateRun {
+    bool used = false;
+    uint64_t swapChain = 0;
+    uint32_t method = 0;
+    CapturedReflexEvent state{};
+    uint64_t repeats = 0;
+};
 
 struct TextBuffer {
     wchar_t* data = nullptr;
@@ -121,6 +143,13 @@ struct AppState {
     HWND reflexGroup = nullptr;
     HWND reflexProbing = nullptr;
     HWND fgGroup = nullptr;
+    HWND presentationGroup = nullptr;
+    HWND presentationProbing = nullptr;
+    HWND presentationSyncOverride = nullptr;
+    HWND presentationSyncChoice = nullptr;
+    HWND presentationTearingOverride = nullptr;
+    HWND presentationTearingOff = nullptr;
+    HWND presentationTearingOn = nullptr;
     HWND fgProbing = nullptr;
     HWND fgMultiplierOverride = nullptr;
     HWND fgMultiplierChoice = nullptr;
@@ -145,6 +174,7 @@ struct AppState {
     HWND attach = nullptr;
     HWND currentState = nullptr;
     HWND fgState = nullptr;
+    HWND presentState = nullptr;
     HWND statusLabel = nullptr;
     HWND captureModeLabel = nullptr;
     HWND captureState = nullptr;
@@ -161,9 +191,11 @@ struct AppState {
 
     LONG lastHookState = -1;
     LONG lastFgHookBits = 0;
+    LONG lastPresentationHookBits = 0;
     LONG lastEventSerial = 0;
     bool loggedInjectedBuild = false;
     bool rawUiBatchWarningShown = false;
+    bool statusLimitWarningShown = false;
 
     bool haveEffectiveState = false;
     LONG currentEffectiveMode = 0;
@@ -176,6 +208,12 @@ struct AppState {
     uint32_t fgLabelGeneratedFrames = 0;
     bool fgLabelMenuDetection = false;
 
+    // Only the two effective fields shown in the Present status row. This is
+    // independent of State changes / Raw capture and avoids per-Present draws.
+    bool havePresentLabelState = false;
+    uint32_t presentLabelSyncInterval = 0;
+    bool presentLabelAllowTearing = false;
+
     bool watchArmed = false;
     wchar_t watchTargetPath[ReflexProbeProtocol::kPathChars]{};
     bool watchOverrideEnabled = false;
@@ -184,6 +222,7 @@ struct AppState {
     bool watchCountReflexSleepCalls = false;
     bool watchProbeReflex = true;
     bool watchProbeDlssFg = false;
+    bool watchProbePresentation = false;
     FgPolicy watchFgPolicy{};
     LONGLONG watchStartQpc = 0;
 
@@ -198,6 +237,7 @@ struct AppState {
 
     // RAM-only startup banner, stored without timestamps for Clear replay.
     TextBuffer startupDiagnostics{};
+    TextBuffer displayScratch{}; // reused UI-thread-only line assembly
     bool capturingStartupDiagnostics = false;
 
     bool haveStateEvent = false;
@@ -205,11 +245,15 @@ struct AppState {
     uint64_t stateRepeatCount = 0;
     uint64_t stateSleepCount = 0;
     FgStateRun fgRuns[kFgTrackedStreams]{};
+    PresentationStateRun presentationRuns[kPresentationTrackedStreams]{};
+    bool presentationTrackingOverflowWarned = false;
     bool fgTrackingOverflowWarned = false;
 };
 
 extern AppState g_app;
 
+PresentationPolicy ReadPresentationPolicyFromUi();
+void LogInitialPresentationPolicy(bool probingEnabled);
 void LayoutControls(int clientWidth, int clientHeight);
 void CleanupTarget();
 void UpdateAcquisitionControls();
@@ -235,18 +279,22 @@ bool InjectDll(HANDLE process, DWORD processId, const wchar_t* dllPath,
 bool CreateSharedState(DWORD processId, const wchar_t* targetPath,
                        bool overrideEnabled, uint32_t overrideUs, bool forceBoostWhenOn,
                        bool countReflexSleepCalls, bool probeReflex, bool probeDlssFg,
+                       bool probePresentation,
                        const FgPolicy& fgPolicy, wchar_t* error, size_t errorCount);
 bool ArmProcessWatch(const wchar_t* targetPath, bool overrideEnabled, uint32_t overrideUs,
                      bool forceBoostWhenOn, bool countReflexSleepCalls,
-                     bool probeReflex, bool probeDlssFg, const FgPolicy& fgPolicy,
+                     bool probeReflex, bool probeDlssFg, bool probePresentation, const FgPolicy& fgPolicy,
                      wchar_t* error, size_t errorCount);
 void CancelProcessWatch(bool logCancellation);
 void PollProcessWatch();
 bool AttachRunningProcess(const wchar_t* targetPath, bool overrideEnabled, uint32_t overrideUs,
                           bool forceBoostWhenOn, bool countReflexSleepCalls,
-                          bool probeReflex, bool probeDlssFg, const FgPolicy& fgPolicy,
+                          bool probeReflex, bool probeDlssFg, bool probePresentation, const FgPolicy& fgPolicy,
                      wchar_t* error, size_t errorCount);
 
+void FormatPresentationEvent(const CapturedReflexEvent& event, wchar_t* line, size_t count);
+void AppendPresentationRepeat(const PresentationStateRun& run, LONGLONG qpc);
+void HandlePresentationEvent(const CapturedReflexEvent& event);
 void ResetLiveStateTracking();
 bool EnsureRawDebugBuffer();
 void ResetRawDebugCapture();

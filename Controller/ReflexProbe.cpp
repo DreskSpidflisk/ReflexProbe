@@ -36,10 +36,15 @@ constexpr int kReflexGroupTop = 127;
 constexpr int kReflexGroupHeight = 56;
 constexpr int kFgGroupTop = 198;
 constexpr int kFgGroupHeight = 92;
-constexpr int kAcquisitionTop = 303;
-constexpr int kReflexStateTop = kAcquisitionTop - 1;
-constexpr int kFgStateTop = kAcquisitionTop + 15;
-constexpr int kStatusHeadingTop = 346;
+constexpr int kPresentationGroupTop = 303;
+constexpr int kPresentationGroupHeight = 56;
+constexpr int kAcquisitionTop = 375;
+// Three compact, non-overlapping status lines sit to the left of the
+// acquisition buttons; the third remains above the Status heading.
+constexpr int kReflexStateTop = kAcquisitionTop - 12;
+constexpr int kFgStateTop = kReflexStateTop + 16;
+constexpr int kPresentStateTop = kFgStateTop + 16;
+constexpr int kStatusHeadingTop = 418;
 constexpr int kAcquisitionStatusGap = 8;
 
 bool IsSelectedGameExecutableValid()
@@ -119,9 +124,75 @@ bool ReflexProbingSelected()
     return g_app.reflexProbing && Button_GetCheck(g_app.reflexProbing) == BST_CHECKED;
 }
 
+bool PresentationProbingSelected()
+{
+    return g_app.presentationProbing && Button_GetCheck(g_app.presentationProbing) == BST_CHECKED;
+}
+
 bool FgProbingSelected()
 {
     return g_app.fgProbing && Button_GetCheck(g_app.fgProbing) == BST_CHECKED;
+}
+
+PresentationPolicy ReadPresentationPolicyFromUi()
+{
+    PresentationPolicy policy{};
+    if (PresentationProbingSelected()) {
+        policy.overrideSyncInterval = Button_GetCheck(g_app.presentationSyncOverride) == BST_CHECKED;
+        const LRESULT index = SendMessageW(g_app.presentationSyncChoice, CB_GETCURSEL, 0, 0);
+        if (index >= 0 && index <= 4)
+            policy.syncInterval = static_cast<uint32_t>(index);
+        policy.overrideTearing = Button_GetCheck(g_app.presentationTearingOverride) == BST_CHECKED;
+        policy.allowTearing = Button_GetCheck(g_app.presentationTearingOn) == BST_CHECKED;
+    }
+    return policy;
+}
+
+void LogInitialPresentationPolicy(bool probingEnabled)
+{
+    if (!probingEnabled)
+        return;
+    const PresentationPolicy policy = ReadPresentationPolicyFromUi();
+    wchar_t line[160]{};
+    if (policy.overrideSyncInterval) {
+        swprintf_s(line, L"Initial DXGI SyncInterval override: %u (live).", policy.syncInterval);
+        AppendStatusLine(line);
+    } else {
+        AppendStatusLine(L"Initial DXGI SyncInterval override: disabled.");
+    }
+    AppendStatusLine(!policy.overrideTearing
+        ? L"Initial DXGI ALLOW_TEARING override: disabled."
+        : policy.allowTearing
+            ? L"Initial DXGI ALLOW_TEARING override: On (eligible swap chains only)."
+            : L"Initial DXGI ALLOW_TEARING override: Off.");
+}
+
+void ApplyPresentationPolicyToShared()
+{
+    if (!g_app.shared || !PresentationProbingSelected())
+        return;
+    const PresentationPolicy policy = ReadPresentationPolicyFromUi();
+    InterlockedExchange(&g_app.shared->presentationSyncInterval,
+        static_cast<LONG>(policy.syncInterval));
+    InterlockedExchange(&g_app.shared->presentationSyncOverrideEnabled,
+        policy.overrideSyncInterval ? 1 : 0);
+    InterlockedExchange(&g_app.shared->presentationTearingOverrideOn,
+        policy.allowTearing ? 1 : 0);
+    InterlockedExchange(&g_app.shared->presentationTearingOverrideEnabled,
+        policy.overrideTearing ? 1 : 0);
+    InterlockedIncrement(&g_app.shared->configSequence);
+    wchar_t line[180]{};
+    if (policy.overrideSyncInterval) {
+        swprintf_s(line, L"DXGI policy: SyncInterval forced to %u on the next Present/Present1.", policy.syncInterval);
+        AppendStatusLine(line);
+    } else {
+        AppendStatusLine(L"DXGI policy: SyncInterval override disabled; game requests pass through.");
+    }
+    AppendStatusLine(!policy.overrideTearing
+        ? L"DXGI policy: ALLOW_TEARING override disabled."
+        : policy.allowTearing
+            ? L"DXGI policy: ALLOW_TEARING forced On where valid (nonzero SyncInterval clears it)."
+            : L"DXGI policy: ALLOW_TEARING forced Off.");
 }
 
 FgPolicy ReadFgPolicyFromUi()
@@ -244,7 +315,7 @@ void UpdateAcquisitionControls()
     const bool validTarget = IsSelectedGameExecutableValid();
     const bool reflexEnabled = ReflexProbingSelected();
     const bool fgEnabled = FgProbingSelected();
-    const bool anyProbe = reflexEnabled || fgEnabled;
+    const bool anyProbe = reflexEnabled || fgEnabled || PresentationProbingSelected();
     const bool probeSelectionLocked = targetActive || watching;
 
     if (g_app.launch)
@@ -267,6 +338,22 @@ void UpdateAcquisitionControls()
         EnableWindow(g_app.reflexProbing, !probeSelectionLocked);
     if (g_app.fgProbing)
         EnableWindow(g_app.fgProbing, !probeSelectionLocked);
+    if (g_app.presentationProbing)
+        EnableWindow(g_app.presentationProbing, !probeSelectionLocked);
+    const bool presentationEnabled = PresentationProbingSelected();
+    if (g_app.presentationSyncOverride)
+        EnableWindow(g_app.presentationSyncOverride, presentationEnabled && !watching);
+    if (g_app.presentationSyncChoice)
+        EnableWindow(g_app.presentationSyncChoice, presentationEnabled && !watching &&
+            Button_GetCheck(g_app.presentationSyncOverride) == BST_CHECKED);
+    if (g_app.presentationTearingOverride)
+        EnableWindow(g_app.presentationTearingOverride, presentationEnabled && !watching);
+    const bool tearingChecked = g_app.presentationTearingOverride &&
+        Button_GetCheck(g_app.presentationTearingOverride) == BST_CHECKED;
+    if (g_app.presentationTearingOff)
+        EnableWindow(g_app.presentationTearingOff, presentationEnabled && !watching && tearingChecked);
+    if (g_app.presentationTearingOn)
+        EnableWindow(g_app.presentationTearingOn, presentationEnabled && !watching && tearingChecked);
     if (g_app.fgForceAutoOn)
         EnableWindow(g_app.fgForceAutoOn, fgEnabled && !watching);
     if (g_app.fgMultiplierOverride)
@@ -337,9 +424,15 @@ void CleanupTarget()
         g_app.process = nullptr;
     }
 
+    // The 50 ms controller poll is useful only while a target is attached.
+    // Watch acquisition retains its independent 10 ms watch timer.
+    if (g_app.window)
+        KillTimer(g_app.window, kPollTimer);
+
     g_app.processId = 0;
     g_app.lastHookState = -1;
     g_app.lastFgHookBits = 0;
+    g_app.lastPresentationHookBits = 0;
     g_app.lastEventSerial = 0;
     g_app.loggedInjectedBuild = false;
     g_app.rawUiBatchWarningShown = false;
@@ -376,8 +469,9 @@ bool LaunchAndInject()
         Button_GetCheck(g_app.countReflexSleep) == BST_CHECKED;
     const bool probeReflex = ReflexProbingSelected();
     const bool probeDlssFg = FgProbingSelected();
+    const bool probePresentation = PresentationProbingSelected();
     const FgPolicy fgPolicy = ReadFgPolicyFromUi();
-    if (!probeReflex && !probeDlssFg)
+    if (!probeReflex && !probeDlssFg && !probePresentation)
         return false;
     wchar_t error[512]{};
     if (probeReflex && !ParseOverrideFromUi(overrideEnabled, overrideUs, error, _countof(error))) {
@@ -438,7 +532,7 @@ bool LaunchAndInject()
 
     if (!CreateSharedState(process.dwProcessId, gamePath,
             overrideEnabled, overrideUs, forceBoostWhenOn, countReflexSleepCalls,
-            probeReflex, probeDlssFg, fgPolicy, error, _countof(error))) {
+            probeReflex, probeDlssFg, probePresentation, fgPolicy, error, _countof(error))) {
         TerminateProcess(process.hProcess, 1);
         CloseHandle(process.hThread);
         MessageBoxW(g_app.window, error, L"ReflexProbe", MB_ICONERROR);
@@ -453,8 +547,23 @@ bool LaunchAndInject()
     uintptr_t remoteOwner = 0;
     bool resumed = false;
 
-    if (!loadLibrary || !GetLocalFunctionOwner(reinterpret_cast<void*>(loadLibrary), owner, ownerName, _countof(ownerName)) ||
-        !WaitForRemoteFunctionOwner(process.dwProcessId, ownerName, remoteOwner, 50)) {
+    const ULONGLONG ownerWaitStart = GetTickCount64();
+    const bool ownerReady =
+        loadLibrary &&
+        GetLocalFunctionOwner(reinterpret_cast<void*>(loadLibrary),
+            owner, ownerName, _countof(ownerName)) &&
+        WaitForRemoteFunctionOwner(process.dwProcessId, ownerName, remoteOwner, 50);
+    {
+        wchar_t launchDiagnostic[224]{};
+        swprintf_s(launchDiagnostic,
+            L"Launch: remote LoadLibraryW owner %s after %llu ms; %s.",
+            ownerReady ? L"found" : L"not found",
+            static_cast<unsigned long long>(GetTickCount64() - ownerWaitStart),
+            ownerReady ? L"target remains suspended during injection"
+                       : L"resuming primary thread before injection");
+        AppendStatusLine(launchDiagnostic);
+    }
+    if (!ownerReady) {
         ResumeThread(process.hThread);
         resumed = true;
     }
@@ -473,9 +582,11 @@ bool LaunchAndInject()
 
     g_app.lastHookState = -1;
     g_app.lastFgHookBits = 0;
+    g_app.lastPresentationHookBits = 0;
     g_app.lastEventSerial = 0;
     g_app.loggedInjectedBuild = false;
     g_app.rawUiBatchWarningShown = false;
+    SetTimer(g_app.window, kPollTimer, kPollIntervalMs, nullptr);
     UpdateAcquisitionControls();
 
     wchar_t line[512]{};
@@ -489,6 +600,10 @@ bool LaunchAndInject()
             ? L"DLSS FG probing: SetOptions and GetState intercepted."
             : L"DLSS FG probing: SetOptions intercepted; GetState pointer untouched.")
         : L"DLSS FG probing: disabled; FG functions are passed through untouched.");
+    AppendStatusLine(probePresentation
+        ? L"Presentation probing: DXGI Present/Present1 interception enabled; overrides independently optional."
+        : L"Presentation probing: disabled.");
+    LogInitialPresentationPolicy(probePresentation);
     if (probeDlssFg) {
         AppendStatusLine(fgPolicy.forceOnWhenAuto
             ? L"Initial FG Auto-to-On override: enabled."
@@ -550,6 +665,7 @@ bool ReadTargetAndPolicyForExternalAcquisition(
     wchar_t* gamePath, size_t gamePathCount,
     bool& overrideEnabled, uint32_t& overrideUs, bool& forceBoostWhenOn,
     bool& countReflexSleepCalls, bool& probeReflex, bool& probeDlssFg,
+    bool& probePresentation,
     FgPolicy& fgPolicy, wchar_t* error, size_t errorCount)
 {
     if (!gamePath || !gamePathCount)
@@ -569,8 +685,9 @@ bool ReadTargetAndPolicyForExternalAcquisition(
 
     probeReflex = ReflexProbingSelected();
     probeDlssFg = FgProbingSelected();
+    probePresentation = PresentationProbingSelected();
     fgPolicy = ReadFgPolicyFromUi();
-    if (!probeReflex && !probeDlssFg) {
+    if (!probeReflex && !probeDlssFg && !probePresentation) {
         swprintf_s(error, errorCount, L"Enable at least one probe before acquisition.");
         return false;
     }
@@ -601,18 +718,19 @@ bool ToggleWatchAndInject()
     bool countReflexSleepCalls = false;
     bool probeReflex = true;
     bool probeDlssFg = false;
+    bool probePresentation = false;
     FgPolicy fgPolicy{};
     wchar_t error[512]{};
 
     if (!ReadTargetAndPolicyForExternalAcquisition(
             gamePath, _countof(gamePath), overrideEnabled, overrideUs, forceBoostWhenOn,
-            countReflexSleepCalls, probeReflex, probeDlssFg, fgPolicy, error, _countof(error))) {
+            countReflexSleepCalls, probeReflex, probeDlssFg, probePresentation, fgPolicy, error, _countof(error))) {
         MessageBoxW(g_app.window, error, L"ReflexProbe", MB_ICONWARNING);
         return false;
     }
 
     if (!ArmProcessWatch(gamePath, overrideEnabled, overrideUs, forceBoostWhenOn,
-            countReflexSleepCalls, probeReflex, probeDlssFg, fgPolicy, error, _countof(error))) {
+            countReflexSleepCalls, probeReflex, probeDlssFg, probePresentation, fgPolicy, error, _countof(error))) {
         MessageBoxW(g_app.window, error, L"ReflexProbe Watch + Inject", MB_ICONERROR);
         return false;
     }
@@ -629,18 +747,19 @@ bool AttachToRunningTarget()
     bool countReflexSleepCalls = false;
     bool probeReflex = true;
     bool probeDlssFg = false;
+    bool probePresentation = false;
     FgPolicy fgPolicy{};
     wchar_t error[512]{};
 
     if (!ReadTargetAndPolicyForExternalAcquisition(
             gamePath, _countof(gamePath), overrideEnabled, overrideUs, forceBoostWhenOn,
-            countReflexSleepCalls, probeReflex, probeDlssFg, fgPolicy, error, _countof(error))) {
+            countReflexSleepCalls, probeReflex, probeDlssFg, probePresentation, fgPolicy, error, _countof(error))) {
         MessageBoxW(g_app.window, error, L"ReflexProbe", MB_ICONWARNING);
         return false;
     }
 
     if (!AttachRunningProcess(gamePath, overrideEnabled, overrideUs, forceBoostWhenOn,
-            countReflexSleepCalls, probeReflex, probeDlssFg, fgPolicy, error, _countof(error))) {
+            countReflexSleepCalls, probeReflex, probeDlssFg, probePresentation, fgPolicy, error, _countof(error))) {
         MessageBoxW(g_app.window, error, L"ReflexProbe Attach", MB_ICONERROR);
         return false;
     }
@@ -876,6 +995,39 @@ void LayoutControls(int clientWidth, int clientHeight)
             MeasureInlineCheckboxWidth(g_app.fgGetState),
             fgControlHeight, TRUE);
 
+    if (g_app.presentationGroup)
+        MoveWindow(g_app.presentationGroup, kMargin, kPresentationGroupTop,
+            usableWidth, kPresentationGroupHeight, TRUE);
+    if (g_app.presentationProbing)
+        MoveWindow(g_app.presentationProbing, kMargin + 14, kPresentationGroupTop - 9,
+            MeasureGroupHeadingWidth(g_app.presentationProbing), 22, TRUE);
+
+    // Match the FG multiplier checkbox/dropdown and the gap before FG Off.
+    int presentationX = kMargin + 18;
+    const int presentationY = kPresentationGroupTop + 20;
+    if (g_app.presentationSyncOverride) {
+        const int width = MeasureInlineCheckboxWidth(g_app.presentationSyncOverride);
+        MoveWindow(g_app.presentationSyncOverride, presentationX, presentationY, width, 22, TRUE);
+        presentationX += width + fgGroupGap;
+    }
+    if (g_app.presentationSyncChoice) {
+        MoveWindow(g_app.presentationSyncChoice, presentationX, presentationY - 2, 56, 124, TRUE);
+        presentationX += 56 + fgLowerGap;
+    }
+    if (g_app.presentationTearingOverride) {
+        const int width = MeasureInlineCheckboxWidth(g_app.presentationTearingOverride);
+        MoveWindow(g_app.presentationTearingOverride, presentationX, presentationY, width, 22, TRUE);
+        presentationX += width + fgRadioGap;
+    }
+    if (g_app.presentationTearingOff) {
+        const int width = MeasureCompactRadioWidth(g_app.presentationTearingOff);
+        MoveWindow(g_app.presentationTearingOff, presentationX, presentationY, width, 22, TRUE);
+        presentationX += width;
+    }
+    if (g_app.presentationTearingOn)
+        MoveWindow(g_app.presentationTearingOn, presentationX, presentationY,
+            MeasureCompactRadioWidth(g_app.presentationTearingOn), 22, TRUE);
+
     const int attachX = clientWidth - kMargin - kAttachWidth;
     const int watchX = attachX - kAcquisitionGap - kWatchWidth;
     const int launchX = watchX - kAcquisitionGap - kLaunchWidth;
@@ -886,7 +1038,7 @@ void LayoutControls(int clientWidth, int clientHeight)
     if (g_app.attach)
         MoveWindow(g_app.attach, attachX, kAcquisitionTop, kAttachWidth, 30, TRUE);
 
-    // Both status lines share the acquisition-button height. The available label
+    // Three status lines share the acquisition-button area. The available label
     // width is bounded by Launch's left edge even at minimum window width.
     const int stateWidth = launchX - kMargin - kAcquisitionStatusGap;
     if (g_app.currentState)
@@ -894,6 +1046,9 @@ void LayoutControls(int clientWidth, int clientHeight)
             stateWidth > 50 ? stateWidth : 50, 16, TRUE);
     if (g_app.fgState)
         MoveWindow(g_app.fgState, kMargin, kFgStateTop,
+            stateWidth > 50 ? stateWidth : 50, 16, TRUE);
+    if (g_app.presentState)
+        MoveWindow(g_app.presentState, kMargin, kPresentStateTop,
             stateWidth > 50 ? stateWidth : 50, 16, TRUE);
 
     if (g_app.statusLabel)
@@ -986,6 +1141,51 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_FG_PROBING),
             g_app.instance, nullptr);
         SetChildFont(g_app.fgProbing, font);
+
+        g_app.presentationGroup = CreateWindowExW(0, L"BUTTON", L"",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
+        SetChildFont(g_app.presentationGroup, font);
+        g_app.presentationProbing = CreateWindowExW(0, L"BUTTON",
+            L"Enable Presentation probing (DXGI)",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_PRESENTATION_PROBING),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.presentationProbing, font);
+
+        g_app.presentationSyncOverride = CreateWindowExW(0, L"BUTTON", L"Override SyncInterval",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_PRESENTATION_SYNC_OVERRIDE),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.presentationSyncOverride, font);
+        g_app.presentationSyncChoice = CreateWindowExW(0, L"COMBOBOX", L"",
+            WS_CHILD | WS_VISIBLE | WS_DISABLED | WS_VSCROLL | CBS_DROPDOWNLIST,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_PRESENTATION_SYNC_CHOICE),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.presentationSyncChoice, font);
+        constexpr const wchar_t* kSyncIntervals[] = { L"0", L"1", L"2", L"3", L"4" };
+        for (const wchar_t* text : kSyncIntervals)
+            SendMessageW(g_app.presentationSyncChoice, CB_ADDSTRING, 0,
+                reinterpret_cast<LPARAM>(text));
+        SendMessageW(g_app.presentationSyncChoice, CB_SETCURSEL, 0, 0);
+
+        g_app.presentationTearingOverride = CreateWindowExW(0, L"BUTTON",
+            L"Override ALLOW_TEARING",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_PRESENTATION_TEARING_OVERRIDE),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.presentationTearingOverride, font);
+        g_app.presentationTearingOff = CreateWindowExW(0, L"BUTTON", L"Off",
+            WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_PRESENTATION_TEARING_OFF),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.presentationTearingOff, font);
+        Button_SetCheck(g_app.presentationTearingOff, BST_CHECKED);
+        g_app.presentationTearingOn = CreateWindowExW(0, L"BUTTON", L"On",
+            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+            0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_PRESENTATION_TEARING_ON),
+            g_app.instance, nullptr);
+        SetChildFont(g_app.presentationTearingOn, font);
 
         g_app.fgForceAutoOn = CreateWindowExW(0, L"BUTTON",
             L"Force Auto to On",
@@ -1145,6 +1345,12 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
         SetChildFont(g_app.fgState, font);
 
+        g_app.presentState = CreateWindowExW(0, L"STATIC",
+            L"Present: Probing disabled",
+            WS_CHILD | WS_VISIBLE,
+            0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
+        SetChildFont(g_app.presentState, font);
+
         g_app.statusLabel = CreateWindowExW(0, L"STATIC", L"Status / API requests",
             WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window, nullptr, g_app.instance, nullptr);
         SetChildFont(g_app.statusLabel, font);
@@ -1185,15 +1391,16 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 
         g_app.capturingStartupDiagnostics = true;
         AppendStatusLine(L"ReflexProbe bootstrap: Launch, Watch or Attach selected API probes.");
-        AppendStatusLine(L"State values: game request -> forwarded value. Unchanged values are shown once.");
-        AppendStatusLine(L"Reflex probing is ON by default; DLSS FG probing is OFF. FG SetOptions is observed when enabled; GetState interception is independently optional.");
+        AppendStatusLine(L"State values: game request -> forwarded value. State-change markers: + new state; - repeated calls for the preceding state.");
+        AppendStatusLine(L"Reflex probing is ON by default; DLSS FG and Presentation probing are OFF. Presentation DXGI overrides are opt-in.");
+        AppendStatusLine(L"FG SetOptions is observed when enabled; GetState interception is independently optional.");
         AppendStatusLine(L"Frame-limit override is OFF by default. When checked, the FPS value replaces frameLimitUs on intercepted Reflex settings calls.");
         AppendStatusLine(L"Force Boost when Reflex On is independent: plain On requests become On + Boost; Off and existing On + Boost requests are unchanged.");
         AppendStatusLine(L"Reflex Sleep call counting is OFF by default. When disabled, ReflexProbe does not wrap the Reflex Sleep call.");
         AppendStatusLine(L"Capture mode defaults to State changes. Raw debug retains at most 131072 calls in RAM. ReflexProbe never writes capture data to disk.");
         LogBinaryIdentity();
         g_app.capturingStartupDiagnostics = false;
-        SetTimer(window, kPollTimer, kPollIntervalMs, nullptr);
+        // No idle 20 Hz wakeups; the timer starts on successful injection.
         return 0;
     }
 
@@ -1210,6 +1417,18 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
+        case IDC_STATUS:
+            if (HIWORD(wParam) == EN_MAXTEXT &&
+                !g_app.statusLimitWarningShown) {
+                // Normally the log rolls well before this happens. Report
+                // the exceptional case without a modal dialog over the game.
+                g_app.statusLimitWarningShown = true;
+                if (g_app.statusLabel)
+                    SetWindowTextW(g_app.statusLabel, L"Status (display limit reached!)");
+                OutputDebugStringW(
+                    L"ReflexProbe: WARNING: status EDIT display limit reached; one or more lines may be truncated.\n");
+            }
+            return 0;
         case IDC_BROWSE:
             BrowseForGame();
             return 0;
@@ -1219,6 +1438,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             return 0;
         case IDC_REFLEX_PROBING:
         case IDC_FG_PROBING:
+        case IDC_PRESENTATION_PROBING:
             if (HIWORD(wParam) == BN_CLICKED) {
                 UpdateAcquisitionControls();
                 if (!g_app.process && !g_app.watchArmed && !g_app.haveEffectiveState)
@@ -1250,6 +1470,19 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
                 PollSharedState();
                 SetFgDetailedDiagnostics(
                     Button_GetCheck(g_app.fgDetailedDiagnosticsControl) == BST_CHECKED);
+            }
+            return 0;
+        case IDC_PRESENTATION_SYNC_CHOICE:
+            if (HIWORD(wParam) == CBN_SELCHANGE)
+                ApplyPresentationPolicyToShared();
+            return 0;
+        case IDC_PRESENTATION_SYNC_OVERRIDE:
+        case IDC_PRESENTATION_TEARING_OVERRIDE:
+        case IDC_PRESENTATION_TEARING_OFF:
+        case IDC_PRESENTATION_TEARING_ON:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                UpdateAcquisitionControls();
+                ApplyPresentationPolicyToShared();
             }
             return 0;
         case IDC_FG_MULTIPLIER_CHOICE:
@@ -1327,6 +1560,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         CleanupTarget();
         FreeRawDebugBuffer();
         FreeTextBuffer(g_app.startupDiagnostics);
+        FreeTextBuffer(g_app.displayScratch);
         PostQuitMessage(0);
         return 0;
     }

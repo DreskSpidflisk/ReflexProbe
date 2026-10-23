@@ -21,6 +21,49 @@ void SetStatusCaretToEnd()
         static_cast<WPARAM>(textLength), static_cast<LPARAM>(textLength));
 }
 
+// Keep the existing EDIT log continuously useful in intensive Raw sessions.
+// Trimming is rare (every few MiB), removes whole lines, and never touches
+// the controller's separately retained binary Raw ring.
+size_t TrimStatusHistory(size_t incomingChars)
+{
+    if (!g_app.status)
+        return 0;
+
+    constexpr size_t kHeadroom = 512u * 1024u;
+    constexpr size_t kTrimTarget = 4u * 1024u * 1024u;
+    const int length = GetWindowTextLengthW(g_app.status);
+    if (length <= 0 || static_cast<size_t>(length) + incomingChars <
+            kStatusTextLimit - kHeadroom)
+        return 0;
+
+    const SIZE_T bytes = (static_cast<SIZE_T>(length) + 1) * sizeof(wchar_t);
+    wchar_t* snapshot = static_cast<wchar_t*>(HeapAlloc(GetProcessHeap(), 0, bytes));
+    if (!snapshot)
+        return 0;
+    const int copied = GetWindowTextW(g_app.status, snapshot, length + 1);
+    if (copied <= 0) {
+        HeapFree(GetProcessHeap(), 0, snapshot);
+        return 0;
+    }
+
+    const size_t seekFrom = kTrimTarget < static_cast<size_t>(copied)
+        ? kTrimTarget : static_cast<size_t>(copied) / 2;
+    // A newline *after* the trim target ensures no diagnostic is cut in half.
+    const wchar_t* newline = wcschr(snapshot + seekFrom, L'\n');
+    const size_t removeChars = newline
+        ? static_cast<size_t>(newline - snapshot + 1) : 0;
+    HeapFree(GetProcessHeap(), 0, snapshot);
+    if (!removeChars)
+        return 0;
+
+    SendMessageW(g_app.status, EM_SETSEL, 0, static_cast<LPARAM>(removeChars));
+    SendMessageW(g_app.status, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(L""));
+    SendMessageW(g_app.status, EM_SETSEL, 0, 0);
+    SendMessageW(g_app.status, EM_REPLACESEL, FALSE,
+        reinterpret_cast<LPARAM>(L"[Earlier log lines discarded to keep the live display rolling.]\r\n"));
+    return removeChars;
+}
+
 void AppendStatus(const wchar_t* text)
 {
     if (!g_app.status || !text)
@@ -32,6 +75,18 @@ void AppendStatus(const wchar_t* text)
     if (preserveSelection) {
         SendMessageW(g_app.status, EM_GETSEL,
             reinterpret_cast<WPARAM>(&selectionStart), reinterpret_cast<LPARAM>(&selectionEnd));
+    }
+
+    const size_t discarded = TrimStatusHistory(wcslen(text));
+    if (preserveSelection && discarded) {
+        const DWORD removed = static_cast<DWORD>(discarded);
+        selectionStart = selectionStart > removed ? selectionStart - removed : 0;
+        selectionEnd = selectionEnd > removed ? selectionEnd - removed : 0;
+        constexpr DWORD kNoticeLength =
+            static_cast<DWORD>(sizeof(L"[Earlier log lines discarded to keep the live display rolling.]\r\n") /
+                    sizeof(wchar_t) - 1);
+        selectionStart += kNoticeLength;
+        selectionEnd += kNoticeLength;
     }
 
     SetStatusCaretToEnd();
@@ -62,53 +117,68 @@ void AppendStatusCount(const wchar_t* text, size_t count)
     }
 }
 
+// UI-thread-only conversion cache. System clock and QPC are re-anchored
+// periodically; repeated events in the same local second reuse one conversion.
 void FormatTimestamp(LONGLONG eventQpc, wchar_t* out, size_t outCount)
 {
     if (!out || !outCount)
         return;
 
-    SYSTEMTIME localTime{};
-    bool converted = false;
+    static LARGE_INTEGER frequency{};
+    static LONGLONG anchorQpc = 0;
+    static ULONGLONG anchorUtc = 0;
+    static ULONGLONG lastConvertedSecond = ~0ULL;
+    static SYSTEMTIME cachedLocal{};
 
-    if (eventQpc > 0) {
-        LARGE_INTEGER nowQpc{};
-        LARGE_INTEGER frequency{};
-        FILETIME nowUtc{};
-        if (QueryPerformanceCounter(&nowQpc) && QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0) {
-            GetSystemTimeAsFileTime(&nowUtc);
+    if (!frequency.QuadPart && !QueryPerformanceFrequency(&frequency))
+        frequency.QuadPart = 0;
 
-            ULARGE_INTEGER eventUtc{};
-            eventUtc.LowPart = nowUtc.dwLowDateTime;
-            eventUtc.HighPart = nowUtc.dwHighDateTime;
+    LARGE_INTEGER now{};
+    if (frequency.QuadPart > 0 && QueryPerformanceCounter(&now)) {
+        if (!anchorQpc || now.QuadPart < anchorQpc ||
+            now.QuadPart - anchorQpc >= frequency.QuadPart) {
+            FILETIME utc{};
+            GetSystemTimeAsFileTime(&utc);
+            ULARGE_INTEGER value{};
+            value.LowPart = utc.dwLowDateTime;
+            value.HighPart = utc.dwHighDateTime;
+            anchorUtc = value.QuadPart;
+            anchorQpc = now.QuadPart;
+        }
 
-            if (eventQpc < nowQpc.QuadPart) {
-                const LONGLONG deltaQpc = nowQpc.QuadPart - eventQpc;
-                const double delta100nsDouble =
-                    (static_cast<double>(deltaQpc) * 10000000.0) /
-                    static_cast<double>(frequency.QuadPart);
-                const ULONGLONG delta100ns = static_cast<ULONGLONG>(delta100nsDouble);
-                if (delta100ns < eventUtc.QuadPart)
-                    eventUtc.QuadPart -= delta100ns;
-            }
+        const LONGLONG chosenQpc = eventQpc > 0 ? eventQpc : now.QuadPart;
+        const double offset =
+            (static_cast<double>(chosenQpc - anchorQpc) * 10000000.0) /
+            static_cast<double>(frequency.QuadPart);
+        const LONGLONG offsetTicks = static_cast<LONGLONG>(offset);
+        const ULONGLONG utcTicks = offsetTicks < 0 &&
+            static_cast<ULONGLONG>(-offsetTicks) > anchorUtc
+            ? 0 : static_cast<ULONGLONG>(static_cast<LONGLONG>(anchorUtc) + offsetTicks);
+        const ULONGLONG second = utcTicks / 10000000ULL;
 
-            FILETIME eventUtcFile{};
-            eventUtcFile.dwLowDateTime = eventUtc.LowPart;
-            eventUtcFile.dwHighDateTime = eventUtc.HighPart;
-            FILETIME eventLocalFile{};
-            if (FileTimeToLocalFileTime(&eventUtcFile, &eventLocalFile) &&
-                FileTimeToSystemTime(&eventLocalFile, &localTime)) {
-                converted = true;
+        if (second != lastConvertedSecond) {
+            FILETIME utc{};
+            utc.dwLowDateTime = static_cast<DWORD>(utcTicks);
+            utc.dwHighDateTime = static_cast<DWORD>(utcTicks >> 32);
+            FILETIME local{};
+            SYSTEMTIME converted{};
+            if (FileTimeToLocalFileTime(&utc, &local) &&
+                FileTimeToSystemTime(&local, &converted)) {
+                cachedLocal = converted;
+                lastConvertedSecond = second;
+            } else {
+                GetLocalTime(&cachedLocal);
+                lastConvertedSecond = second;
             }
         }
+    } else {
+        GetLocalTime(&cachedLocal);
     }
 
-    if (!converted)
-        GetLocalTime(&localTime);
-
     swprintf_s(out, outCount, L"[%02u:%02u:%02u] ",
-        static_cast<unsigned int>(localTime.wHour),
-        static_cast<unsigned int>(localTime.wMinute),
-        static_cast<unsigned int>(localTime.wSecond));
+        static_cast<unsigned int>(cachedLocal.wHour),
+        static_cast<unsigned int>(cachedLocal.wMinute),
+        static_cast<unsigned int>(cachedLocal.wSecond));
 }
 
 bool EnsureTextBufferCapacity(TextBuffer& buffer, size_t requiredChars)
@@ -200,21 +270,14 @@ void AppendDisplayLineAtQpc(const wchar_t* text, LONGLONG eventQpc)
     if (!text)
         return;
 
-    const wchar_t* cursor = text;
-    for (;;) {
-        const wchar_t* newline = wcsstr(cursor, L"\r\n");
-        const size_t lineLength = newline ? static_cast<size_t>(newline - cursor) : wcslen(cursor);
-
-        wchar_t timestamp[32]{};
-        FormatTimestamp(eventQpc, timestamp, _countof(timestamp));
-        AppendStatus(timestamp);
-        AppendStatusCount(cursor, lineLength);
-        AppendStatus(L"\r\n");
-
-        if (!newline)
-            break;
-        cursor = newline + 2;
-    }
+    // Build one contiguous append instead of three EDIT operations per line.
+    // The scratch buffer is reusable and lives in the controller only.
+    TextBuffer& scratch = g_app.displayScratch;
+    scratch.length = 0;
+    if (scratch.data)
+        scratch.data[0] = 0;
+    if (AppendTextBufferLineAtQpc(scratch, text, eventQpc) && scratch.data)
+        AppendStatus(scratch.data);
 }
 
 void AppendDisplayLine(const wchar_t* text)
