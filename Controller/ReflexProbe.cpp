@@ -1393,10 +1393,6 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         AppendStatusLine(L"ReflexProbe bootstrap: Launch, Watch or Attach selected API probes.");
         AppendStatusLine(L"State values: game request -> forwarded value. State-change markers: + new state; - repeated calls for the preceding state.");
         AppendStatusLine(L"Reflex probing is ON by default; DLSS FG and Presentation probing are OFF. Presentation DXGI overrides are opt-in.");
-        AppendStatusLine(L"FG SetOptions is observed when enabled; GetState interception is independently optional.");
-        AppendStatusLine(L"Frame-limit override is OFF by default. When checked, the FPS value replaces frameLimitUs on intercepted Reflex settings calls.");
-        AppendStatusLine(L"Force Boost when Reflex On is independent: plain On requests become On + Boost; Off and existing On + Boost requests are unchanged.");
-        AppendStatusLine(L"Reflex Sleep call counting is OFF by default. When disabled, ReflexProbe does not wrap the Reflex Sleep call.");
         AppendStatusLine(L"Capture mode defaults to State changes. Raw debug retains at most 131072 calls in RAM. ReflexProbe never writes capture data to disk.");
         LogBinaryIdentity();
         g_app.capturingStartupDiagnostics = false;
