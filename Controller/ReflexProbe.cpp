@@ -9,7 +9,7 @@
 
 #pragma comment(lib, "comdlg32.lib")
 
-namespace ReflexProbeController {
+namespace ProbeController {
 
 constexpr wchar_t kWindowClass[] = L"ReflexProbeControlWindow";
 
@@ -1595,9 +1595,9 @@ void CenterWindowOnChosenMonitor(HWND window)
         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
-} // namespace ReflexProbeController
+} // namespace ProbeController
 
-using namespace ReflexProbeController;
+using namespace ProbeController;
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
 {

@@ -1,7 +1,7 @@
 #include "ControllerInternal.h"
 #include <stdio.h>
 
-namespace ReflexProbeController {
+namespace ProbeController {
 
 const wchar_t* PresentationOriginName(uint32_t method)
 {
@@ -123,4 +123,4 @@ void HandlePresentationEvent(const CapturedReflexEvent& event)
 }
 
 
-} // namespace ReflexProbeController
+} // namespace ProbeController

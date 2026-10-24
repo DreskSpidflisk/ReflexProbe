@@ -10,7 +10,7 @@
 #define RP_WIDEN_INNER(x) L##x
 #define RP_WIDEN(x) RP_WIDEN_INNER(x)
 
-namespace ReflexProbeController {
+namespace ProbeController {
 
 constexpr wchar_t kControllerBuildStamp[] = RP_WIDEN(__DATE__) L" " RP_WIDEN(__TIME__);
 constexpr DWORD kPostLoadVerificationTimeoutMs = 1000;
@@ -911,7 +911,7 @@ bool AttachRunningProcess(const wchar_t* targetPath, bool overrideEnabled, uint3
         detectedQpc.QuadPart, 0, L"Attach", error, errorCount);
 }
 
-} // namespace ReflexProbeController
+} // namespace ProbeController
 
 #undef RP_WIDEN
 #undef RP_WIDEN_INNER

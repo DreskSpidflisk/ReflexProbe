@@ -13,7 +13,7 @@
 
 #include "../Common/Protocol.h"
 
-namespace ReflexProbeController {
+namespace ProbeController {
 
 constexpr UINT_PTR kPollTimer = 1;
 constexpr UINT_PTR kWatchTimer = 2;
@@ -306,4 +306,4 @@ void SetFgDetailedDiagnostics(bool detailed);
 void ResetCurrentEffectiveState();
 void PollSharedState();
 
-} // namespace ReflexProbeController
+} // namespace ProbeController

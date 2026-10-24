@@ -5,7 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 
-namespace ReflexProbeController {
+namespace ProbeController {
 
 void ResetLiveStateTracking()
 {
@@ -1188,4 +1188,4 @@ void PollSharedState()
     }
 }
 
-} // namespace ReflexProbeController
+} // namespace ProbeController

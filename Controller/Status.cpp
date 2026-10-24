@@ -3,7 +3,7 @@
 #include <wchar.h>
 #include <stdio.h>
 
-namespace ReflexProbeController {
+namespace ProbeController {
 
 void SetChildFont(HWND child, HFONT font)
 {
@@ -381,4 +381,4 @@ void RecreateStatusControl(bool wordWrap)
     LayoutControls(client.right - client.left, client.bottom - client.top);
 }
 
-} // namespace ReflexProbeController
+} // namespace ProbeController
