@@ -95,13 +95,13 @@ bool CaptureRawDebugEvent(const CapturedReflexEvent& event)
 const wchar_t* BackendName(LONG backend)
 {
     switch (backend) {
-    case ReflexProbeProtocol::ReflexBackendModernSetOptions:
+    case ProbeProtocol::ReflexBackendModernSetOptions:
         return L"Streamline 2.x+ slReflexSetOptions";
-    case ReflexProbeProtocol::ReflexBackendLegacyFeatureConstants:
+    case ProbeProtocol::ReflexBackendLegacyFeatureConstants:
         return L"Streamline 1.x slSetFeatureConstants";
-    case ReflexProbeProtocol::ReflexBackendLegacyPluginConstants:
+    case ProbeProtocol::ReflexBackendLegacyPluginConstants:
         return L"Streamline 1.x sl.reflex plugin gateway";
-    case ReflexProbeProtocol::ReflexBackendNativeNvapiD3D:
+    case ProbeProtocol::ReflexBackendNativeNvapiD3D:
         return L"Native NVAPI D3D Reflex";
     default:
         return L"unknown";
@@ -111,11 +111,11 @@ const wchar_t* BackendName(LONG backend)
 const wchar_t* BackendCallName(LONG backend)
 {
     switch (backend) {
-    case ReflexProbeProtocol::ReflexBackendLegacyFeatureConstants:
+    case ProbeProtocol::ReflexBackendLegacyFeatureConstants:
         return L"slSetFeatureConstants";
-    case ReflexProbeProtocol::ReflexBackendLegacyPluginConstants:
+    case ProbeProtocol::ReflexBackendLegacyPluginConstants:
         return L"sl.reflex!slSetConstants";
-    case ReflexProbeProtocol::ReflexBackendNativeNvapiD3D:
+    case ProbeProtocol::ReflexBackendNativeNvapiD3D:
         return L"NvAPI_D3D_SetSleepMode";
     default:
         return L"slReflexSetOptions";
@@ -124,7 +124,7 @@ const wchar_t* BackendCallName(LONG backend)
 
 const wchar_t* BackendSleepCallName(LONG backend)
 {
-    return backend == ReflexProbeProtocol::ReflexBackendNativeNvapiD3D
+    return backend == ProbeProtocol::ReflexBackendNativeNvapiD3D
         ? L"NvAPI_D3D_Sleep"
         : L"slReflexSleep";
 }
@@ -315,11 +315,11 @@ const wchar_t* FgBooleanName(uint32_t value)
 void FormatFgDisplayLine(const CapturedReflexEvent& event, bool newState,
                          wchar_t* line, size_t lineCount, bool detailed = true)
 {
-    const ReflexProbeProtocol::FgEventData& fg = event.fg;
+    const ProbeProtocol::FgEventData& fg = event.fg;
     const wchar_t* prefix = !newState ? L"" :
-        (event.kind == ReflexProbeProtocol::FgEventSetOptions
+        (event.kind == ProbeProtocol::FgEventSetOptions
             ? L"+ FG SetOptions: " : L"+ FG GetState: ");
-    if (event.kind == ReflexProbeProtocol::FgEventSetOptions) {
+    if (event.kind == ProbeProtocol::FgEventSetOptions) {
         wchar_t requestedMode[64]{};
         wchar_t forwardedMode[64]{};
         wchar_t mode[160]{};
@@ -453,14 +453,14 @@ void AppendFgEvent(const CapturedReflexEvent& event, bool newState, bool detaile
 void AppendFgRepeatCount(const FgStateRun& run, LONGLONG eventQpc)
 {
     const bool normalSetOptions =
-        run.kind == ReflexProbeProtocol::FgEventSetOptions &&
+        run.kind == ProbeProtocol::FgEventSetOptions &&
         !g_app.fgDetailedDiagnostics;
     const uint64_t count = normalSetOptions ? run.pendingDisplayRepeats : run.repeats;
     if (!count)
         return;
 
     wchar_t line[180]{};
-    const bool isSetOptions = run.kind == ReflexProbeProtocol::FgEventSetOptions;
+    const bool isSetOptions = run.kind == ProbeProtocol::FgEventSetOptions;
     const wchar_t* callName = isSetOptions ? L"slDLSSGSetOptions" : L"slDLSSGGetState";
     if (normalSetOptions) {
         // Exact complete-state repetitions, potentially across multiple
@@ -481,7 +481,7 @@ void AppendFgRepeatCount(const FgStateRun& run, LONGLONG eventQpc)
 
 void AppendFgSnapshot(const FgStateRun& run, LONGLONG eventQpc)
 {
-    if (run.kind != ReflexProbeProtocol::FgEventSetOptions)
+    if (run.kind != ProbeProtocol::FgEventSetOptions)
         return;
     wchar_t state[1024]{};
     wchar_t line[1152]{};
@@ -496,7 +496,7 @@ void FinishFgDisplayIntervals(LONGLONG eventQpc, bool includeGetState)
     for (size_t i = 0; i < kFgTrackedStreams; ++i) {
         FgStateRun& run = g_app.fgRuns[i];
         if (!run.used || (!includeGetState &&
-            run.kind != ReflexProbeProtocol::FgEventSetOptions))
+            run.kind != ProbeProtocol::FgEventSetOptions))
             continue;
         AppendFgRepeatCount(run, eventQpc);
         run.repeats = 0;
@@ -544,9 +544,9 @@ bool SameFgState(const CapturedReflexEvent& a, const CapturedReflexEvent& b)
     if (a.kind != b.kind || a.result != b.result)
         return false;
 
-    if (a.kind == ReflexProbeProtocol::FgEventGetState) {
-        const ReflexProbeProtocol::FgEventData& left = a.fg;
-        const ReflexProbeProtocol::FgEventData& right = b.fg;
+    if (a.kind == ProbeProtocol::FgEventGetState) {
+        const ProbeProtocol::FgEventData& left = a.fg;
+        const ProbeProtocol::FgEventData& right = b.fg;
         // GetState's optional DLSSGOptions are *query inputs*. Alternating
         // calls with options and nullptr (as DOOM: The Dark Ages does) must
         // not create a new runtime state. Compare only captured output fields.
@@ -603,11 +603,11 @@ void HandleCapturedFgEvent(const CapturedReflexEvent& event)
                 // Keep snapshots' call ordinal current without copying the
                 // entire event or changing the full-state comparison.
                 run.previous.sequence = event.sequence;
-                if (run.kind == ReflexProbeProtocol::FgEventSetOptions)
+                if (run.kind == ProbeProtocol::FgEventSetOptions)
                     ++run.pendingDisplayRepeats;
             } else {
                 const bool showState =
-                    run.kind != ReflexProbeProtocol::FgEventSetOptions ||
+                    run.kind != ProbeProtocol::FgEventSetOptions ||
                     g_app.fgDetailedDiagnostics ||
                     !SameVisibleFgSetOptions(run.displayed, event);
                 if (showState) {
@@ -652,10 +652,10 @@ void UpdateCurrentFgState(const CapturedReflexEvent& event)
 {
     // GetState reports query results, not the game's requested FG engagement.
     // Keep the status label exclusively tied to SetOptions.
-    if (event.kind != ReflexProbeProtocol::FgEventSetOptions || !g_app.fgState)
+    if (event.kind != ProbeProtocol::FgEventSetOptions || !g_app.fgState)
         return;
 
-    const ReflexProbeProtocol::FgEventData& fg = event.fg;
+    const ProbeProtocol::FgEventData& fg = event.fg;
     const bool menuDetection = (fg.forwardedFlags & 0x10u) != 0;
     if (g_app.haveFgLabelState &&
         g_app.fgLabelMode == fg.forwardedMode &&
@@ -680,7 +680,7 @@ void UpdateCurrentFgState(const CapturedReflexEvent& event)
 // what is visible: changing unrelated Present flags/results must not redraw.
 void UpdateCurrentPresentState(const CapturedReflexEvent& event)
 {
-    if (event.kind != ReflexProbeProtocol::PresentationEventPresent ||
+    if (event.kind != ProbeProtocol::PresentationEventPresent ||
         !g_app.presentState || event.result < 0)
         return;
 
@@ -704,18 +704,18 @@ void UpdateCurrentPresentState(const CapturedReflexEvent& event)
 bool AppendCapturedEventToBuffer(TextBuffer& buffer, const CapturedReflexEvent& event, bool newState)
 {
     wchar_t line[512]{};
-    if (event.kind == ReflexProbeProtocol::PresentationEventPresent ||
-        event.kind == ReflexProbeProtocol::PresentationEventSwapChain) {
+    if (event.kind == ProbeProtocol::PresentationEventPresent ||
+        event.kind == ProbeProtocol::PresentationEventSwapChain) {
         FormatPresentationEvent(event, line, _countof(line));
         return AppendTextBufferLineAtQpc(buffer, line, event.qpc);
     }
-    if (event.kind == ReflexProbeProtocol::FgEventSetOptions ||
-        event.kind == ReflexProbeProtocol::FgEventGetState) {
+    if (event.kind == ProbeProtocol::FgEventSetOptions ||
+        event.kind == ProbeProtocol::FgEventGetState) {
         wchar_t fgLine[1024]{};
         FormatFgDisplayLine(event, newState, fgLine, _countof(fgLine));
         return AppendTextBufferLineAtQpc(buffer, fgLine, event.qpc);
     }
-    if (event.kind == ReflexProbeProtocol::ReflexEventSleep)
+    if (event.kind == ProbeProtocol::ReflexEventSleep)
         FormatSleepDisplayLine(event, line, _countof(line));
     else
         FormatReflexDisplayLine(event, newState, line, _countof(line));
@@ -769,8 +769,8 @@ void AppendSleepCount(uint64_t sleepCount, const CapturedReflexEvent& state,
     // An unrelated resolver may change the global discovery label while this
     // Reflex run is active. Only the captured event's backend controls whether
     // Sleep counts are supported for this run.
-    if (state.backend == ReflexProbeProtocol::ReflexBackendLegacyFeatureConstants ||
-        state.backend == ReflexProbeProtocol::ReflexBackendLegacyPluginConstants)
+    if (state.backend == ProbeProtocol::ReflexBackendLegacyFeatureConstants ||
+        state.backend == ProbeProtocol::ReflexBackendLegacyPluginConstants)
         return;
 
     if (!sleepCount &&
@@ -880,16 +880,16 @@ bool SetCaptureMode(CaptureMode mode)
 }
 void HandleCapturedReflexEvent(const CapturedReflexEvent& event)
 {
-    if (event.kind == ReflexProbeProtocol::PresentationEventPresent ||
-        event.kind == ReflexProbeProtocol::PresentationEventSwapChain) {
+    if (event.kind == ProbeProtocol::PresentationEventPresent ||
+        event.kind == ProbeProtocol::PresentationEventSwapChain) {
         if (CurrentCaptureMode() == CaptureModeRawDebug)
             CaptureRawDebugEvent(event);
         else
             HandlePresentationEvent(event);
         return;
     }
-    if (event.kind == ReflexProbeProtocol::FgEventSetOptions ||
-        event.kind == ReflexProbeProtocol::FgEventGetState) {
+    if (event.kind == ProbeProtocol::FgEventSetOptions ||
+        event.kind == ProbeProtocol::FgEventGetState) {
         HandleCapturedFgEvent(event);
         return;
     }
@@ -899,7 +899,7 @@ void HandleCapturedReflexEvent(const CapturedReflexEvent& event)
         return;
     }
 
-    if (event.kind == ReflexProbeProtocol::ReflexEventSleep) {
+    if (event.kind == ProbeProtocol::ReflexEventSleep) {
         if (g_app.haveStateEvent)
             ++g_app.stateSleepCount;
         return;
@@ -954,39 +954,39 @@ void PollSharedState()
         g_app.lastHookState = hookState;
         const bool warnLegacySleep =
             g_app.shared->countReflexSleepCalls != 0 &&
-            (backend == ReflexProbeProtocol::ReflexBackendLegacyFeatureConstants ||
-             backend == ReflexProbeProtocol::ReflexBackendLegacyPluginConstants);
+            (backend == ProbeProtocol::ReflexBackendLegacyFeatureConstants ||
+             backend == ProbeProtocol::ReflexBackendLegacyPluginConstants);
         const wchar_t* legacySleepNote = warnLegacySleep
             ? L"\r\nNOTE: Reflex Sleep counting unavailable for Streamline 1.x (not intercepted by ReflexProbe)."
             : L"";
         wchar_t line[2300]{};
         switch (hookState) {
-        case ReflexProbeProtocol::HookStateWaitingForDll:
+        case ProbeProtocol::HookStateWaitingForDll:
             wcscpy_s(line, g_app.shared->probeReflexEnabled
                 ? L"Waiting for a Reflex interception path..."
                 : g_app.shared->probeDlssFgEnabled
                     ? L"Waiting for a Streamline 2.x DLSS FG interception path."
                     : L"Waiting for a DXGI swap-chain creation / Present path...");
             break;
-        case ReflexProbeProtocol::HookStateInterceptArmed:
+        case ProbeProtocol::HookStateInterceptArmed:
             swprintf_s(line, L"Interception armed: %s. Waiting for sl.reflex.dll to resolve its plugin gateway.",
                 BackendName(backend));
             break;
-        case ReflexProbeProtocol::HookStateReflexFound:
+        case ProbeProtocol::HookStateReflexFound:
             swprintf_s(line, L"Found Reflex backend: %s%s\r\nModule: %s\r\nFile version: %s",
                 BackendName(backend), legacySleepNote,
                 g_app.shared->reflexPath[0] ? g_app.shared->reflexPath : L"(path unavailable)",
                 g_app.shared->reflexVersion[0] ? g_app.shared->reflexVersion : L"unknown");
             break;
-        case ReflexProbeProtocol::HookStateHooked:
+        case ProbeProtocol::HookStateHooked:
             swprintf_s(line, L"Hook active: %s via %s%s\r\nModule: %s\r\nFile version: %s",
                 BackendCallName(backend), BackendName(backend),
-                previousHookState == ReflexProbeProtocol::HookStateReflexFound
+                previousHookState == ProbeProtocol::HookStateReflexFound
                     ? L"" : legacySleepNote,
                 g_app.shared->reflexPath[0] ? g_app.shared->reflexPath : L"sl.reflex.dll",
                 g_app.shared->reflexVersion[0] ? g_app.shared->reflexVersion : L"unknown");
             break;
-        case ReflexProbeProtocol::HookStateError:
+        case ProbeProtocol::HookStateError:
             swprintf_s(line, L"Injected DLL error: %s",
                 g_app.shared->lastError[0] ? g_app.shared->lastError : L"unknown error");
             break;
@@ -1038,8 +1038,8 @@ void PollSharedState()
     const LONG currentSerial = InterlockedCompareExchange(&g_app.shared->eventSerial, 0, 0);
     LONG first = g_app.lastEventSerial + 1;
     const LONG available = currentSerial - first + 1;
-    if (available > static_cast<LONG>(ReflexProbeProtocol::kEventCapacity)) {
-        const LONG lost = available - static_cast<LONG>(ReflexProbeProtocol::kEventCapacity);
+    if (available > static_cast<LONG>(ProbeProtocol::kEventCapacity)) {
+        const LONG lost = available - static_cast<LONG>(ProbeProtocol::kEventCapacity);
         LARGE_INTEGER qpc{};
         QueryPerformanceCounter(&qpc);
         RecordRunBoundary(qpc.QuadPart);
@@ -1050,7 +1050,7 @@ void PollSharedState()
             lost);
         AppendStatusLineAtQpc(line, qpc.QuadPart);
 
-        first = currentSerial - static_cast<LONG>(ReflexProbeProtocol::kEventCapacity) + 1;
+        first = currentSerial - static_cast<LONG>(ProbeProtocol::kEventCapacity) + 1;
         g_app.lastEventSerial = first - 1;
     }
 
@@ -1062,8 +1062,8 @@ void PollSharedState()
         if (serial <= 0)
             continue;
 
-        const uint32_t index = static_cast<uint32_t>(serial - 1) % ReflexProbeProtocol::kEventCapacity;
-        const ReflexProbeProtocol::ReflexEvent& event = g_app.shared->events[index];
+        const uint32_t index = static_cast<uint32_t>(serial - 1) % ProbeProtocol::kEventCapacity;
+        const ProbeProtocol::ReflexEvent& event = g_app.shared->events[index];
         const LONG storedSerial = InterlockedCompareExchange(
             const_cast<volatile LONG*>(&event.sequence), 0, 0);
         if (storedSerial != serial) {
@@ -1094,11 +1094,11 @@ void PollSharedState()
         captured.backend = event.backend;
         captured.requestedUs = event.requestedUs;
         captured.effectiveUs = event.effectiveUs;
-        if (captured.kind == ReflexProbeProtocol::FgEventSetOptions ||
-            captured.kind == ReflexProbeProtocol::FgEventGetState)
+        if (captured.kind == ProbeProtocol::FgEventSetOptions ||
+            captured.kind == ProbeProtocol::FgEventGetState)
             captured.fg = event.fg;
-        if (captured.kind == ReflexProbeProtocol::PresentationEventPresent ||
-            captured.kind == ReflexProbeProtocol::PresentationEventSwapChain)
+        if (captured.kind == ProbeProtocol::PresentationEventPresent ||
+            captured.kind == ProbeProtocol::PresentationEventSwapChain)
             captured.presentation = event.presentation;
         // A ring writer can lap this slot while we copy the payload.
         // Do not consume a mixed event even if the first sequence matched.
@@ -1127,16 +1127,16 @@ void PollSharedState()
             gapOpen = false;
             exitedSkipped = 0;
         }
-        if (captured.kind == ReflexProbeProtocol::FgEventSetOptions ||
-            captured.kind == ReflexProbeProtocol::FgEventGetState) {
-            if (captured.kind == ReflexProbeProtocol::FgEventSetOptions)
+        if (captured.kind == ProbeProtocol::FgEventSetOptions ||
+            captured.kind == ProbeProtocol::FgEventGetState) {
+            if (captured.kind == ProbeProtocol::FgEventSetOptions)
                 UpdateCurrentFgState(captured);
         }
-        if (captured.kind == ReflexProbeProtocol::ReflexEventSettings)
+        if (captured.kind == ProbeProtocol::ReflexEventSettings)
             UpdateCurrentEffectiveState(captured);
-        if (captured.kind == ReflexProbeProtocol::PresentationEventPresent)
+        if (captured.kind == ProbeProtocol::PresentationEventPresent)
             UpdateCurrentPresentState(captured);
-        if (captured.kind == ReflexProbeProtocol::ReflexEventSleep &&
+        if (captured.kind == ProbeProtocol::ReflexEventSleep &&
             captured.sequence == 1) {
             wchar_t line[192]{};
             swprintf_s(line, L"Reflex Sleep interception confirmed: %s (first call observed).",

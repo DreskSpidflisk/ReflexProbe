@@ -80,7 +80,7 @@ using PFunNvapiD3DSetSleepMode = int32_t (__cdecl)(void* device, void* params);
 using PFunNvapiD3DSleep = int32_t (__cdecl)(void* device);
 
 HANDLE g_mapping = nullptr;
-ReflexProbeProtocol::SharedState* g_shared = nullptr;
+ProbeProtocol::SharedState* g_shared = nullptr;
 
 // Remember successful native Auto/On requests, including their original frame
 // count (even zero). In Always mode, a first successful forced Off -> On may
@@ -113,7 +113,7 @@ bool GetVerifiedFgRequest(uint32_t viewport, uint32_t& mode, uint32_t& frames)
 }
 
 void RememberVerifiedFgRequest(uint32_t viewport,
-    const ReflexProbeProtocol::FgEventData& data, sl::Result result,
+    const ProbeProtocol::FgEventData& data, sl::Result result,
     bool allowOffBootstrap)
 {
     if (result != sl::Result::eOk)
@@ -208,7 +208,7 @@ const wchar_t* g_nvapiQueryInterceptionMethod =
 
 void BuildMappingName(DWORD processId, wchar_t* out, size_t outCount)
 {
-    swprintf_s(out, outCount, L"%s%lu", ReflexProbeProtocol::kMappingPrefix, processId);
+    swprintf_s(out, outCount, L"%s%lu", ProbeProtocol::kMappingPrefix, processId);
 }
 
 const wchar_t* PathFileName(const wchar_t* path)
@@ -227,7 +227,7 @@ void SetSharedError(const wchar_t* text)
 {
     if (g_shared) {
         wcsncpy_s(g_shared->lastError, _countof(g_shared->lastError), text ? text : L"", _TRUNCATE);
-            InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateError);
+            InterlockedExchange(&g_shared->hookState, ProbeProtocol::HookStateError);
     }
 
     if (text) {
@@ -254,8 +254,8 @@ bool ConnectSharedState()
         return false;
     }
 
-    g_shared = reinterpret_cast<ReflexProbeProtocol::SharedState*>(
-        MapViewOfFile(g_mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(ReflexProbeProtocol::SharedState)));
+    g_shared = reinterpret_cast<ProbeProtocol::SharedState*>(
+        MapViewOfFile(g_mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(ProbeProtocol::SharedState)));
     if (!g_shared) {
         CloseHandle(g_mapping);
         g_mapping = nullptr;
@@ -263,9 +263,9 @@ bool ConnectSharedState()
         return false;
     }
 
-    if (g_shared->magic != ReflexProbeProtocol::kMagic ||
-        g_shared->version != ReflexProbeProtocol::kVersion ||
-        g_shared->structSize != sizeof(ReflexProbeProtocol::SharedState)) {
+    if (g_shared->magic != ProbeProtocol::kMagic ||
+        g_shared->version != ProbeProtocol::kVersion ||
+        g_shared->structSize != sizeof(ProbeProtocol::SharedState)) {
         OutputDebugStringW(L"ReflexProbe64: shared-memory protocol mismatch.\n");
         UnmapViewOfFile(g_shared);
         CloseHandle(g_mapping);
@@ -324,7 +324,7 @@ bool GetModulePath(HMODULE module, wchar_t* out, size_t outCount)
 
 void SetModernInterceptionMethod(HMODULE callerModule, const wchar_t* route)
 {
-    wchar_t callerPath[ReflexProbeProtocol::kPathChars]{};
+    wchar_t callerPath[ProbeProtocol::kPathChars]{};
     const wchar_t* callerName = L"unknown module";
     if (callerModule && GetModulePath(callerModule, callerPath, _countof(callerPath)))
         callerName = PathFileName(callerPath);
@@ -352,8 +352,8 @@ bool IsLegacyStreamlineInterposer(HMODULE interposer)
     if (!interposer)
         return false;
 
-    wchar_t path[ReflexProbeProtocol::kPathChars]{};
-    wchar_t version[ReflexProbeProtocol::kVersionChars]{};
+    wchar_t path[ProbeProtocol::kPathChars]{};
+    wchar_t version[ProbeProtocol::kVersionChars]{};
     if (GetModulePath(interposer, path, _countof(path))) {
         GetFileVersionString(path, version, _countof(version));
         if (version[0]) {
@@ -371,7 +371,7 @@ bool IsLegacyStreamlineInterposer(HMODULE interposer)
     return GetProcAddress(interposer, "slGetFeatureFunction") == nullptr;
 }
 
-void SetBackend(ReflexProbeProtocol::ReflexBackend backend)
+void SetBackend(ProbeProtocol::ReflexBackend backend)
 {
     if (g_shared)
         InterlockedExchange(&g_shared->backend, static_cast<LONG>(backend));
@@ -394,7 +394,7 @@ LONG ApplyConfiguredModeOverride(LONG requestedMode)
     return requestedMode == 1 ? 2 : requestedMode;
 }
 
-void PublishSettingsEvent(ReflexProbeProtocol::ReflexBackend backend,
+void PublishSettingsEvent(ProbeProtocol::ReflexBackend backend,
                           LONG requestedMode, LONG effectiveMode,
                           uint32_t requestedUs, uint32_t effectiveUs, LONG result)
 {
@@ -403,15 +403,15 @@ void PublishSettingsEvent(ReflexProbeProtocol::ReflexBackend backend,
 
     const LONG callSequence = InterlockedIncrement(&g_shared->settingsCallSerial);
     const LONG serial = InterlockedIncrement(&g_shared->eventSerial);
-    const uint32_t index = static_cast<uint32_t>(serial - 1) % ReflexProbeProtocol::kEventCapacity;
-    ReflexProbeProtocol::ReflexEvent& event = g_shared->events[index];
+    const uint32_t index = static_cast<uint32_t>(serial - 1) % ProbeProtocol::kEventCapacity;
+    ProbeProtocol::ReflexEvent& event = g_shared->events[index];
 
     InterlockedExchange(&event.sequence, 0);
 
     LARGE_INTEGER qpc{};
     QueryPerformanceCounter(&qpc);
     event.qpc = qpc.QuadPart;
-    event.kind = ReflexProbeProtocol::ReflexEventSettings;
+    event.kind = ProbeProtocol::ReflexEventSettings;
     event.callSequence = callSequence;
     event.backend = backend;
     event.requestedMode = requestedMode;
@@ -423,7 +423,7 @@ void PublishSettingsEvent(ReflexProbeProtocol::ReflexBackend backend,
     InterlockedExchange(&event.sequence, serial);
 }
 
-void PublishSleepEvent(ReflexProbeProtocol::ReflexBackend backend, LONG result)
+void PublishSleepEvent(ProbeProtocol::ReflexBackend backend, LONG result)
 {
     if (!g_shared)
         return;
@@ -431,15 +431,15 @@ void PublishSleepEvent(ReflexProbeProtocol::ReflexBackend backend, LONG result)
     const LONG sleepSequence = InterlockedIncrement(&g_shared->sleepCallSerial);
     const LONG serial = InterlockedIncrement(&g_shared->eventSerial);
     const uint32_t index =
-        static_cast<uint32_t>(serial - 1) % ReflexProbeProtocol::kEventCapacity;
-    ReflexProbeProtocol::ReflexEvent& event = g_shared->events[index];
+        static_cast<uint32_t>(serial - 1) % ProbeProtocol::kEventCapacity;
+    ProbeProtocol::ReflexEvent& event = g_shared->events[index];
 
     InterlockedExchange(&event.sequence, 0);
 
     LARGE_INTEGER qpc{};
     QueryPerformanceCounter(&qpc);
     event.qpc = qpc.QuadPart;
-    event.kind = ReflexProbeProtocol::ReflexEventSleep;
+    event.kind = ProbeProtocol::ReflexEventSleep;
     event.callSequence = sleepSequence;
     event.backend = backend;
     event.requestedMode = 0;
@@ -452,17 +452,17 @@ void PublishSleepEvent(ReflexProbeProtocol::ReflexBackend backend, LONG result)
 }
 
 // FG events record both requested and forwarded options, independently of Reflex.
-void PublishFgEvent(LONG kind, const ReflexProbeProtocol::FgEventData& data, LONG result)
+void PublishFgEvent(LONG kind, const ProbeProtocol::FgEventData& data, LONG result)
 {
     if (!g_shared)
         return;
 
-    const LONG callSequence = kind == ReflexProbeProtocol::FgEventSetOptions
+    const LONG callSequence = kind == ProbeProtocol::FgEventSetOptions
         ? InterlockedIncrement(&g_shared->fgSetCallSerial)
         : InterlockedIncrement(&g_shared->fgGetCallSerial);
     const LONG serial = InterlockedIncrement(&g_shared->eventSerial);
-    const uint32_t index = static_cast<uint32_t>(serial - 1) % ReflexProbeProtocol::kEventCapacity;
-    ReflexProbeProtocol::ReflexEvent& event = g_shared->events[index];
+    const uint32_t index = static_cast<uint32_t>(serial - 1) % ProbeProtocol::kEventCapacity;
+    ProbeProtocol::ReflexEvent& event = g_shared->events[index];
     InterlockedExchange(&event.sequence, 0);
 
     LARGE_INTEGER qpc{};
@@ -470,7 +470,7 @@ void PublishFgEvent(LONG kind, const ReflexProbeProtocol::FgEventData& data, LON
     event.qpc = qpc.QuadPart;
     event.kind = kind;
     event.callSequence = callSequence;
-    event.backend = ReflexProbeProtocol::ReflexBackendUnknown;
+    event.backend = ProbeProtocol::ReflexBackendUnknown;
     event.requestedMode = 0;
     event.effectiveMode = 0;
     event.requestedUs = 0;
@@ -481,7 +481,7 @@ void PublishFgEvent(LONG kind, const ReflexProbeProtocol::FgEventData& data, LON
     InterlockedExchange(&event.sequence, serial);
 }
 
-void CaptureFgOptions(const sl::DLSSGOptions& options, ReflexProbeProtocol::FgEventData& out)
+void CaptureFgOptions(const sl::DLSSGOptions& options, ProbeProtocol::FgEventData& out)
 {
     out.optionsPresent = 1;
     out.optionsVersion = static_cast<uint32_t>(options.structVersion);
@@ -519,7 +519,7 @@ sl::Result HookFgSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
     if (!real)
         return sl::Result::eErrorNotInitialized;
 
-    ReflexProbeProtocol::FgEventData data{};
+    ProbeProtocol::FgEventData data{};
     data.viewport = static_cast<uint32_t>(viewport);
     CaptureFgOptions(options, data);
 
@@ -588,7 +588,7 @@ sl::Result HookFgSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
         // The ordinary observational path remains a direct pass-through.
         const sl::Result result = real(viewport, options);
         RememberVerifiedFgRequest(data.viewport, data, result, allowOffBootstrap);
-        PublishFgEvent(ReflexProbeProtocol::FgEventSetOptions, data, static_cast<LONG>(result));
+        PublishFgEvent(ProbeProtocol::FgEventSetOptions, data, static_cast<LONG>(result));
         return result;
     }
 
@@ -625,7 +625,7 @@ sl::Result HookFgSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
 
     const sl::Result result = real(viewport, forwarded);
     RememberVerifiedFgRequest(data.viewport, data, result, allowOffBootstrap);
-    PublishFgEvent(ReflexProbeProtocol::FgEventSetOptions, data, static_cast<LONG>(result));
+    PublishFgEvent(ProbeProtocol::FgEventSetOptions, data, static_cast<LONG>(result));
     return result;
 }
 
@@ -636,7 +636,7 @@ sl::Result HookFgGetState(const sl::ViewportHandle& viewport, sl::DLSSGState& st
     if (!real)
         return sl::Result::eErrorNotInitialized;
 
-    ReflexProbeProtocol::FgEventData data{};
+    ProbeProtocol::FgEventData data{};
     data.viewport = static_cast<uint32_t>(viewport);
     // Record the version before forwarding; the game owns this output buffer.
     data.stateVersion = static_cast<uint32_t>(state.structVersion);
@@ -656,7 +656,7 @@ sl::Result HookFgGetState(const sl::ViewportHandle& viewport, sl::DLSSGState& st
         if (data.stateVersion >= 4)
             data.dynamicMfgAvailable = static_cast<uint32_t>(state.bIsDynamicMFGSupported);
     }
-    PublishFgEvent(ReflexProbeProtocol::FgEventGetState, data, static_cast<LONG>(result));
+    PublishFgEvent(ProbeProtocol::FgEventGetState, data, static_cast<LONG>(result));
     return result;
 }
 
@@ -666,7 +666,7 @@ void PublishFgFunction(void* function, LONG bit)
         return;
 
     MEMORY_BASIC_INFORMATION memory{};
-    wchar_t modulePath[ReflexProbeProtocol::kPathChars]{};
+    wchar_t modulePath[ProbeProtocol::kPathChars]{};
     if (VirtualQuery(function, &memory, sizeof(memory)) &&
         GetModulePath(reinterpret_cast<HMODULE>(memory.AllocationBase),
             modulePath, _countof(modulePath))) {
@@ -678,7 +678,7 @@ void PublishFgFunction(void* function, LONG bit)
     InterlockedOr(&g_shared->fgHookBits, bit);
 }
 
-void PublishReflexModule(HMODULE module, ReflexProbeProtocol::HookState state,
+void PublishReflexModule(HMODULE module, ProbeProtocol::HookState state,
                          const wchar_t* interceptionMethod)
 {
     if (!g_shared || !module)
@@ -687,7 +687,7 @@ void PublishReflexModule(HMODULE module, ReflexProbeProtocol::HookState state,
     const wchar_t* method =
         interceptionMethod && *interceptionMethod ? interceptionMethod : L"unknown";
 
-    wchar_t modulePath[ReflexProbeProtocol::kPathChars]{};
+    wchar_t modulePath[ProbeProtocol::kPathChars]{};
     if (!GetModulePath(module, modulePath, _countof(modulePath)))
         wcscpy_s(modulePath, L"Reflex module");
 
@@ -710,12 +710,12 @@ void PublishReflexFunction(void* function, const wchar_t* interceptionMethod)
     MEMORY_BASIC_INFORMATION memory{};
     if (VirtualQuery(function, &memory, sizeof(memory))) {
         PublishReflexModule(reinterpret_cast<HMODULE>(memory.AllocationBase),
-            ReflexProbeProtocol::HookStateHooked, method);
+            ProbeProtocol::HookStateHooked, method);
     } else {
         _snwprintf_s(g_shared->reflexPath, _countof(g_shared->reflexPath), _TRUNCATE,
             L"Reflex module\r\nInterception method: %s", method);
         g_shared->reflexVersion[0] = 0;
-            InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateHooked);
+            InterlockedExchange(&g_shared->hookState, ProbeProtocol::HookStateHooked);
     }
 }
 
@@ -759,7 +759,7 @@ int32_t __cdecl HookNvapiD3DSetSleepMode(void* device, void* params)
     forwarded->minimumIntervalUs = effectiveUs;
 
     const int32_t result = real(device, forwarded);
-    PublishSettingsEvent(ReflexProbeProtocol::ReflexBackendNativeNvapiD3D,
+    PublishSettingsEvent(ProbeProtocol::ReflexBackendNativeNvapiD3D,
         requestedMode, effectiveMode, requested->minimumIntervalUs,
         effectiveUs, static_cast<LONG>(result));
 
@@ -774,7 +774,7 @@ int32_t __cdecl HookNvapiD3DSleep(void* device)
         return -4; // NVAPI_API_NOT_INITIALIZED
 
     const int32_t result = real(device);
-    PublishSleepEvent(ReflexProbeProtocol::ReflexBackendNativeNvapiD3D,
+    PublishSleepEvent(ProbeProtocol::ReflexBackendNativeNvapiD3D,
         static_cast<LONG>(result));
     return result;
 }
@@ -793,7 +793,7 @@ void* __cdecl HookNvapiQueryInterface(uint32_t interfaceId)
         !HasStreamlineReflexBoundary()) {
         g_realNvapiD3DSetSleepMode =
             reinterpret_cast<PFunNvapiD3DSetSleepMode*>(function);
-        SetBackend(ReflexProbeProtocol::ReflexBackendNativeNvapiD3D);
+        SetBackend(ProbeProtocol::ReflexBackendNativeNvapiD3D);
         PublishReflexFunction(function, g_nvapiQueryInterceptionMethod);
         InterlockedExchange(&g_nativeNvapiCaptured, 1);
         return reinterpret_cast<void*>(&HookNvapiD3DSetSleepMode);
@@ -815,7 +815,7 @@ sl::Result HookReflexSleep(const sl::FrameToken& frame)
         return sl::Result::eErrorNotInitialized;
 
     const sl::Result result = real(frame);
-    PublishSleepEvent(ReflexProbeProtocol::ReflexBackendModernSetOptions,
+    PublishSleepEvent(ProbeProtocol::ReflexBackendModernSetOptions,
         static_cast<LONG>(result));
     return result;
 }
@@ -834,7 +834,7 @@ sl::Result HookReflexSetOptions(const sl::ReflexOptions& options)
     forwarded.frameLimitUs = effectiveUs;
 
     const sl::Result result = real(forwarded);
-    PublishSettingsEvent(ReflexProbeProtocol::ReflexBackendModernSetOptions,
+    PublishSettingsEvent(ProbeProtocol::ReflexBackendModernSetOptions,
         requestedMode, effectiveMode, options.frameLimitUs, effectiveUs,
         static_cast<LONG>(result));
     return result;
@@ -859,7 +859,7 @@ bool HookLegacySetFeatureConstants(uint32_t feature, const void* constants,
     forwarded.frameLimitUs = effectiveUs;
 
     const bool result = real(feature, &forwarded, frameIndex, id);
-    PublishSettingsEvent(ReflexProbeProtocol::ReflexBackendLegacyFeatureConstants,
+    PublishSettingsEvent(ProbeProtocol::ReflexBackendLegacyFeatureConstants,
         requestedMode, effectiveMode, requested->frameLimitUs,
         effectiveUs, result ? 0 : 1);
     return result;
@@ -883,7 +883,7 @@ bool HookLegacyPluginSetConstants(const void* constants, uint32_t frameIndex, ui
     forwarded.frameLimitUs = effectiveUs;
 
     const bool result = real(&forwarded, frameIndex, id);
-    PublishSettingsEvent(ReflexProbeProtocol::ReflexBackendLegacyPluginConstants,
+    PublishSettingsEvent(ProbeProtocol::ReflexBackendLegacyPluginConstants,
         requestedMode, effectiveMode, requested->frameLimitUs,
         effectiveUs, result ? 0 : 1);
     return result;
@@ -902,7 +902,7 @@ void* HookLegacyPluginGetFunction(const char* functionName)
     if (IsReflexProbingEnabled() && strcmp(functionName, "slSetConstants") == 0) {
         g_realLegacyPluginSetConstants =
             reinterpret_cast<PFunLegacyPluginSetConstants*>(function);
-        SetBackend(ReflexProbeProtocol::ReflexBackendLegacyPluginConstants);
+        SetBackend(ProbeProtocol::ReflexBackendLegacyPluginConstants);
         PublishReflexFunction(function,
             L"SL1 slGetPluginFunction via interposer GetProcAddress IAT");
         return reinterpret_cast<void*>(&HookLegacyPluginSetConstants);
@@ -928,15 +928,15 @@ FARPROC WINAPI HookInterposerGetProcAddress(HMODULE module, LPCSTR procName)
     if (!IsReflexProbingEnabled() || strcmp(procName, "slGetPluginFunction") != 0)
         return result;
 
-    wchar_t modulePath[ReflexProbeProtocol::kPathChars]{};
+    wchar_t modulePath[ProbeProtocol::kPathChars]{};
     if (!GetModulePath(module, modulePath, _countof(modulePath)) ||
         _wcsicmp(PathFileName(modulePath), L"sl.reflex.dll") != 0) {
         return result;
     }
 
     g_realLegacyPluginGetFunction = reinterpret_cast<PFunLegacyPluginGetFunction*>(result);
-    SetBackend(ReflexProbeProtocol::ReflexBackendLegacyPluginConstants);
-    PublishReflexModule(module, ReflexProbeProtocol::HookStateReflexFound,
+    SetBackend(ProbeProtocol::ReflexBackendLegacyPluginConstants);
+    PublishReflexModule(module, ProbeProtocol::HookStateReflexFound,
         L"SL1 slGetPluginFunction via interposer GetProcAddress IAT");
     return reinterpret_cast<FARPROC>(&HookLegacyPluginGetFunction);
 }
@@ -964,7 +964,7 @@ sl::Result HookGetFeatureFunction(sl::Feature feature, const char* functionName,
         function = reinterpret_cast<void*>(&HookFgGetState);
     } else if (IsReflexProbingEnabled() && strcmp(functionName, "slReflexSetOptions") == 0) {
         g_realReflexSetOptions = reinterpret_cast<PFun_slReflexSetOptions*>(function);
-        SetBackend(ReflexProbeProtocol::ReflexBackendModernSetOptions);
+        SetBackend(ProbeProtocol::ReflexBackendModernSetOptions);
         PublishReflexFunction(function, g_modernInterceptionMethod);
         function = reinterpret_cast<void*>(&HookReflexSetOptions);
         InterlockedExchange(&g_modernReflexCaptured, 1);
@@ -1009,7 +1009,7 @@ FARPROC WINAPI HookApplicationGetProcAddress(HMODULE module, LPCSTR procName)
     if (!streamlineName && !nvapiName && !presentationName)
         return result;
 
-    wchar_t modulePath[ReflexProbeProtocol::kPathChars]{};
+    wchar_t modulePath[ProbeProtocol::kPathChars]{};
     if (!GetModulePath(module, modulePath, _countof(modulePath)))
         return result;
 
@@ -1044,8 +1044,8 @@ FARPROC WINAPI HookApplicationGetProcAddress(HMODULE module, LPCSTR procName)
     g_realGetFeatureFunction = reinterpret_cast<PFun_slGetFeatureFunction*>(result);
     SetModernInterceptionMethodFromAddress(_ReturnAddress(), L"GetProcAddress IAT");
     if (IsReflexProbingEnabled()) {
-        SetBackend(ReflexProbeProtocol::ReflexBackendModernSetOptions);
-        PublishReflexModule(module, ReflexProbeProtocol::HookStateReflexFound,
+        SetBackend(ProbeProtocol::ReflexBackendModernSetOptions);
+        PublishReflexModule(module, ProbeProtocol::HookStateReflexFound,
             g_modernInterceptionMethod);
     }
     return reinterpret_cast<FARPROC>(&HookGetFeatureFunction);
@@ -1171,7 +1171,7 @@ bool PatchApplicationNvapiResolver(bool& armedAny)
                             L"NvAPI_D3D_SetSleepMode")) {
                         return false;
                     }
-                    SetBackend(ReflexProbeProtocol::ReflexBackendNativeNvapiD3D);
+                    SetBackend(ProbeProtocol::ReflexBackendNativeNvapiD3D);
                     PublishReflexFunction(current,
                         L"native NVAPI D3D SetSleepMode via application IAT");
                 }
@@ -1219,7 +1219,7 @@ bool IsPathUnderWindowsDirectory(const wchar_t* path)
 
 bool ShouldPatchGetProcAddressResolver(HMODULE module)
 {
-    wchar_t modulePath[ReflexProbeProtocol::kPathChars]{};
+    wchar_t modulePath[ProbeProtocol::kPathChars]{};
     if (!GetModulePath(module, modulePath, _countof(modulePath)))
         return false;
 
@@ -1380,10 +1380,10 @@ bool PatchLegacyPluginGatewayResolver(HMODULE module, bool& sawTarget,
                 return false;
             }
 
-            SetBackend(ReflexProbeProtocol::ReflexBackendLegacyPluginConstants);
+            SetBackend(ProbeProtocol::ReflexBackendLegacyPluginConstants);
             InterlockedExchange(&g_legacyPluginGatewayArmed, 1);
             if (g_shared)
-                InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateInterceptArmed);
+                InterlockedExchange(&g_shared->hookState, ProbeProtocol::HookStateInterceptArmed);
             return true;
         }
     }
@@ -1457,11 +1457,11 @@ bool PatchStreamlineImportsInModule(HMODULE module, bool& sawTarget,
                 }
 
                 if (IsReflexProbingEnabled())
-                    SetBackend(ReflexProbeProtocol::ReflexBackendModernSetOptions);
+                    SetBackend(ProbeProtocol::ReflexBackendModernSetOptions);
                 if (IsReflexProbingEnabled() &&
                     InterlockedCompareExchange(&g_shared->hookState, 0, 0) ==
-                        ReflexProbeProtocol::HookStateWaitingForDll) {
-                    InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateReflexFound);
+                        ProbeProtocol::HookStateWaitingForDll) {
+                    InterlockedExchange(&g_shared->hookState, ProbeProtocol::HookStateReflexFound);
                 }
                 continue;
             }
@@ -1482,7 +1482,7 @@ bool PatchStreamlineImportsInModule(HMODULE module, bool& sawTarget,
                     return false;
                 }
 
-                SetBackend(ReflexProbeProtocol::ReflexBackendLegacyFeatureConstants);
+                SetBackend(ProbeProtocol::ReflexBackendLegacyFeatureConstants);
                 PublishReflexFunction(legacySetConstants,
                     L"SL1 slSetFeatureConstants IAT");
             }
@@ -1541,7 +1541,7 @@ bool PatchLoadedStreamlineImports(bool& foundAny)
             FreeLibrary(heldModule);
 
             if (!patched || (g_shared && InterlockedCompareExchange(&g_shared->hookState, 0, 0) ==
-                    ReflexProbeProtocol::HookStateError)) {
+                    ProbeProtocol::HookStateError)) {
                 success = false;
                 break;
             }
@@ -1624,7 +1624,7 @@ DWORD WINAPI WorkerThread(void*)
         return 1;
     }
 
-    InterlockedExchange(&g_shared->hookState, ReflexProbeProtocol::HookStateWaitingForDll);
+    InterlockedExchange(&g_shared->hookState, ProbeProtocol::HookStateWaitingForDll);
 
     // Prefer already-loaded/static Streamline boundaries. Also arm GetProcAddress IATs
     // across loaded non-system game/engine/plugin modules so dynamically resolved

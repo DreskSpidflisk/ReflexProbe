@@ -18,7 +18,7 @@ constexpr DWORD kPostLoadVerificationPollMs = 5;
 
 void BuildMappingName(DWORD processId, wchar_t* out, size_t outCount)
 {
-    swprintf_s(out, outCount, L"%s%lu", ReflexProbeProtocol::kMappingPrefix, processId);
+    swprintf_s(out, outCount, L"%s%lu", ProbeProtocol::kMappingPrefix, processId);
 }
 
 const wchar_t* PathFileName(const wchar_t* path)
@@ -161,13 +161,13 @@ void LogBinaryIdentity()
 {
     wchar_t line[1200]{};
     swprintf_s(line, L"Source tag: %s | protocol %u",
-        ReflexProbeProtocol::kBuildTag, ReflexProbeProtocol::kVersion);
+        ProbeProtocol::kBuildTag, ProbeProtocol::kVersion);
     AppendStatusLine(line);
     swprintf_s(line, L"Controller build: %s", kControllerBuildStamp);
     AppendStatusLine(line);
 
-    wchar_t exePath[ReflexProbeProtocol::kPathChars]{};
-    wchar_t dllPath[ReflexProbeProtocol::kPathChars]{};
+    wchar_t exePath[ProbeProtocol::kPathChars]{};
+    wchar_t dllPath[ProbeProtocol::kPathChars]{};
     wchar_t hash[65]{};
 
     const DWORD exeChars = GetModuleFileNameW(nullptr, exePath, static_cast<DWORD>(_countof(exePath)));
@@ -388,14 +388,14 @@ bool CreateSharedState(DWORD processId, const wchar_t* targetPath,
     BuildMappingName(processId, mappingName, _countof(mappingName));
 
     g_app.mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
-        0, sizeof(ReflexProbeProtocol::SharedState), mappingName);
+        0, sizeof(ProbeProtocol::SharedState), mappingName);
     if (!g_app.mapping) {
         swprintf_s(error, errorCount, L"CreateFileMapping failed (%lu).", GetLastError());
         return false;
     }
 
-    g_app.shared = reinterpret_cast<ReflexProbeProtocol::SharedState*>(
-        MapViewOfFile(g_app.mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(ReflexProbeProtocol::SharedState)));
+    g_app.shared = reinterpret_cast<ProbeProtocol::SharedState*>(
+        MapViewOfFile(g_app.mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(ProbeProtocol::SharedState)));
     if (!g_app.shared) {
         swprintf_s(error, errorCount, L"MapViewOfFile failed (%lu).", GetLastError());
         CloseHandle(g_app.mapping);
@@ -404,12 +404,12 @@ bool CreateSharedState(DWORD processId, const wchar_t* targetPath,
     }
 
     ZeroMemory(g_app.shared, sizeof(*g_app.shared));
-    g_app.shared->magic = ReflexProbeProtocol::kMagic;
-    g_app.shared->version = ReflexProbeProtocol::kVersion;
+    g_app.shared->magic = ProbeProtocol::kMagic;
+    g_app.shared->version = ProbeProtocol::kVersion;
     g_app.shared->structSize = sizeof(*g_app.shared);
     g_app.shared->targetProcessId = processId;
-    g_app.shared->hookState = ReflexProbeProtocol::HookStateWaitingForDll;
-    g_app.shared->backend = ReflexProbeProtocol::ReflexBackendUnknown;
+    g_app.shared->hookState = ProbeProtocol::HookStateWaitingForDll;
+    g_app.shared->backend = ProbeProtocol::ReflexBackendUnknown;
     g_app.shared->overrideEnabled = overrideEnabled ? 1 : 0;
     g_app.shared->overrideUs = static_cast<LONG>(overrideUs);
     g_app.shared->forceBoostWhenOn = forceBoostWhenOn ? 1 : 0;
@@ -445,7 +445,7 @@ bool CreateSharedState(DWORD processId, const wchar_t* targetPath,
 struct ProcessMatch {
     DWORD processId = 0;
     DWORD parentProcessId = 0;
-    wchar_t imagePath[ReflexProbeProtocol::kPathChars]{};
+    wchar_t imagePath[ProbeProtocol::kPathChars]{};
 };
 
 double QpcMilliseconds(LONGLONG start, LONGLONG end)
@@ -512,7 +512,7 @@ bool FindMatchingProcess(const wchar_t* targetPath, ProcessMatch& match)
             if (_wcsicmp(entry.szExeFile, targetName) != 0)
                 continue;
 
-            wchar_t imagePath[ReflexProbeProtocol::kPathChars]{};
+            wchar_t imagePath[ProbeProtocol::kPathChars]{};
             if (!QueryProcessImagePath(entry.th32ProcessID, imagePath, _countof(imagePath)))
                 continue;
 
@@ -752,7 +752,7 @@ bool ArmProcessWatch(const wchar_t* targetPath, bool overrideEnabled, uint32_t o
         return false;
     }
 
-    wchar_t normalized[ReflexProbeProtocol::kPathChars]{};
+    wchar_t normalized[ProbeProtocol::kPathChars]{};
     if (!NormalizeTargetPath(targetPath, normalized, _countof(normalized))) {
         swprintf_s(error, errorCount, L"Could not normalize the selected game executable path.");
         return false;
@@ -890,7 +890,7 @@ bool AttachRunningProcess(const wchar_t* targetPath, bool overrideEnabled, uint3
         return false;
     }
 
-    wchar_t normalized[ReflexProbeProtocol::kPathChars]{};
+    wchar_t normalized[ProbeProtocol::kPathChars]{};
     if (!NormalizeTargetPath(targetPath, normalized, _countof(normalized))) {
         swprintf_s(error, errorCount, L"Could not normalize the selected game executable path.");
         return false;

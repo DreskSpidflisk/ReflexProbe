@@ -52,7 +52,7 @@ bool IsSelectedGameExecutableValid()
     if (!g_app.gamePath)
         return false;
 
-    wchar_t gamePath[ReflexProbeProtocol::kPathChars]{};
+    wchar_t gamePath[ProbeProtocol::kPathChars]{};
     GetWindowTextW(g_app.gamePath, gamePath, static_cast<int>(_countof(gamePath)));
     if (!gamePath[0])
         return false;
@@ -446,7 +446,7 @@ bool LaunchAndInject()
     if (g_app.process || g_app.watchArmed)
         return false;
 
-    wchar_t gamePath[ReflexProbeProtocol::kPathChars]{};
+    wchar_t gamePath[ProbeProtocol::kPathChars]{};
     wchar_t arguments[4096]{};
     GetWindowTextW(g_app.gamePath, gamePath, static_cast<int>(_countof(gamePath)));
     GetWindowTextW(g_app.arguments, arguments, static_cast<int>(_countof(arguments)));
@@ -498,7 +498,7 @@ bool LaunchAndInject()
         return false;
     }
 
-    wchar_t workingDirectory[ReflexProbeProtocol::kPathChars]{};
+    wchar_t workingDirectory[ProbeProtocol::kPathChars]{};
     PathDirectory(gamePath, workingDirectory, _countof(workingDirectory));
 
     wchar_t commandLine[32768]{};
@@ -711,7 +711,7 @@ bool ToggleWatchAndInject()
         return true;
     }
 
-    wchar_t gamePath[ReflexProbeProtocol::kPathChars]{};
+    wchar_t gamePath[ProbeProtocol::kPathChars]{};
     bool overrideEnabled = false;
     uint32_t overrideUs = 0;
     bool forceBoostWhenOn = false;
@@ -740,7 +740,7 @@ bool ToggleWatchAndInject()
 
 bool AttachToRunningTarget()
 {
-    wchar_t gamePath[ReflexProbeProtocol::kPathChars]{};
+    wchar_t gamePath[ProbeProtocol::kPathChars]{};
     bool overrideEnabled = false;
     uint32_t overrideUs = 0;
     bool forceBoostWhenOn = false;
@@ -769,7 +769,7 @@ bool AttachToRunningTarget()
 
 void BrowseForGame()
 {
-    wchar_t path[ReflexProbeProtocol::kPathChars]{};
+    wchar_t path[ProbeProtocol::kPathChars]{};
     GetWindowTextW(g_app.gamePath, path, static_cast<int>(_countof(path)));
 
     OPENFILENAMEW dialog{};

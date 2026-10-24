@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <stdlib.h> // MSVC _countof
 
-namespace ReflexProbeProtocol {
+namespace ProbeProtocol {
 
 constexpr uint32_t kMagic = 0x31505246; // "FRP1" little-endian.
 constexpr uint32_t kVersion = 17;
@@ -173,4 +173,4 @@ struct SharedState {
     ReflexEvent events[kEventCapacity];
 };
 
-} // namespace ReflexProbeProtocol
+} // namespace ProbeProtocol

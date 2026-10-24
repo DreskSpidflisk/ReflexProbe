@@ -19,7 +19,7 @@ const wchar_t* PresentationOriginName(uint32_t method)
 void FormatPresentationEvent(const CapturedReflexEvent& event, wchar_t* line, size_t count)
 {
     const auto& p = event.presentation;
-    if (event.kind == ReflexProbeProtocol::PresentationEventSwapChain) {
+    if (event.kind == ProbeProtocol::PresentationEventSwapChain) {
         swprintf_s(line, count,
             L"DXGI swap chain 0x%llX: %s, %ux%u, %u buffers, format=%u, swapEffect=%u, flags=0x%X, GetDesc=0x%08X",
             static_cast<unsigned long long>(p.swapChain), PresentationOriginName(p.method),
@@ -67,7 +67,7 @@ void AppendPresentationRepeat(const PresentationStateRun& run, LONGLONG qpc)
 
 void HandlePresentationEvent(const CapturedReflexEvent& event)
 {
-    if (event.kind == ReflexProbeProtocol::PresentationEventSwapChain) {
+    if (event.kind == ProbeProtocol::PresentationEventSwapChain) {
         // A resized or replaced chain starts a new visible presentation interval.
         for (auto& run : g_app.presentationRuns) {
             if (run.used && run.swapChain == event.presentation.swapChain) {

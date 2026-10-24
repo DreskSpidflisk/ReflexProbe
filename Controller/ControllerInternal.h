@@ -100,8 +100,8 @@ struct CapturedReflexEvent {
     LONG backend;
     uint32_t requestedUs;
     uint32_t effectiveUs;
-    ReflexProbeProtocol::FgEventData fg{};
-    ReflexProbeProtocol::PresentationEventData presentation{};
+    ProbeProtocol::FgEventData fg{};
+    ProbeProtocol::PresentationEventData presentation{};
 };
 
 struct FgStateRun {
@@ -187,7 +187,7 @@ struct AppState {
     HANDLE process = nullptr;
     DWORD processId = 0;
     HANDLE mapping = nullptr;
-    ReflexProbeProtocol::SharedState* shared = nullptr;
+    ProbeProtocol::SharedState* shared = nullptr;
 
     LONG lastHookState = -1;
     LONG lastFgHookBits = 0;
@@ -215,7 +215,7 @@ struct AppState {
     bool presentLabelAllowTearing = false;
 
     bool watchArmed = false;
-    wchar_t watchTargetPath[ReflexProbeProtocol::kPathChars]{};
+    wchar_t watchTargetPath[ProbeProtocol::kPathChars]{};
     bool watchOverrideEnabled = false;
     uint32_t watchOverrideUs = 0;
     bool watchForceBoostWhenOn = false;

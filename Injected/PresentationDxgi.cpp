@@ -39,7 +39,7 @@ using Present = HRESULT (STDMETHODCALLTYPE)(IDXGISwapChain*, UINT, UINT);
 using Present1 = HRESULT (STDMETHODCALLTYPE)(IDXGISwapChain1*, UINT, UINT, const DXGI_PRESENT_PARAMETERS*);
 using Resize = HRESULT (STDMETHODCALLTYPE)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
 
-ReflexProbeProtocol::SharedState* g_shared = nullptr;
+ProbeProtocol::SharedState* g_shared = nullptr;
 Factory0* g_factory0 = nullptr;
 Factory0* g_factory1 = nullptr;
 Factory2* g_factory2 = nullptr;
@@ -263,21 +263,21 @@ bool HookSlot(void* instance, size_t index, void* replacement)
     return exchanged == previous;
 }
 
-void Publish(LONG kind, const ReflexProbeProtocol::PresentationEventData& data, HRESULT result)
+void Publish(LONG kind, const ProbeProtocol::PresentationEventData& data, HRESULT result)
 {
     if (!g_shared)
         return;
     const LONG count = InterlockedIncrement(&g_shared->presentationCallSerial);
     const LONG serial = InterlockedIncrement(&g_shared->eventSerial);
     auto& event = g_shared->events[static_cast<uint32_t>(serial - 1) %
-        ReflexProbeProtocol::kEventCapacity];
+        ProbeProtocol::kEventCapacity];
     InterlockedExchange(&event.sequence, 0);
     LARGE_INTEGER qpc{};
     QueryPerformanceCounter(&qpc);
     event.qpc = qpc.QuadPart;
     event.kind = kind;
     event.callSequence = count;
-    event.backend = ReflexProbeProtocol::ReflexBackendUnknown;
+    event.backend = ProbeProtocol::ReflexBackendUnknown;
     event.requestedMode = 0;
     event.effectiveMode = 0;
     event.requestedUs = 0;
@@ -291,7 +291,7 @@ void PublishChain(IDXGISwapChain* chain, uint32_t method)
 {
     if (!g_shared || !chain)
         return;
-    ReflexProbeProtocol::PresentationEventData data{};
+    ProbeProtocol::PresentationEventData data{};
     data.swapChain = reinterpret_cast<uint64_t>(chain);
     data.method = method;
     DXGI_SWAP_CHAIN_DESC desc{};
@@ -304,7 +304,7 @@ void PublishChain(IDXGISwapChain* chain, uint32_t method)
         data.swapEffect = static_cast<uint32_t>(desc.SwapEffect);
         data.creationFlags = desc.Flags;
     }
-    Publish(ReflexProbeProtocol::PresentationEventSwapChain, data, result);
+    Publish(ProbeProtocol::PresentationEventSwapChain, data, result);
 }
 
 // Present policy reads use acquire semantics; disabled checkboxes preserve both arguments.
@@ -374,7 +374,7 @@ HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* chain, UINT interval, UINT
         return DXGI_ERROR_INVALID_CALL;
     const ForwardedPresent forwarded = ApplyPresentationPolicy(chain, interval, flags);
     const HRESULT result = real(chain, forwarded.interval, forwarded.flags);
-    ReflexProbeProtocol::PresentationEventData data{};
+    ProbeProtocol::PresentationEventData data{};
     data.swapChain = reinterpret_cast<uint64_t>(chain);
     data.method = 0;
     data.syncInterval = interval;
@@ -382,7 +382,7 @@ HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* chain, UINT interval, UINT
     data.forwardedSyncInterval = forwarded.interval;
     data.forwardedPresentFlags = forwarded.flags;
     data.overrideNotes = forwarded.notes;
-    Publish(ReflexProbeProtocol::PresentationEventPresent, data, result);
+    Publish(ProbeProtocol::PresentationEventPresent, data, result);
     return result;
 }
 
@@ -394,7 +394,7 @@ HRESULT STDMETHODCALLTYPE HookPresent1(
         return DXGI_ERROR_INVALID_CALL;
     const ForwardedPresent forwarded = ApplyPresentationPolicy(chain, interval, flags);
     const HRESULT result = real(chain, forwarded.interval, forwarded.flags, parameters);
-    ReflexProbeProtocol::PresentationEventData data{};
+    ProbeProtocol::PresentationEventData data{};
     data.swapChain = reinterpret_cast<uint64_t>(chain);
     data.method = 1;
     data.syncInterval = interval;
@@ -402,7 +402,7 @@ HRESULT STDMETHODCALLTYPE HookPresent1(
     data.forwardedSyncInterval = forwarded.interval;
     data.forwardedPresentFlags = forwarded.flags;
     data.overrideNotes = forwarded.notes;
-    Publish(ReflexProbeProtocol::PresentationEventPresent, data, result);
+    Publish(ProbeProtocol::PresentationEventPresent, data, result);
     return result;
 }
 
@@ -624,7 +624,7 @@ bool IsDynamicExportName(const char* name)
     return false;
 }
 
-bool Initialize(ReflexProbeProtocol::SharedState* shared)
+bool Initialize(ProbeProtocol::SharedState* shared)
 {
     // Do not allocate an FLS slot or touch thread caches unless this probe
     // was explicitly enabled during acquisition.
