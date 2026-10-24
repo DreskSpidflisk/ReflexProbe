@@ -36,7 +36,7 @@
     <ClCompile Include="Capture.cpp" />
     <ClCompile Include="PresentationCapture.cpp" />
     <ClCompile Include="Process.cpp" />
-    <ClCompile Include="ReflexProbe.cpp" />
+    <ClCompile Include="ControllerMain.cpp" />
     <ClCompile Include="Status.cpp" />
   </ItemGroup>
   <ItemGroup>
